@@ -106,22 +106,6 @@ body {
   overflow-x: hidden;
 }
 
-/* 背景网格效果 - 轻工业浅色 */
-body::before {
-  content: '';
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background-image: 
-    linear-gradient(rgba(148, 163, 184, 0.12) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(148, 163, 184, 0.12) 1px, transparent 1px);
-  background-size: 24px 24px;
-  pointer-events: none;
-  z-index: -1;
-}
-
 /* ============================================
    Typography
    ============================================ */
@@ -419,6 +403,22 @@ code {
   gap: 1rem;
 }
 
+.header-right .mr-1 {
+  margin-right: 0.5rem;
+}
+
+.user-dropdown .user-trigger {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+}
+
+.user-avatar {
+  background: var(--el-color-primary);
+  color: #fff;
+  font-size: 0.75rem;
+}
+
 .stats-bar {
   display: flex;
   gap: 1.5rem;
@@ -451,16 +451,23 @@ code {
 /* Content Area */
 .content-area {
   flex: 1;
+  min-height: 0;
   padding: 1.5rem;
   overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
 }
 
 /* ============================================
    Page Components
    ============================================ */
 .page-container {
-  max-width: 1400px;
-  margin: 0 auto;
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .page-header {

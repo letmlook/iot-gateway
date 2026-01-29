@@ -342,6 +342,34 @@ pub async fn add_tag(
     Ok(Json(t))
 }
 
+#[derive(Deserialize)]
+pub struct BatchAddTagsReq {
+    pub tags: Vec<AddTagReq>,
+}
+
+pub async fn batch_add_tags(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<BatchAddTagsReq>,
+) -> Result<Json<Vec<Tag>>, (StatusCode, String)> {
+    let nid = parse_node_id(&id).map_err(|(s, m)| (s, m.to_string()))?;
+    let mut created = Vec::with_capacity(req.tags.len());
+    for r in req.tags {
+        let mut t = Tag::new(r.name, r.address, r.group_id);
+        t.attr = r.attr.unwrap_or(gateway_sdk::TagAttr::Read);
+        t.data_type = r.data_type;
+        t.description = r.description;
+        state
+            .manager
+            .tag_add_validated(nid, t.clone())
+            .await
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        created.push(t);
+    }
+    state.persist().await;
+    Ok(Json(created))
+}
+
 pub async fn get_tag(
     State(state): State<AppState>,
     Path((id, tid)): Path<(String, String)>,

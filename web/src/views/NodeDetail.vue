@@ -2,8 +2,9 @@
 import { ref, onMounted, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Back, Setting, VideoPlay, VideoPause, Plus, Edit, Delete, RefreshRight } from '@element-plus/icons-vue'
+import { Back, Setting, VideoPlay, VideoPause, Plus, Edit, Delete, RefreshRight, EditPen } from '@element-plus/icons-vue'
 import { api } from '../api.js'
+import NodeConfigForm from '../components/NodeConfigForm.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -25,15 +26,30 @@ const showGroupModal = ref(false)
 const showTagModal = ref(false)
 const showSubModal = ref(false)
 const showSettingModal = ref(false)
+const showNameModal = ref(false)
 const editingGroup = ref(null)
 const editingTag = ref(null)
+const editNameValue = ref('')
 
 // 表单数据
 const groupForm = ref({ name: '', interval_ms: 1000, description: '' })
-const tagForm = ref({ name: '', group_id: '', data_type: 'Float64', address: '', description: '' })
+const tagForm = ref({ name: '', group_id: '', data_type: 'Float64', address: '', attr: 'read', description: '' })
+const attrOptions = [
+  { value: 'read', label: 'Read' },
+  { value: 'write', label: 'Write' },
+  { value: 'readwrite', label: 'ReadWrite' }
+]
+const showBatchTagModal = ref(false)
+const batchTagGroupId = ref('')
+const batchTagRows = ref([{ name: '', data_type: 'Float64', address: '', attr: 'read', description: '' }])
 const settingForm = ref('')
+/** 节点配置弹窗：表单模式下的配置对象（由 NodeConfigForm 填充） */
+const settingConfigFromForm = ref({})
+/** 节点配置弹窗：表单 / JSON 模式 */
+const settingEditMode = ref('json') // 'form' | 'json'
 const subForm = ref({ south_node_id: '', group_id: '' })
 const southGroups = ref([])
+const groupsBySouth = ref({})
 
 const dataTypes = ['Bool', 'Int8', 'Int16', 'Int32', 'Int64', 'UInt8', 'UInt16', 'UInt32', 'UInt64', 'Float32', 'Float64', 'String', 'Bytes']
 
@@ -74,6 +90,19 @@ async function loadTags() {
 async function loadSubscriptions() {
   try {
     subscriptions.value = await api.subscriptions(nodeId.value)
+    if (isNorth.value && subscriptions.value.length) {
+      const sids = [...new Set(subscriptions.value.map(s => s.south_node_id))]
+      for (const sid of sids) {
+        if (!groupsBySouth.value[sid]) {
+          try {
+            const gs = await api.groups(sid)
+            groupsBySouth.value[sid] = gs
+          } catch {
+            groupsBySouth.value[sid] = []
+          }
+        }
+      }
+    }
   } catch (e) {
     console.error('加载订阅失败', e)
   }
@@ -148,6 +177,7 @@ function openTagModal(tag = null) {
       group_id: tag.group_id,
       data_type: tag.data_type || 'Float64',
       address: tag.address || '',
+      attr: (tag.attr || 'read').toLowerCase(),
       description: tag.description || ''
     }
   } else {
@@ -156,6 +186,7 @@ function openTagModal(tag = null) {
       group_id: groups.value[0]?.id || '',
       data_type: 'Float64',
       address: '',
+      attr: 'read',
       description: ''
     }
   }
@@ -164,10 +195,11 @@ function openTagModal(tag = null) {
 
 async function saveTag() {
   try {
+    const payload = { ...tagForm.value, attr: tagForm.value.attr }
     if (editingTag.value) {
-      await api.updateTag(nodeId.value, editingTag.value.id, tagForm.value)
+      await api.updateTag(nodeId.value, editingTag.value.id, payload)
     } else {
-      await api.createTag(nodeId.value, tagForm.value)
+      await api.createTag(nodeId.value, payload)
     }
     showTagModal.value = false
     await loadTags()
@@ -226,7 +258,7 @@ watch(() => subForm.value.south_node_id, (newVal) => {
 async function addSubscription() {
   if (!subForm.value.south_node_id || !subForm.value.group_id) return
   try {
-    const newSubs = [...subscriptions.value, [subForm.value.south_node_id, subForm.value.group_id]]
+    const newSubs = [...subscriptions.value, { south_node_id: subForm.value.south_node_id, group_id: subForm.value.group_id }]
     await api.setSubscriptions(nodeId.value, newSubs)
     showSubModal.value = false
     await loadSubscriptions()
@@ -240,7 +272,7 @@ async function removeSub(index) {
   try {
     await ElMessageBox.confirm('确定取消该订阅？', '确认', { type: 'warning', confirmButtonText: '取消订阅', cancelButtonText: '返回' })
     const newSubs = subscriptions.value.filter((_, i) => i !== index)
-    await api.setSubscriptions(nodeId.value, newSubs)
+    await api.setSubscriptions(nodeId.value, newSubs) // subscriptions 为 [{ south_node_id, group_id }]
     await loadSubscriptions()
     ElMessage.success('已取消订阅')
   } catch (e) {
@@ -250,19 +282,47 @@ async function removeSub(index) {
 
 // 节点配置
 async function openSettingModal() {
+  if (!node.value) return
   try {
     const setting = await api.nodeSetting(nodeId.value)
+    const configObj = setting?.config || {}
     settingForm.value = JSON.stringify(setting, null, 2)
+    settingConfigFromForm.value = { ...configObj }
+    const pluginName = node.value.plugin_name
+    const kind = isNorth.value ? 'north' : 'south'
+    try {
+      const schema = kind === 'south'
+        ? await api.pluginSouthSchema(pluginName)
+        : await api.pluginNorthSchema(pluginName)
+      settingEditMode.value = (schema && schema.params && schema.params.length > 0) ? 'form' : 'json'
+    } catch {
+      settingEditMode.value = 'json'
+    }
     showSettingModal.value = true
   } catch (e) {
     error.value = '获取配置失败: ' + e.message
   }
 }
 
+watch(settingEditMode, (mode) => {
+  if (mode === 'json' && Object.keys(settingConfigFromForm.value).length > 0) {
+    settingForm.value = JSON.stringify({ config: settingConfigFromForm.value }, null, 2)
+  }
+})
+
+function onSettingConfigFromForm(v) {
+  settingConfigFromForm.value = v
+}
+
 async function saveSetting() {
   try {
-    const config = JSON.parse(settingForm.value)
-    await api.updateNodeSetting(nodeId.value, config)
+    let body
+    if (settingEditMode.value === 'form') {
+      body = { config: { ...settingConfigFromForm.value } }
+    } else {
+      body = JSON.parse(settingForm.value)
+    }
+    await api.updateNodeSetting(nodeId.value, body)
     showSettingModal.value = false
     await loadNode()
     ElMessage.success('配置已保存')
@@ -286,12 +346,88 @@ async function toggleNode() {
   }
 }
 
+// 编辑节点名称（对标 Neuron Update node）
+function openNameModal() {
+  editNameValue.value = node.value?.name || ''
+  showNameModal.value = true
+}
+
+async function saveNodeName() {
+  const name = (editNameValue.value || '').trim()
+  if (!name) {
+    ElMessage.warning('名称不能为空')
+    return
+  }
+  try {
+    await api.updateNode(nodeId.value, { name })
+    showNameModal.value = false
+    await loadNode()
+    ElMessage.success('名称已更新')
+  } catch (e) {
+    error.value = '更新名称失败: ' + e.message
+  }
+}
+
 function getGroupName(gid) {
   return groups.value.find(g => g.id === gid)?.name || gid.slice(0, 8)
 }
 
+function goToGroupTags(group) {
+  activeTab.value = 'tags'
+  // 可选：前端过滤只显示该组点位，这里不过滤，仅切换 tab
+}
+
+function openBatchTagModal() {
+  batchTagGroupId.value = groups.value[0]?.id || ''
+  batchTagRows.value = [{ name: '', data_type: 'Float64', address: '', attr: 'read', description: '' }]
+  showBatchTagModal.value = true
+}
+
+function addBatchTagRow() {
+  batchTagRows.value.push({ name: '', data_type: 'Float64', address: '', attr: 'read', description: '' })
+}
+
+function removeBatchTagRow(index) {
+  if (batchTagRows.value.length <= 1) return
+  batchTagRows.value.splice(index, 1)
+}
+
+async function saveBatchTags() {
+  const valid = batchTagRows.value.filter(r => r.name && r.address)
+  if (!valid.length) {
+    ElMessage.warning('请至少填写一行名称与地址')
+    return
+  }
+  if (!batchTagGroupId.value) {
+    ElMessage.warning('请选择组')
+    return
+  }
+  try {
+    const payload = valid.map(r => ({
+      name: r.name,
+      address: r.address,
+      group_id: batchTagGroupId.value,
+      data_type: r.data_type || 'Float64',
+      attr: r.attr || 'read',
+      description: r.description || undefined
+    }))
+    await api.batchCreateTags(nodeId.value, payload)
+    showBatchTagModal.value = false
+    await loadTags()
+    ElMessage.success(`已创建 ${payload.length} 个点位`)
+  } catch (e) {
+    error.value = '批量创建失败: ' + e.message
+  }
+}
+
 function getSouthNodeName(sid) {
   return southNodes.value.find(n => n.id === sid)?.name || sid.slice(0, 8)
+}
+
+function getSouthGroupName(sid, gid) {
+  const gs = groupsBySouth.value[sid] || []
+  const g = gs.find(x => x.id === gid)
+  return g?.name || (typeof gid === 'string' ? gid.slice(0, 8) : '-')
 }
 
 onMounted(loadNode)
@@ -305,6 +441,7 @@ watch(nodeId, loadNode)
         <el-button :icon="Back" @click="router.push(isNorth ? '/north' : '/south')">返回</el-button>
         <div class="node-info">
           <h2 class="node-name">{{ node.name }}</h2>
+          <el-button type="primary" link size="small" :icon="EditPen" @click="openNameModal">编辑名称</el-button>
           <el-tag size="small" type="info">{{ node.plugin_name }}</el-tag>
           <el-tag :type="node.state === 'running' ? 'success' : node.state === 'error' ? 'danger' : 'info'" size="small" effect="light">
             {{ node.state === 'running' ? '运行中' : node.state === 'error' ? '错误' : '已停止' }}
@@ -335,19 +472,20 @@ watch(nodeId, loadNode)
           <el-button type="primary" size="small" :icon="Plus" @click="openGroupModal()">添加组</el-button>
         </div>
         <el-table v-if="groups.length" :data="groups" size="small" stripe>
-          <el-table-column prop="name" label="名称" min-width="120" />
-          <el-table-column label="采集间隔" width="110">
-            <template #default="{ row }">{{ row.interval_ms || 1000 }} ms</template>
+          <el-table-column prop="name" label="组名称" min-width="120" />
+          <el-table-column label="点位数量" width="100">
+            <template #default="{ row }">{{ tags.filter(t => t.group_id === row.id).length }}</template>
+          </el-table-column>
+          <el-table-column label="间隔(ms)" width="100">
+            <template #default="{ row }">{{ row.interval_ms || 1000 }}</template>
           </el-table-column>
           <el-table-column prop="description" label="描述" show-overflow-tooltip>
             <template #default="{ row }">{{ row.description || '-' }}</template>
           </el-table-column>
-          <el-table-column label="标签数" width="80">
-            <template #default="{ row }">{{ tags.filter(t => t.group_id === row.id).length }}</template>
-          </el-table-column>
-          <el-table-column label="操作" width="120" fixed="right">
+          <el-table-column label="操作" width="160" fixed="right">
             <template #default="{ row }">
               <el-button type="primary" link size="small" :icon="Edit" @click="openGroupModal(row)">编辑</el-button>
+              <el-button type="primary" link size="small" @click="goToGroupTags(row)">点位列表</el-button>
               <el-button type="danger" link size="small" :icon="Delete" @click="deleteGroup(row.id)">删除</el-button>
             </template>
           </el-table-column>
@@ -360,26 +498,39 @@ watch(nodeId, loadNode)
           <h3>数据标签</h3>
           <div class="header-actions">
             <el-button size="small" :icon="RefreshRight" :loading="readingTags" :disabled="!tags.length" @click="readAllTags">{{ readingTags ? '读取中...' : '读取全部' }}</el-button>
-            <el-button type="primary" size="small" :icon="Plus" :disabled="!groups.length" @click="openTagModal()">添加标签</el-button>
+            <el-button size="small" :disabled="!groups.length" @click="openBatchTagModal()">批量添加</el-button>
+            <el-button type="primary" size="small" :icon="Plus" :disabled="!groups.length" @click="openTagModal()">添加点位</el-button>
           </div>
         </div>
         <el-alert v-if="!groups.length" type="warning" title="请先创建点位组，再添加标签。" show-icon class="mb-2" />
         <el-table v-else-if="tags.length" :data="tags" size="small" stripe>
           <el-table-column prop="name" label="名称" min-width="100" />
-          <el-table-column label="所属组" width="100">
-            <template #default="{ row }">{{ getGroupName(row.group_id) }}</template>
-          </el-table-column>
-          <el-table-column label="数据类型" width="90">
-            <template #default="{ row }"><el-tag size="small" type="info">{{ row.data_type }}</el-tag></template>
-          </el-table-column>
-          <el-table-column prop="address" label="地址" width="100">
+          <el-table-column prop="address" label="地址" width="120">
             <template #default="{ row }"><span class="font-mono">{{ row.address || '-' }}</span></template>
+          </el-table-column>
+          <el-table-column label="类型" width="90">
+            <template #default="{ row }"><el-tag size="small" type="info">{{ row.data_type || '-' }}</el-tag></template>
+          </el-table-column>
+          <el-table-column label="属性" width="80">
+            <template #default="{ row }">{{ row.attr === 'write' ? 'Write' : row.attr === 'readwrite' ? 'ReadWrite' : 'Read' }}</template>
+          </el-table-column>
+          <el-table-column label="乘系数" width="80">
+            <template #default>-</template>
+          </el-table-column>
+          <el-table-column label="偏移量" width="80">
+            <template #default>-</template>
+          </el-table-column>
+          <el-table-column label="精度" width="70">
+            <template #default>-</template>
           </el-table-column>
           <el-table-column label="当前值" min-width="100">
             <template #default="{ row }">
               <span v-if="tagValues[row.id] !== undefined">{{ typeof tagValues[row.id] === 'object' ? JSON.stringify(tagValues[row.id]) : tagValues[row.id] }}</span>
               <span v-else class="text-muted">-</span>
             </template>
+          </el-table-column>
+          <el-table-column prop="description" label="描述" min-width="80" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.description || '-' }}</template>
           </el-table-column>
           <el-table-column label="操作" width="120" fixed="right">
             <template #default="{ row }">
@@ -399,10 +550,10 @@ watch(nodeId, loadNode)
         <el-alert v-if="!southNodes.length" type="warning" title="暂无可订阅的南向设备，请先创建南向设备。" show-icon class="mb-2" />
         <el-table v-else-if="subscriptions.length" :data="subscriptions" size="small" stripe>
           <el-table-column label="南向设备" min-width="120">
-            <template #default="{ row }">{{ getSouthNodeName(row[0]) }}</template>
+            <template #default="{ row }">{{ getSouthNodeName(row.south_node_id) }}</template>
           </el-table-column>
-          <el-table-column label="订阅组" width="120">
-            <template #default="{ row }">{{ row[1].slice(0, 8) }}...</template>
+          <el-table-column label="订阅组" min-width="120">
+            <template #default="{ row }">{{ getSouthGroupName(row.south_node_id, row.group_id) }}</template>
           </el-table-column>
           <el-table-column label="操作" width="100" fixed="right">
             <template #default="scope">
@@ -432,9 +583,9 @@ watch(nodeId, loadNode)
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showTagModal" :title="editingTag ? '编辑标签' : '添加标签'" width="440px" destroy-on-close>
+    <el-dialog v-model="showTagModal" :title="editingTag ? '编辑标签' : '添加点位'" width="440px" destroy-on-close>
       <el-form :model="tagForm" label-width="100px" label-position="top">
-        <el-form-item label="标签名称" required>
+        <el-form-item label="名称" required>
           <el-input v-model="tagForm.name" placeholder="例如：temperature" clearable />
         </el-form-item>
         <el-form-item label="所属组" required>
@@ -442,13 +593,18 @@ watch(nodeId, loadNode)
             <el-option v-for="g in groups" :key="g.id" :label="g.name" :value="g.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="数据类型">
+        <el-form-item label="类型">
           <el-select v-model="tagForm.data_type" placeholder="请选择" style="width: 100%">
             <el-option v-for="dt in dataTypes" :key="dt" :label="dt" :value="dt" />
           </el-select>
         </el-form-item>
-        <el-form-item label="地址">
+        <el-form-item label="地址" required>
           <el-input v-model="tagForm.address" placeholder="根据驱动协议填写" clearable class="font-mono" />
+        </el-form-item>
+        <el-form-item label="属性">
+          <el-select v-model="tagForm.attr" placeholder="请选择" style="width: 100%">
+            <el-option v-for="a in attrOptions" :key="a.value" :label="a.label" :value="a.value" />
+          </el-select>
         </el-form-item>
         <el-form-item label="描述">
           <el-input v-model="tagForm.description" placeholder="可选" clearable />
@@ -456,7 +612,58 @@ watch(nodeId, loadNode)
       </el-form>
       <template #footer>
         <el-button @click="showTagModal = false">取消</el-button>
-        <el-button type="primary" :disabled="!tagForm.name || !tagForm.group_id" @click="saveTag">保存</el-button>
+        <el-button type="primary" :disabled="!tagForm.name || !tagForm.group_id || !tagForm.address" @click="saveTag">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="showBatchTagModal" title="批量添加点位" width="800px" destroy-on-close>
+      <el-form label-position="top">
+        <el-form-item label="选择组" required>
+          <el-select v-model="batchTagGroupId" placeholder="请选择" style="width: 100%">
+            <el-option v-for="g in groups" :key="g.id" :label="g.name" :value="g.id" />
+          </el-select>
+        </el-form-item>
+        <el-table :data="batchTagRows" size="small" border>
+          <el-table-column label="*名称" width="120">
+            <template #default="{ row, $index }">
+              <el-input v-model="row.name" placeholder="名称" size="small" />
+            </template>
+          </el-table-column>
+          <el-table-column label="*类型" width="100">
+            <template #default="{ row }">
+              <el-select v-model="row.data_type" placeholder="类型" size="small" style="width: 100%">
+                <el-option v-for="dt in dataTypes" :key="dt" :label="dt" :value="dt" />
+              </el-select>
+            </template>
+          </el-table-column>
+          <el-table-column label="*地址" width="120">
+            <template #default="{ row }">
+              <el-input v-model="row.address" placeholder="地址" size="small" class="font-mono" />
+            </template>
+          </el-table-column>
+          <el-table-column label="*属性" width="100">
+            <template #default="{ row }">
+              <el-select v-model="row.attr" size="small" style="width: 100%">
+                <el-option v-for="a in attrOptions" :key="a.value" :label="a.label" :value="a.value" />
+              </el-select>
+            </template>
+          </el-table-column>
+          <el-table-column label="描述" min-width="100">
+            <template #default="{ row }">
+              <el-input v-model="row.description" placeholder="可选" size="small" />
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="90" fixed="right">
+            <template #default="{ $index }">
+              <el-button type="danger" link size="small" :disabled="batchTagRows.length <= 1" @click="removeBatchTagRow($index)">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <el-button type="primary" text :icon="Plus" class="mt-1" @click="addBatchTagRow">+ 添加</el-button>
+      </el-form>
+      <template #footer>
+        <el-button @click="showBatchTagModal = false">取消</el-button>
+        <el-button type="primary" @click="saveBatchTags">创建</el-button>
       </template>
     </el-dialog>
 
@@ -480,11 +687,41 @@ watch(nodeId, loadNode)
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showSettingModal" title="节点配置" width="560px" destroy-on-close>
-      <el-input v-model="settingForm" type="textarea" :rows="14" class="font-mono" />
+    <el-dialog v-model="showSettingModal" title="节点配置" width="600px" destroy-on-close>
+      <el-radio-group v-model="settingEditMode" size="small" class="setting-mode-group">
+        <el-radio-button value="form">表单</el-radio-button>
+        <el-radio-button value="json">JSON</el-radio-button>
+      </el-radio-group>
+      <template v-if="settingEditMode === 'form' && node">
+        <NodeConfigForm
+          :plugin-name="node.plugin_name"
+          :kind="isNorth ? 'north' : 'south'"
+          :model-value="settingConfigFromForm"
+          @update:model-value="onSettingConfigFromForm"
+        />
+      </template>
+      <el-input
+        v-else
+        v-model="settingForm"
+        type="textarea"
+        :rows="14"
+        class="font-mono setting-json-input"
+      />
       <template #footer>
         <el-button @click="showSettingModal = false">取消</el-button>
         <el-button type="primary" @click="saveSetting">保存配置</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="showNameModal" title="编辑节点名称" width="400px" destroy-on-close>
+      <el-form label-position="top">
+        <el-form-item label="名称">
+          <el-input v-model="editNameValue" placeholder="输入节点名称" clearable />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showNameModal = false">取消</el-button>
+        <el-button type="primary" :disabled="!editNameValue?.trim()" @click="saveNodeName">保存</el-button>
       </template>
     </el-dialog>
   </div>
@@ -492,6 +729,7 @@ watch(nodeId, loadNode)
 
 <style scoped>
 .mb-2 { margin-bottom: 1rem; }
+.mt-1 { margin-top: 0.5rem; }
 .detail-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; margin-bottom: 1rem; }
 .detail-header .header-left { display: flex; align-items: center; gap: 1rem; }
 .detail-header .header-right { display: flex; gap: 0.5rem; }
@@ -503,4 +741,6 @@ watch(nodeId, loadNode)
 .font-mono { font-family: var(--font-mono); }
 .text-muted { color: var(--text-muted); }
 .detail-tabs { margin-top: 0.5rem; }
+.setting-mode-group { margin-bottom: 1rem; }
+.setting-json-input { margin-top: 0.5rem; }
 </style>

@@ -14,16 +14,16 @@ const loading = ref(false)
 const error = ref('')
 const activeTab = ref('south')
 
-const showSchemaModal = ref(false)
-const schemaTitle = ref('')
-const schemaKind = ref(null)
-const schemaData = ref(null)
-const schemaLoading = ref(false)
+
+const pluginSearch = ref('')
 
 const plugins = computed(() => {
-  return activeTab.value === 'south'
+  const list = activeTab.value === 'south'
     ? southPlugins.value.map(([name, desc, ver]) => ({ name, description: desc, version: ver, kind: 'south' }))
     : northPlugins.value.map(([name, desc, ver]) => ({ name, description: desc, version: ver, kind: 'north' }))
+  if (!pluginSearch.value.trim()) return list
+  const k = pluginSearch.value.trim().toLowerCase()
+  return list.filter(p => (p.name && p.name.toLowerCase().includes(k)) || (p.description && p.description.toLowerCase().includes(k)))
 })
 
 function nodesUsingPlugin(pluginName, kind) {
@@ -49,57 +49,20 @@ async function loadData() {
   }
 }
 
-async function showConfigSchema(plugin) {
-  schemaTitle.value = `${plugin.name} - 配置 Schema`
-  schemaKind.value = 'config'
-  schemaData.value = null
-  showSchemaModal.value = true
-  schemaLoading.value = true
-  try {
-    if (plugin.kind === 'south') {
-      schemaData.value = await api.pluginSouthSchema(plugin.name)
-    } else {
-      schemaData.value = await api.pluginNorthSchema(plugin.name)
-    }
-  } catch (e) {
-    schemaData.value = { _error: e.message }
-  } finally {
-    schemaLoading.value = false
-  }
+function goToConfigSchema(plugin) {
+  router.push(`/plugins/schema/${plugin.kind}/${encodeURIComponent(plugin.name)}`)
 }
 
-async function showTagSchema(plugin) {
-  schemaTitle.value = `${plugin.name} - 标签 Schema`
-  schemaKind.value = 'tag'
-  schemaData.value = null
-  showSchemaModal.value = true
-  schemaLoading.value = true
-  try {
-    schemaData.value = await api.pluginSouthTagSchema(plugin.name)
-  } catch (e) {
-    schemaData.value = { _error: e.message }
-  } finally {
-    schemaLoading.value = false
-  }
-}
-
-function closeSchemaModal() {
-  showSchemaModal.value = false
-  schemaData.value = null
-}
-
-async function copySchemaJson() {
-  if (!schemaData.value || schemaData.value._error) return
-  try {
-    await navigator.clipboard.writeText(JSON.stringify(schemaData.value, null, 2))
-    ElMessage.success('已复制到剪贴板')
-  } catch (e) {
-    ElMessage.error('复制失败: ' + e.message)
-  }
+function goToTagSchema(plugin) {
+  router.push({ path: `/plugins/schema/${plugin.kind}/${encodeURIComponent(plugin.name)}`, query: { type: 'tag' } })
 }
 
 function goCreateNode(plugin) {
-  router.push(plugin.kind === 'south' ? '/south' : '/north')
+  router.push(plugin.kind === 'south' ? '/south/new' : '/north/new')
+}
+
+function goAddPlugin() {
+  router.push(activeTab.value === 'south' ? '/south/new' : '/north/new')
 }
 
 function goToNode(node) {
@@ -111,9 +74,15 @@ onMounted(loadData)
 
 <template>
   <div class="page-container">
-    <div class="page-header">
-      <div class="header-info">
-        <p class="header-desc">查看已加载的南向/北向插件、配置与标签 Schema，以及使用该插件的节点。</p>
+    <div class="page-header plugins-header">
+      <h2 class="page-title">插件</h2>
+      <div class="header-toolbar">
+        <el-select v-model="activeTab" style="width: 120px" class="mr-1">
+          <el-option label="南向插件" value="south" />
+          <el-option label="北向插件" value="north" />
+        </el-select>
+        <el-input v-model="pluginSearch" placeholder="请输入搜索名称" clearable style="width: 200px" class="mr-1" />
+        <el-button type="primary" :icon="Plus" @click="goAddPlugin">+ 添加插件</el-button>
       </div>
     </div>
 
@@ -127,7 +96,35 @@ onMounted(loadData)
           <template #label>
             <span class="tab-label"><span class="dot south" /> 南向插件 <el-tag size="small" type="info" class="ml-1">{{ southPlugins.length }}</el-tag></span>
           </template>
-          <div class="plugins-grid">
+          <!-- 表格视图（对标 Neuron） -->
+          <el-table :data="plugins" size="default" stripe class="plugins-table">
+            <el-table-column prop="name" label="名称" min-width="120" />
+            <el-table-column label="插件类型" width="120">
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.kind === 'south' ? 'success' : 'primary'">
+                  {{ row.kind === 'south' ? '南向设备' : '北向应用' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="插件类别" width="100">
+              <template #default>System</template>
+            </el-table-column>
+            <el-table-column prop="version" label="插件版本" width="100">
+              <template #default="{ row }">v{{ row.version || '-' }}</template>
+            </el-table-column>
+            <el-table-column prop="description" label="描述" min-width="280" show-overflow-tooltip />
+            <el-table-column label="操作" width="240" fixed="right">
+              <template #default="{ row }">
+                <el-button type="primary" link size="small" :icon="Document" @click="goToConfigSchema(row)">Schema</el-button>
+                <el-button v-if="row.kind === 'south'" type="primary" link size="small" :icon="CollectionTag" @click="goToTagSchema(row)">标签</el-button>
+                <el-button type="primary" link size="small" :icon="Plus" @click="goCreateNode(row)">
+                  {{ row.kind === 'south' ? '创建设备' : '创建应用' }}
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-empty v-if="!plugins.length" description="暂无插件" class="empty-block" />
+          <div class="plugins-grid" style="display: none">
             <el-card v-for="p in plugins" :key="p.name + p.kind" class="plugin-card" :class="p.kind" shadow="hover">
               <template #header>
                 <div class="plugin-header">
@@ -158,8 +155,8 @@ onMounted(loadData)
               </div>
               <template #footer>
                 <div class="plugin-actions">
-                  <el-button size="small" :icon="Document" @click="showConfigSchema(p)">配置 Schema</el-button>
-                  <el-button v-if="p.kind === 'south'" size="small" :icon="CollectionTag" @click="showTagSchema(p)">标签 Schema</el-button>
+                  <el-button size="small" :icon="Document" @click="goToConfigSchema(p)">配置 Schema</el-button>
+                  <el-button v-if="p.kind === 'south'" size="small" :icon="CollectionTag" @click="goToTagSchema(p)">标签 Schema</el-button>
                   <el-button type="primary" size="small" :icon="Plus" @click="goCreateNode(p)">
                     {{ p.kind === 'south' ? '创建设备' : '创建应用' }}
                   </el-button>
@@ -177,7 +174,29 @@ onMounted(loadData)
           <template #label>
             <span class="tab-label"><span class="dot north" /> 北向插件 <el-tag size="small" type="info" class="ml-1">{{ northPlugins.length }}</el-tag></span>
           </template>
-          <div class="plugins-grid">
+          <el-table :data="plugins" size="default" stripe class="plugins-table">
+            <el-table-column prop="name" label="名称" min-width="120" />
+            <el-table-column label="插件类型" width="120">
+              <template #default="{ row }">
+                <el-tag size="small" type="primary">北向应用</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="插件类别" width="100">
+              <template #default>System</template>
+            </el-table-column>
+            <el-table-column prop="version" label="插件版本" width="100">
+              <template #default="{ row }">v{{ row.version || '-' }}</template>
+            </el-table-column>
+            <el-table-column prop="description" label="描述" min-width="280" show-overflow-tooltip />
+            <el-table-column label="操作" width="200" fixed="right">
+              <template #default="{ row }">
+                <el-button type="primary" link size="small" :icon="Document" @click="goToConfigSchema(row)">Schema</el-button>
+                <el-button type="primary" link size="small" :icon="Plus" @click="goCreateNode(row)">创建应用</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-empty v-if="!plugins.length" description="暂无北向插件" class="empty-block" />
+          <div class="plugins-grid" style="display: none">
             <el-card v-for="p in plugins" :key="p.name + p.kind" class="plugin-card" :class="p.kind" shadow="hover">
               <template #header>
                 <div class="plugin-header">
@@ -208,8 +227,8 @@ onMounted(loadData)
               </div>
               <template #footer>
                 <div class="plugin-actions">
-                  <el-button size="small" :icon="Document" @click="showConfigSchema(p)">配置 Schema</el-button>
-                  <el-button v-if="p.kind === 'south'" size="small" :icon="CollectionTag" @click="showTagSchema(p)">标签 Schema</el-button>
+                  <el-button size="small" :icon="Document" @click="goToConfigSchema(p)">配置 Schema</el-button>
+                  <el-button v-if="p.kind === 'south'" size="small" :icon="CollectionTag" @click="goToTagSchema(p)">标签 Schema</el-button>
                   <el-button type="primary" size="small" :icon="Plus" @click="goCreateNode(p)">
                     {{ p.kind === 'south' ? '创建设备' : '创建应用' }}
                   </el-button>
@@ -225,60 +244,6 @@ onMounted(loadData)
         </el-tab-pane>
       </el-tabs>
     </template>
-
-    <el-dialog v-model="showSchemaModal" :title="schemaTitle" width="640px" destroy-on-close @closed="closeSchemaModal">
-      <el-skeleton v-if="schemaLoading" :rows="4" animated />
-      <el-alert v-else-if="schemaData?._error" type="warning" :title="schemaData._error" show-icon />
-      <div v-else-if="schemaData && schemaKind === 'config'" class="schema-content">
-        <div v-if="schemaData.params?.length" class="schema-section">
-          <h4>配置参数</h4>
-          <el-table :data="schemaData.params" size="small" stripe>
-            <el-table-column prop="name" label="参数名" width="120">
-              <template #default="{ row }"><code>{{ row.name }}</code></template>
-            </el-table-column>
-            <el-table-column prop="ty" label="类型" width="80">
-              <template #default="{ row }">{{ row.ty || row.type || '-' }}</template>
-            </el-table-column>
-            <el-table-column label="必填" width="70">
-              <template #default="{ row }">{{ row.attribute === 'required' ? '是' : '否' }}</template>
-            </el-table-column>
-            <el-table-column label="默认值" width="100">
-              <template #default="{ row }"><span class="font-mono">{{ row.default != null ? JSON.stringify(row.default) : '-' }}</span></template>
-            </el-table-column>
-            <el-table-column prop="description" label="说明" />
-          </el-table>
-        </div>
-        <div v-else class="schema-empty">无配置参数</div>
-        <div v-if="schemaData.tag_regex?.length" class="schema-section">
-          <h4>标签地址正则</h4>
-          <el-table :data="schemaData.tag_regex" size="small" stripe>
-            <el-table-column prop="data_type" label="数据类型" width="120">
-              <template #default="{ row }"><code>{{ row.data_type }}</code></template>
-            </el-table-column>
-            <el-table-column prop="regex" label="正则">
-              <template #default="{ row }"><span class="font-mono">{{ row.regex }}</span></template>
-            </el-table-column>
-          </el-table>
-        </div>
-      </div>
-      <div v-else-if="schemaData && schemaKind === 'tag'" class="schema-content">
-        <div v-if="schemaData.data_types?.length" class="schema-section">
-          <h4>支持的数据类型</h4>
-          <div class="schema-tags">
-            <el-tag v-for="dt in schemaData.data_types" :key="dt" size="small" class="mr-1">{{ dt }}</el-tag>
-          </div>
-        </div>
-        <div v-if="schemaData.address_format" class="schema-section">
-          <h4>地址格式</h4>
-          <p class="schema-desc font-mono">{{ schemaData.address_format }}</p>
-        </div>
-        <div v-if="(!schemaData.data_types?.length) && !schemaData.address_format" class="schema-empty">无标签 Schema 详情</div>
-      </div>
-      <template #footer>
-        <el-button @click="closeSchemaModal">关闭</el-button>
-        <el-button v-if="schemaData && !schemaData._error" type="primary" @click="copySchemaJson">复制 JSON</el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>
 
@@ -301,12 +266,6 @@ onMounted(loadData)
 .usage-label { font-size: 0.8rem; color: var(--text-muted); display: block; margin-bottom: 0.35rem; }
 .usage-nodes { display: flex; flex-wrap: wrap; gap: 0.25rem; }
 .plugin-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
-.schema-content { max-height: 50vh; overflow-y: auto; }
-.schema-section { margin-bottom: 1rem; }
-.schema-section h4 { font-size: 0.95rem; margin-bottom: 0.5rem; color: var(--text-secondary); }
-.schema-empty { color: var(--text-muted); font-size: 0.9rem; }
-.schema-tags { display: flex; flex-wrap: wrap; gap: 0.35rem; }
-.schema-desc { font-size: 0.9rem; color: var(--text-secondary); margin: 0; padding: 0.5rem 0.75rem; background: var(--el-fill-color-light); border-radius: 8px; }
 .font-mono { font-family: var(--font-mono); }
 .empty-block { grid-column: 1 / -1; padding: 3rem; }
 </style>

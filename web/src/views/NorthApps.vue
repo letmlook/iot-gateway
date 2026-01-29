@@ -2,7 +2,7 @@
 import { ref, inject, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, VideoPlay, VideoPause, Edit, Delete } from '@element-plus/icons-vue'
+import { Plus, VideoPlay, VideoPause, Edit, Delete, MoreFilled, Grid, List } from '@element-plus/icons-vue'
 import { api } from '../api.js'
 
 const router = useRouter()
@@ -11,13 +11,9 @@ const northPlugins = inject('northPlugins', ref([]))
 const nodes = ref([])
 const loading = ref(false)
 const error = ref('')
-const showCreateModal = ref(false)
-
-const createForm = ref({
-  name: '',
-  plugin_name: '',
-  config: '{}'
-})
+const pluginFilter = ref('')
+const keywordSearch = ref('')
+const viewMode = ref('list')
 
 const pluginOptions = computed(() => {
   return northPlugins.value.map(p => ({
@@ -27,12 +23,41 @@ const pluginOptions = computed(() => {
   }))
 })
 
+const filteredNodes = computed(() => {
+  let list = nodes.value
+  if (pluginFilter.value) {
+    list = list.filter(n => n.plugin_name === pluginFilter.value)
+  }
+  if (keywordSearch.value.trim()) {
+    const k = keywordSearch.value.trim().toLowerCase()
+    list = list.filter(n =>
+      (n.name && n.name.toLowerCase().includes(k)) ||
+      (n.plugin_name && n.plugin_name.toLowerCase().includes(k))
+    )
+  }
+  return list
+})
+
+// 每个北向节点的订阅数（需按节点拉取）
+const subscriptionCounts = ref({})
+async function loadSubscriptionCount(nodeId) {
+  try {
+    const subs = await api.subscriptions(nodeId)
+    subscriptionCounts.value[nodeId] = subs?.length ?? 0
+  } catch {
+    subscriptionCounts.value[nodeId] = 0
+  }
+}
+
 async function loadNodes() {
   loading.value = true
   error.value = ''
   try {
     const all = await api.nodes()
     nodes.value = all.filter(n => n.kind === 'north')
+    for (const n of nodes.value) {
+      loadSubscriptionCount(n.id)
+    }
   } catch (e) {
     error.value = '加载节点失败: ' + e.message
   } finally {
@@ -40,28 +65,12 @@ async function loadNodes() {
   }
 }
 
-async function createNode() {
-  let config = {}
-  try {
-    config = JSON.parse(createForm.value.config || '{}')
-  } catch {
-    ElMessage.error('config 必须是合法 JSON')
-    return
-  }
-  try {
-    await api.createNode({
-      name: createForm.value.name,
-      kind: 'north',
-      plugin_name: createForm.value.plugin_name,
-      config
-    })
-    showCreateModal.value = false
-    createForm.value = { name: '', plugin_name: '', config: '{}' }
-    await loadNodes()
-    ElMessage.success('创建成功')
-  } catch (e) {
-    ElMessage.error('创建失败: ' + e.message)
-  }
+function getSubCount(nodeId) {
+  return subscriptionCounts.value[nodeId] ?? '-'
+}
+
+function goToCreate() {
+  router.push('/north/new')
 }
 
 async function startNode(id) {
@@ -84,6 +93,11 @@ async function stopNode(id) {
   }
 }
 
+async function toggleNode(node) {
+  if (node.state === 'running') await stopNode(node.id)
+  else await startNode(node.id)
+}
+
 async function deleteNode(id) {
   try {
     await ElMessageBox.confirm('确定删除该北向应用？相关配置将被清除。', '确认删除', {
@@ -103,15 +117,6 @@ function goToDetail(node) {
   router.push(`/north/${node.id}`)
 }
 
-function openCreateModal() {
-  createForm.value.plugin_name = pluginOptions.value[0]?.name || ''
-  showCreateModal.value = true
-}
-
-function resetCreateForm() {
-  createForm.value = { name: '', plugin_name: '', config: '{}' }
-}
-
 function getStateType(state) {
   if (state === 'running') return 'success'
   if (state === 'error') return 'danger'
@@ -124,123 +129,150 @@ function getStateText(state) {
   return '已停止'
 }
 
+function getConnText(state) {
+  if (state === 'running') return '已连接'
+  return '断开'
+}
+
 onMounted(loadNodes)
 </script>
 
 <template>
   <div class="page-container">
-    <div class="page-header">
-      <div class="header-info">
-        <p class="header-desc">管理北向数据应用，将采集的数据上报到云端或应用系统。</p>
+    <div class="page-header north-header">
+      <h2 class="page-title">北向应用</h2>
+      <div class="header-toolbar">
+        <el-select v-model="pluginFilter" placeholder="请选择插件类型" clearable style="width: 160px" class="mr-1">
+          <el-option v-for="p in pluginOptions" :key="p.name" :label="p.name" :value="p.name" />
+        </el-select>
+        <el-input v-model="keywordSearch" placeholder="输入关键字搜索" clearable style="width: 180px" class="mr-1" />
+        <div class="toolbar-btns">
+          <el-button :icon="Grid" text :type="viewMode === 'grid' ? 'primary' : ''" title="网格视图" @click="viewMode = 'grid'" />
+          <el-button :icon="List" text :type="viewMode === 'list' ? 'primary' : ''" title="列表视图" @click="viewMode = 'list'" />
+        </div>
+        <el-button type="primary" :icon="Plus" @click="goToCreate">添加应用</el-button>
       </div>
-      <el-button type="primary" :icon="Plus" @click="openCreateModal">添加应用</el-button>
     </div>
 
     <el-alert v-if="error" type="error" :title="error" closable show-icon @close="error = ''" class="mb-2" />
 
     <el-skeleton v-if="loading" :rows="6" animated />
 
-    <div v-else class="device-grid">
-      <el-card
-        v-for="node in nodes"
-        :key="node.id"
-        class="device-card north-card"
-        :class="'state-' + (node.state || 'stopped')"
-        shadow="hover"
+    <template v-else>
+      <el-table
+        v-if="viewMode === 'list'"
+        :data="filteredNodes"
+        size="default"
+        stripe
+        style="width: 100%"
+        :header-cell-style="{ background: 'var(--el-fill-color-light)' }"
       >
-        <template #header>
-          <div class="card-header">
-            <div class="device-info">
-              <span class="device-name">{{ node.name }}</span>
-              <el-tag size="small" type="info" class="ml-1">{{ node.plugin_name }}</el-tag>
-            </div>
-            <el-tag :type="getStateType(node.state)" size="small" effect="light">
-              {{ getStateText(node.state) }}
+        <el-table-column type="selection" width="48" />
+        <el-table-column prop="name" label="名称" min-width="140">
+          <template #default="{ row }">
+            <el-link type="primary" @click="goToDetail(row)">{{ row.name }}</el-link>
+          </template>
+        </el-table-column>
+        <el-table-column label="工作状态" width="100">
+          <template #default="{ row }">
+            <el-tag :type="getStateType(row.state)" size="small" effect="light">
+              {{ getStateText(row.state) }}
             </el-tag>
-          </div>
-        </template>
-        <div class="card-body">
-          <div class="info-row">
-            <span class="info-label">节点 ID</span>
-            <span class="info-value id-value">{{ node.id.slice(0, 8) }}...</span>
-          </div>
-        </div>
-        <template #footer>
-          <div class="card-actions">
-            <el-button
-              :type="node.state === 'running' ? 'warning' : 'success'"
-              size="small"
-              :icon="node.state === 'running' ? VideoPause : VideoPlay"
-              @click="node.state === 'running' ? stopNode(node.id) : startNode(node.id)"
-            >
-              {{ node.state === 'running' ? '停止' : '启动' }}
-            </el-button>
-            <el-button type="primary" size="small" :icon="Edit" @click="goToDetail(node)">配置</el-button>
-            <el-button type="danger" size="small" :icon="Delete" @click="deleteNode(node.id)">删除</el-button>
-          </div>
-        </template>
-      </el-card>
-
-      <el-empty v-if="!nodes.length" description="暂无北向应用" class="empty-block">
-        <template #image>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="empty-icon">
-            <path d="M12 2L2 7l10 5 10-5-10-5z"/>
-            <path d="M2 17l10 5 10-5"/>
-            <path d="M2 12l10 5 10-5"/>
-          </svg>
-        </template>
-        <p class="empty-hint">点击上方「添加应用」创建第一个北向数据应用。</p>
-      </el-empty>
-    </div>
-
-    <el-dialog
-      v-model="showCreateModal"
-      title="添加北向应用"
-      width="480px"
-      destroy-on-close
-      @closed="resetCreateForm"
-    >
-      <el-form :model="createForm" label-width="100px" label-position="top">
-        <el-form-item label="应用名称" required>
-          <el-input v-model="createForm.name" placeholder="例如：mqtt-cloud-1" clearable />
-        </el-form-item>
-        <el-form-item label="应用插件" required>
-          <el-select v-model="createForm.plugin_name" placeholder="请选择" style="width: 100%">
-            <el-option
-              v-for="p in pluginOptions"
-              :key="p.name"
-              :label="p.name + (p.version ? ` (v${p.version})` : '')"
-              :value="p.name"
+          </template>
+        </el-table-column>
+        <el-table-column label="连接状态" width="100">
+          <template #default="{ row }">
+            <span :class="{ 'text-success': row.state === 'running' }">
+              {{ getConnText(row.state) }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="订阅组总数" width="110">
+          <template #default="{ row }">{{ getSubCount(row.id) }}</template>
+        </el-table-column>
+        <el-table-column prop="plugin_name" label="插件" width="120" />
+        <el-table-column label="操作" width="140" fixed="right">
+          <template #default="{ row }">
+            <el-switch
+              :model-value="row.state === 'running'"
+              @change="toggleNode(row)"
             />
-          </el-select>
-          <div v-if="pluginOptions.find(p => p.name === createForm.plugin_name)?.description" class="form-hint">
-            {{ pluginOptions.find(p => p.name === createForm.plugin_name)?.description }}
+            <el-dropdown trigger="click" @command="(cmd) => { if (cmd === 'edit') goToDetail(row); else if (cmd === 'delete') deleteNode(row.id) }">
+              <el-button type="primary" link :icon="MoreFilled" class="ml-1" />
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="edit">
+                    <el-icon><Edit /></el-icon>
+                    编辑应用
+                  </el-dropdown-item>
+                  <el-dropdown-item command="delete" divided>
+                    <span style="color: var(--el-color-danger)">删除</span>
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <div v-else class="device-grid">
+        <el-card
+          v-for="node in filteredNodes"
+          :key="node.id"
+          class="device-card north-card"
+          :class="'state-' + (node.state || 'stopped')"
+          shadow="hover"
+        >
+          <template #header>
+            <div class="card-header">
+              <div class="device-info">
+                <span class="device-name">{{ node.name }}</span>
+                <el-tag size="small" type="info" class="ml-1">{{ node.plugin_name }}</el-tag>
+              </div>
+              <el-tag :type="getStateType(node.state)" size="small" effect="light">
+                {{ getStateText(node.state) }}
+              </el-tag>
+            </div>
+          </template>
+          <div class="card-body">
+            <div class="info-row">
+              <span class="info-label">订阅组数</span>
+              <span class="info-value">{{ getSubCount(node.id) }}</span>
+            </div>
           </div>
-        </el-form-item>
-        <el-form-item label="配置参数 (JSON)">
-          <el-input
-            v-model="createForm.config"
-            type="textarea"
-            :rows="4"
-            placeholder='{"host":"broker.emqx.io","port":1883,"topic_prefix":"iot"}'
-            class="font-mono"
-          />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="showCreateModal = false">取消</el-button>
-        <el-button type="primary" :disabled="!createForm.name || !createForm.plugin_name" @click="createNode">
-          创建
-        </el-button>
-      </template>
-    </el-dialog>
+          <template #footer>
+            <div class="card-actions">
+              <el-switch :model-value="node.state === 'running'" @change="toggleNode(node)" />
+              <el-button type="primary" size="small" :icon="Edit" @click="goToDetail(node)">配置</el-button>
+              <el-button type="danger" size="small" :icon="Delete" @click="deleteNode(node.id)">删除</el-button>
+            </div>
+          </template>
+        </el-card>
+      </div>
+
+      <div v-if="viewMode === 'list'" class="pagination-wrap">
+        <span class="total-hint">共 {{ filteredNodes.length }} 条</span>
+      </div>
+
+      <el-empty v-if="!filteredNodes.length" description="暂无北向应用" class="empty-block">
+        <template #description>
+          <p v-if="nodes.length">没有匹配的应用，可调整筛选条件。</p>
+          <p v-else>点击「添加应用」创建第一个北向数据应用。</p>
+        </template>
+      </el-empty>
+    </template>
   </div>
 </template>
 
 <style scoped>
 .mb-2 { margin-bottom: 1rem; }
 .ml-1 { margin-left: 0.25rem; }
-.device-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1rem; }
+.mr-1 { margin-right: 0.5rem; }
+.page-title { margin: 0 0 1rem; font-size: 1.25rem; }
+.north-header { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; }
+.header-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-left: auto; }
+.toolbar-btns { display: inline-flex; align-items: center; }
+.device-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; }
 .device-card.state-running { border-left: 3px solid var(--el-color-success); }
 .device-card.state-stopped { border-left: 3px solid var(--el-color-info); }
 .device-card.state-error { border-left: 3px solid var(--el-color-danger); }
@@ -251,11 +283,11 @@ onMounted(loadNodes)
 .card-body { padding: 0.5rem 0; }
 .info-row { display: flex; justify-content: space-between; font-size: 0.85rem; }
 .info-label { color: var(--text-muted); }
-.info-value.id-value { font-family: var(--font-mono); font-size: 0.8rem; }
-.card-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.card-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
 .form-hint { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.25rem; }
+.config-fallback-hint { font-size: 0.8rem; color: var(--el-text-color-secondary); margin-bottom: 0.5rem; }
 .font-mono { font-family: var(--font-mono); }
-.empty-block { grid-column: 1 / -1; padding: 3rem; }
-.empty-icon { width: 80px; height: 80px; color: var(--el-color-info); opacity: 0.6; }
-.empty-hint { color: var(--text-muted); font-size: 0.9rem; margin-top: 0.5rem; }
+.empty-block { padding: 3rem; }
+.pagination-wrap { margin-top: 1rem; font-size: 0.9rem; color: var(--text-muted); }
+.text-success { color: var(--el-color-success); }
 </style>

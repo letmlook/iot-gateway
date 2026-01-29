@@ -3,13 +3,25 @@ import { createRouter, createWebHistory } from 'vue-router'
 const routes = [
   {
     path: '/',
-    redirect: '/south'
+    redirect: '/dashboard'
+  },
+  {
+    path: '/dashboard',
+    name: 'Dashboard',
+    component: () => import('./views/Dashboard.vue'),
+    meta: { title: '概览' }
   },
   {
     path: '/south',
     name: 'SouthDevices',
     component: () => import('./views/SouthDevices.vue'),
     meta: { title: '南向设备' }
+  },
+  {
+    path: '/south/new',
+    name: 'SouthCreate',
+    component: () => import('./views/CreateNode.vue'),
+    meta: { title: '添加南向设备', kind: 'south' }
   },
   {
     path: '/south/:id',
@@ -22,6 +34,12 @@ const routes = [
     name: 'NorthApps',
     component: () => import('./views/NorthApps.vue'),
     meta: { title: '北向应用' }
+  },
+  {
+    path: '/north/new',
+    name: 'NorthCreate',
+    component: () => import('./views/CreateNode.vue'),
+    meta: { title: '添加北向应用', kind: 'north' }
   },
   {
     path: '/north/:id',
@@ -40,6 +58,12 @@ const routes = [
     name: 'Plugins',
     component: () => import('./views/Plugins.vue'),
     meta: { title: '插件管理' }
+  },
+  {
+    path: '/plugins/schema/:kind/:name',
+    name: 'PluginSchema',
+    component: () => import('./views/PluginSchema.vue'),
+    meta: { title: '插件 Schema' }
   },
   {
     path: '/system',

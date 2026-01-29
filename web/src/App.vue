@@ -17,10 +17,11 @@ provide('southPlugins', southPlugins)
 provide('northPlugins', northPlugins)
 
 const menuItems = [
+  { path: '/dashboard', icon: 'dashboard', label: '概览', desc: '运行状态与快捷入口' },
   { path: '/south', icon: 'south', label: '南向设备', desc: '设备驱动管理' },
   { path: '/north', icon: 'north', label: '北向应用', desc: '数据上报应用' },
   { path: '/plugins', icon: 'plugins', label: '插件管理', desc: '插件列表与 Schema' },
-  { path: '/monitor', icon: 'monitor', label: '数据监控', desc: '实时数据查看' },
+  { path: '/monitor', icon: 'monitor', label: '数据监控', desc: '实时数据与写值' },
   { path: '/system', icon: 'system', label: '系统管理', desc: '配置与导出' },
 ]
 
@@ -28,6 +29,9 @@ const currentTitle = computed(() => {
   const item = menuItems.find(m => route.path.startsWith(m.path))
   return item?.label || 'IoT 网关'
 })
+
+const locale = ref('zh')
+const userInitial = ref('U')
 
 async function loadInitData() {
   try {
@@ -85,8 +89,15 @@ onMounted(loadInitData)
           :class="{ active: route.path.startsWith(item.path) }"
         >
           <span class="nav-icon" :data-icon="item.icon">
+            <!-- 概览图标 -->
+            <svg v-if="item.icon === 'dashboard'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <rect x="3" y="3" width="7" height="9" rx="1"/>
+              <rect x="14" y="3" width="7" height="5" rx="1"/>
+              <rect x="14" y="12" width="7" height="9" rx="1"/>
+              <rect x="3" y="16" width="7" height="5" rx="1"/>
+            </svg>
             <!-- 南向设备图标 -->
-            <svg v-if="item.icon === 'south'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <svg v-else-if="item.icon === 'south'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
               <rect x="3" y="3" width="7" height="7" rx="1"/>
               <rect x="14" y="3" width="7" height="7" rx="1"/>
               <rect x="3" y="14" width="7" height="7" rx="1"/>
@@ -139,16 +150,40 @@ onMounted(loadInitData)
       <header class="top-header">
         <div class="header-left">
           <h1 class="page-title">{{ currentTitle }}</h1>
-          <div class="breadcrumb" v-if="route.params.id">
-            <router-link :to="route.path.startsWith('/south') ? '/south' : '/north'">
-              {{ route.path.startsWith('/south') ? '南向设备' : '北向应用' }}
-            </router-link>
-            <span class="separator">/</span>
-            <span>详情</span>
+          <div class="breadcrumb" v-if="route.params.id || route.path.endsWith('/new') || route.path.startsWith('/plugins/schema')">
+            <template v-if="route.path.startsWith('/south')">
+              <router-link to="/south">南向设备</router-link>
+              <span class="separator">/</span>
+              <span>{{ route.path.endsWith('/new') ? '添加设备' : '详情' }}</span>
+            </template>
+            <template v-else-if="route.path.startsWith('/north')">
+              <router-link to="/north">北向应用</router-link>
+              <span class="separator">/</span>
+              <span>{{ route.path.endsWith('/new') ? '添加应用' : '详情' }}</span>
+            </template>
+            <template v-else-if="route.path.startsWith('/plugins/schema')">
+              <router-link to="/plugins">插件管理</router-link>
+              <span class="separator">/</span>
+              <span>Schema</span>
+            </template>
           </div>
         </div>
-        <div class="header-right">
-          <div class="stats-bar" v-if="health">
+        <div class="header-right header-actions">
+          <el-select v-model="locale" size="small" style="width: 90px" class="mr-1">
+            <el-option label="中文" value="zh" />
+            <el-option label="English" value="en" />
+          </el-select>
+          <el-dropdown trigger="click" class="user-dropdown">
+            <span class="user-trigger">
+              <el-avatar :size="28" class="user-avatar">{{ userInitial }}</el-avatar>
+            </span>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item>当前用户</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+          <div class="stats-bar" v-if="health && !route.params.id && !route.path.endsWith('/new') && !route.path.startsWith('/plugins/schema')">
             <div class="stat-item">
               <span class="stat-value">{{ health.nodes_count || 0 }}</span>
               <span class="stat-label">节点总数</span>

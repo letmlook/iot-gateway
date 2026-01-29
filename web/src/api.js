@@ -51,6 +51,7 @@ export const api = {
   tags: (nodeId) => req('GET', `/nodes/${nodeId}/tags`),
   tag: (nodeId, tid) => req('GET', `/nodes/${nodeId}/tags/${tid}`),
   createTag: (nodeId, body) => req('POST', `/nodes/${nodeId}/tags`, body),
+  batchCreateTags: (nodeId, tags) => req('POST', `/nodes/${nodeId}/tags/batch`, { tags }),
   updateTag: (nodeId, tid, body) => req('PUT', `/nodes/${nodeId}/tags/${tid}`, body),
   deleteTag: (nodeId, tid) => req('DELETE', `/nodes/${nodeId}/tags/${tid}`),
 
@@ -58,7 +59,7 @@ export const api = {
   readTags: (nodeId, tagIds) => req('POST', `/nodes/${nodeId}/read_tags`, { tag_ids: tagIds }),
   writeTags: (nodeId, values) => req('POST', `/nodes/${nodeId}/write_tags`, { values }),
 
-  // 订阅
+  // 订阅（body: { subscriptions: [{ south_node_id, group_id }] }）
   subscriptions: (nodeId) => req('GET', `/nodes/${nodeId}/subscriptions`),
-  setSubscriptions: (nodeId, subs) => req('PUT', `/nodes/${nodeId}/subscriptions`, subs),
+  setSubscriptions: (nodeId, subs) => req('PUT', `/nodes/${nodeId}/subscriptions`, { subscriptions: subs }),
 }

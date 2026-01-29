@@ -67,6 +67,7 @@ pub fn router(state: AppState) -> Router<AppState> {
             get(handlers::get_group).put(handlers::update_group).delete(handlers::remove_group),
         )
         .route("/nodes/:id/tags", get(handlers::list_tags).post(handlers::add_tag))
+        .route("/nodes/:id/tags/batch", post(handlers::batch_add_tags))
         .route(
             "/nodes/:id/tags/:tid",
             get(handlers::get_tag).put(handlers::update_tag).delete(handlers::remove_tag),
