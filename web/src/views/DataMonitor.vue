@@ -1,11 +1,13 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
 import { VideoPlay, VideoPause, Refresh, EditPen } from '@element-plus/icons-vue'
 import { api } from '../api.js'
 
 const route = useRoute()
+const { t, locale } = useI18n()
 const nodes = ref([])
 const groups = ref([])
 const selectedNode = ref(null)
@@ -39,7 +41,7 @@ async function loadNodes() {
       await loadTags()
     }
   } catch (e) {
-    error.value = '加载节点失败: ' + e.message
+    error.value = t('south.loadFailed') + e.message
   }
 }
 
@@ -77,7 +79,7 @@ async function loadTags() {
     }
     if (tags.value.length) await readValues()
   } catch (e) {
-    error.value = '加载标签失败: ' + e.message
+    error.value = t('south.loadFailed') + e.message
   } finally {
     loading.value = false
   }
@@ -150,6 +152,15 @@ function formatValue(val) {
     if (val.error) return val.error
     if (val.Error) return val.Error
     if (val.message) return val.message
+    // DataValue 格式 { type, value }：直接显示 value
+    if ('value' in val && (val.type || Object.keys(val).length <= 2)) {
+      const v = val.value
+      if (v === undefined || v === null) return '-'
+      if (typeof v === 'number') return Number.isInteger(v) ? v : Number(v).toFixed(4)
+      if (typeof v === 'boolean') return v ? 'true' : 'false'
+      if (Array.isArray(v)) return v.length ? v.map(x => formatValue(x)).join(', ') : '-'
+      return String(v)
+    }
     return JSON.stringify(val)
   }
   if (typeof val === 'number') return Number.isInteger(val) ? val : val.toFixed(4)
@@ -196,13 +207,13 @@ async function writeTag(tag) {
   const raw = writeInputs.value[tag.id]
   const dv = parseDataValue(tag.data_type, raw)
   if (dv === null) {
-    ElMessage.warning('请输入合法值（与数据类型一致）')
+    ElMessage.warning(t('monitor.inputValidValue'))
     return
   }
   writingTagId.value = tag.id
   try {
     await api.writeTags(selectedNode.value, [[tag.id, dv]])
-    ElMessage.success('写入成功')
+    ElMessage.success(t('monitor.writeSuccess'))
     writeInputs.value[tag.id] = ''
     await readValues()
   } catch (e) {
@@ -227,93 +238,86 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 </script>
 
 <template>
-  <div class="page-container">
-    <div class="page-header monitor-header">
-      <h2 class="page-title">数据监控</h2>
-      <span v-if="lastUpdateTime" class="update-time">更新时间 {{ lastUpdateTime.toLocaleString('zh-CN') }}</span>
+  <div class="page-container monitor-page">
+    <div class="monitor-page-header">
+      <h2 class="monitor-page-title">{{ t('monitor.title') }}</h2>
+      <span v-if="lastUpdateTime" class="monitor-update-time">{{ t('monitor.updateTime') }} {{ lastUpdateTime.toLocaleString() }}</span>
     </div>
 
-    <el-alert v-if="error" type="error" :title="error" closable show-icon @close="error = ''" class="mb-2" />
+    <el-alert v-if="error" type="error" :title="error" closable show-icon @close="error = ''" class="monitor-alert" />
 
     <el-card shadow="never" class="monitor-controls">
-      <div class="control-row">
-        <el-form label-position="top" inline>
-          <el-form-item label="驱动实例">
-            <el-select v-model="selectedNode" placeholder="请选择" style="width: 200px" @change="onNodeChange">
-              <el-option v-for="n in nodes" :key="n.id" :label="n.name" :value="n.id" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="组">
-            <el-select v-model="selectedGroup" placeholder="全部" clearable style="width: 140px" @change="applyFilters">
-              <el-option v-for="g in groups" :key="g.id" :label="g.name" :value="g.id" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="搜索">
-            <el-input v-model="keywordSearch" placeholder="输入关键字搜索" clearable style="width: 160px" />
-          </el-form-item>
-          <el-form-item label="">
-            <el-checkbox v-model="onlyShowErrors">仅展示错误点位</el-checkbox>
-          </el-form-item>
-          <el-form-item label="刷新间隔">
-            <el-select v-model="refreshInterval" style="width: 120px" :disabled="autoRefresh">
-              <el-option :value="1000" label="1 秒" />
-              <el-option :value="2000" label="2 秒" />
-              <el-option :value="5000" label="5 秒" />
-              <el-option :value="10000" label="10 秒" />
-            </el-select>
-          </el-form-item>
-        </el-form>
-        <div class="control-actions">
+      <div class="monitor-controls-inner">
+        <div class="monitor-filter-group">
+          <span class="monitor-filter-label">{{ t('monitor.filter') }}</span>
+          <el-select v-model="selectedNode" :placeholder="t('south.selectPlugin')" class="monitor-select" @change="onNodeChange">
+            <el-option v-for="n in nodes" :key="n.id" :label="n.name" :value="n.id" />
+          </el-select>
+          <el-select v-model="selectedGroup" placeholder="Group" clearable class="monitor-select monitor-select-group" @change="applyFilters">
+            <el-option v-for="g in groups" :key="g.id" :label="g.name" :value="g.id" />
+          </el-select>
+          <el-input v-model="keywordSearch" :placeholder="t('south.keywordSearch')" clearable class="monitor-search" />
+          <el-checkbox v-model="onlyShowErrors" class="monitor-checkbox">{{ t('monitor.onlyErrors') }}</el-checkbox>
+        </div>
+        <div class="monitor-refresh-group">
+          <span class="monitor-filter-label">{{ t('monitor.refresh') }}</span>
+          <el-select v-model="refreshInterval" class="monitor-interval-select" :disabled="autoRefresh">
+            <el-option :value="1000" :label="locale === 'zh' ? '1 秒' : '1s'" />
+            <el-option :value="2000" :label="locale === 'zh' ? '2 秒' : '2s'" />
+            <el-option :value="5000" :label="locale === 'zh' ? '5 秒' : '5s'" />
+            <el-option :value="10000" :label="locale === 'zh' ? '10 秒' : '10s'" />
+          </el-select>
           <el-button
-            :type="autoRefresh ? 'warning' : 'success'"
+            :type="autoRefresh ? 'warning' : 'primary'"
             :icon="autoRefresh ? VideoPause : VideoPlay"
             :disabled="!tags.length"
+            size="default"
             @click="toggleAutoRefresh"
           >
-            {{ autoRefresh ? '停止自动刷新' : '开始自动刷新' }}
+            {{ autoRefresh ? t('monitor.stopRefresh') : t('monitor.autoRefresh') }}
           </el-button>
-          <el-button :icon="Refresh" :disabled="loading || !tags.length" @click="readValues">手动刷新</el-button>
+          <el-button :icon="Refresh" :disabled="loading || !tags.length" @click="readValues">{{ t('monitor.manualRefresh') }}</el-button>
         </div>
       </div>
     </el-card>
 
-    <div v-if="selectedNodeInfo" class="status-bar">
+    <div v-if="selectedNodeInfo" class="monitor-status-bar">
       <el-tag :type="selectedNodeInfo.state === 'running' ? 'success' : selectedNodeInfo.state === 'error' ? 'danger' : 'info'" size="small">
-        {{ selectedNodeInfo.state === 'running' ? '运行中' : selectedNodeInfo.state === 'error' ? '错误' : '已停止' }}
+        {{ selectedNodeInfo.state === 'running' ? t('common.running') : selectedNodeInfo.state === 'error' ? t('common.error') : t('common.stopped') }}
       </el-tag>
-      <span class="stat">当前 {{ tags.length }} 条</span>
-      <el-tag v-if="autoRefresh" type="primary" size="small" effect="plain">自动刷新 {{ refreshInterval / 1000 }}s</el-tag>
+      <span class="stat">{{ t('monitor.currentCount', { n: tags.length }) }}</span>
+      <el-tag v-if="autoRefresh" type="primary" size="small" effect="plain">{{ t('monitor.autoRefresh') }} {{ refreshInterval / 1000 }}s</el-tag>
     </div>
 
-    <el-card v-if="tags.length" shadow="never" class="table-card">
+    <el-card v-if="tags.length" shadow="never" class="monitor-table-card">
       <el-table :data="tags" size="small" stripe>
-        <el-table-column prop="name" label="名称" min-width="120" />
-        <el-table-column prop="address" label="地址" width="140">
+        <el-table-column prop="name" :label="t('common.name')" min-width="120" />
+        <el-table-column prop="address" :label="t('monitor.address')" width="140">
           <template #default="{ row }"><span class="font-mono">{{ row.address || '-' }}</span></template>
         </el-table-column>
-        <el-table-column prop="data_type" label="类型" width="90">
+        <el-table-column prop="data_type" :label="t('monitor.type')" width="90">
           <template #default="{ row }"><el-tag size="small" type="info">{{ row.data_type || '-' }}</el-tag></template>
         </el-table-column>
-        <el-table-column label="乘系数" width="80">
+        <el-table-column :label="t('monitor.multiplier')" width="80">
           <template #default>-</template>
         </el-table-column>
-        <el-table-column label="值" min-width="160">
+        <el-table-column :label="t('monitor.value')" min-width="160">
           <template #default="{ row }">
             <span :class="{ 'value-error': isValueError(tagValues[row.id]) }">
               {{ formatValue(tagValues[row.id]) }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column prop="description" label="描述" width="100" show-overflow-tooltip>
+        <el-table-column prop="description" :label="t('common.description')" width="100" show-overflow-tooltip>
           <template #default="{ row }">{{ row.description || '-' }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="200" align="right" fixed="right">
+        <el-table-column :label="t('common.operation')" width="200" align="right" fixed="right">
           <template #default="{ row }">
             <div class="write-cell">
               <el-input
                 v-model="writeInputs[row.id]"
                 size="small"
-                placeholder="输入后写入"
+                :placeholder="t('common.inputToWrite')"
                 class="write-input"
                 @focus="initWriteInput(row)"
                 @keyup.enter="writeTag(row)"
@@ -324,7 +328,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                 :loading="writingTagId === row.id"
                 @click="writeTag(row)"
               >
-                Write
+                {{ t('common.write') }}
               </el-button>
             </div>
           </template>
@@ -334,27 +338,72 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 
     <el-skeleton v-else-if="loading" :rows="5" animated />
 
-    <el-empty v-else description="暂无监控数据" class="empty-block">
+    <el-empty v-else :description="t('monitor.noData')" class="empty-block">
       <template #description>
-        <p v-if="!nodes.length">请先创建南向设备并添加标签。</p>
-        <p v-else>请为选中的设备添加数据标签。</p>
+        <p v-if="!nodes.length">{{ t('monitor.createSouthFirst') }}</p>
+        <p v-else>{{ t('monitor.addTagsFirst') }}</p>
       </template>
     </el-empty>
   </div>
 </template>
 
 <style scoped>
-.mb-2 { margin-bottom: 1rem; }
-.page-title { margin: 0 0 0.5rem; font-size: 1.25rem; }
-.monitor-header { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
-.update-time { font-size: 0.85rem; color: var(--el-text-color-secondary); }
-.control-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 1rem; }
-.control-actions { margin-left: auto; display: flex; gap: 0.5rem; }
-.status-bar { display: flex; align-items: center; gap: 1rem; margin: 1rem 0; }
-.table-card { margin-top: 0.5rem; }
+.monitor-page { padding-bottom: 1.5rem; }
+
+.monitor-page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+.monitor-page-title { margin: 0; font-size: 1.25rem; font-weight: 600; color: var(--text-primary); }
+.monitor-update-time { font-size: 0.8125rem; color: var(--text-muted); }
+
+.monitor-alert { margin-bottom: 1rem; }
+
+.monitor-controls :deep(.el-card__body) { padding: 1rem 1.25rem; }
+.monitor-controls-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1rem 1.5rem;
+  row-gap: 0.75rem;
+}
+.monitor-filter-group,
+.monitor-refresh-group {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  flex-wrap: wrap;
+}
+.monitor-filter-label {
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+  margin-right: 0.25rem;
+  flex-shrink: 0;
+}
+.monitor-select { width: 140px; }
+.monitor-select-group { width: 120px; }
+.monitor-search { width: 160px; }
+.monitor-checkbox { margin-left: 0.25rem; }
+.monitor-interval-select { width: 90px; }
+
+.monitor-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.75rem 0 0.5rem;
+  font-size: 0.875rem;
+}
+.monitor-status-bar .stat { color: var(--text-secondary); }
+.monitor-table-card { margin-top: 0; }
+.monitor-table-card :deep(.el-card__body) { padding: 0.75rem 1rem; }
+
 .font-mono { font-family: var(--font-mono); }
 .value-error { color: var(--el-color-danger); }
-.empty-block { padding: 3rem; }
+.empty-block { padding: 3rem; margin-top: 0.5rem; }
 .write-cell { display: flex; align-items: center; gap: 0.5rem; justify-content: flex-end; }
-.write-input { width: 100px; }
+.write-input { width: 100px; min-width: 80px; }
 </style>

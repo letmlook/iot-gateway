@@ -59,12 +59,16 @@
 iot-gateway/
 ├── Cargo.toml                 # workspace
 ├── data/                      # 数据目录（可配置），含 data.db（SQLite）持久化
-├── crates/
+├── gateway/
 │   ├── gateway-sdk/           # 插件 SDK：trait、Tag/Group/DataValue、消息类型
-│   ├── gateway-core/          # 核心：Bus、Store、Manager、Node、persist
-│   ├── gateway-server/        # HTTP API、静态资源、main、config、state
-│   ├── gateway-plugin-sim/    # 南向示例：模拟设备
-│   └── gateway-plugin-mqtt/   # 北向示例：MQTT（当前占位日志）
+│   ├── gateway-core/         # 核心：Bus、Store、Manager、Node、persist
+│   ├── gateway-server/       # HTTP API、静态资源、main、config、state
+│   └── gateway-plugins/       # 南/北向插件
+│       ├── plugin-sim/        # 南向示例：模拟设备
+│       ├── plugin-mqtt/       # 北向示例：MQTT
+│       ├── plugin-modbus-tcp/ # 南向：Modbus TCP
+│       ├── plugin-modbus-rtu/ # 南向：Modbus RTU
+│       └── plugin-opcua/      # 南向：OPC UA
 ├── web/                       # Vue3 + Vite 前端
 │   ├── src/
 │   │   ├── App.vue
@@ -97,7 +101,7 @@ iot-gateway/
 
 ### 新增插件
 
-1. 在 `crates/` 下新增 `gateway-plugin-xxx`，依赖 `gateway-sdk`。
+1. 在 `gateway/gateway-plugins/` 下新增 `plugin-xxx`，依赖 `gateway-sdk`。
 2. 实现 `SouthPlugin` 或 `NorthPlugin`，导出实例。
 3. 在 `gateway-server` 的 `main` 中 `register_south` / `register_north`，并加入 workspace。
 
@@ -194,13 +198,13 @@ cd web && npm install && npm run build   # 产出 web/dist
 ## 八、.so 插件（对标 Neuron）
 
 1. **构建 .so**：  
-   `cargo build -p gateway-plugin-sim -p gateway-plugin-mqtt --features ffi`  
-   产出：`target/debug/libgateway_plugin_sim.so`、`libgateway_plugin_mqtt.so`。
+   `cargo build -p plugin-sim -p plugin-mqtt --features ffi`  
+   产出：`target/debug/libplugin_sim.so`、`libplugin_mqtt.so`。
 2. **部署**：将 .so 放入 `plugins/`（或 `GATEWAY_PLUGINS_DIR` 所指目录）。网关启动时扫描 `*.so` 并加载；若目录不存在则使用内置 sim/mqtt。
 3. **约定**：南向导出 `gateway_south_plugin_*`，北向导出 `gateway_north_plugin_*`；共享 `gateway_plugin_free_string`（由 gateway-sdk 提供）。详见 `gateway-sdk/ffi` 与各插件 `ffi` 模块。
 
 ## 九、后续可扩展
 
-1. **MQTT 北向**：在 `gateway-plugin-mqtt` 中接入 `rumqttc`，按 topic 发布 GroupData。
+1. **MQTT 北向**：在 `plugin-mqtt` 中接入 `rumqttc`，按 topic 发布 GroupData。
 2. **更多南向**：Modbus、OPC UA 等，按 `SouthPlugin` 实现即可；可同时提供 .so（`--features ffi`）与静态链接。
 3. **JWT / 认证**：API 鉴权，对齐 Neuron 的认证能力。

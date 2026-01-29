@@ -1,0 +1,24 @@
+[package]
+name = "plugin-mqtt"
+version = "0.1.0"
+edition = "2021"
+description = "北向示例插件：MQTT 发布，对标 Neuron MQTT 北向"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+default = ["mqtt-client"]
+mqtt-client = ["dep:rumqttc"]
+ffi = []  # 构建 .so 时启用
+
+[dependencies]
+gateway-sdk = { path = "../../gateway-sdk" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+rumqttc = { version = "0.24", optional = true }

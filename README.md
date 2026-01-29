@@ -26,11 +26,10 @@ cd web && npm install && npm run build
 
 ## 项目结构
 
-- `crates/gateway-sdk`：插件 trait、Tag/Group/DataValue、消息类型
-- `crates/gateway-core`：消息总线、Store、Manager、持久化、节点启停与路由
-- `crates/gateway-server`：REST API、静态资源、Config、AppState、main
-- `crates/gateway-plugin-sim`：南向示例（模拟设备）
-- `crates/gateway-plugin-mqtt`：北向示例（MQTT，当前占位）
+- `gateway/gateway-sdk`：插件 trait、Tag/Group/DataValue、消息类型
+- `gateway/gateway-core`：消息总线、Store、Manager、持久化、节点启停与路由
+- `gateway/gateway-server`：REST API、静态资源、Config、AppState、main
+- `gateway/gateway-plugins/`：南/北向插件（plugin-sim、plugin-mqtt、plugin-modbus-tcp、plugin-modbus-rtu、plugin-opcua）
 - `web/`：Vue3 + Vite 管理台
 
 ## 文档

@@ -1,11 +1,13 @@
 <script setup>
 import { ref, inject, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, VideoPlay, VideoPause, Edit, Delete, MoreFilled, Upload, Download, Grid, List } from '@element-plus/icons-vue'
 import { api } from '../api.js'
 
 const router = useRouter()
+const { t } = useI18n()
 const southPlugins = inject('southPlugins', ref([]))
 
 const nodes = ref([])
@@ -45,7 +47,7 @@ async function loadNodes() {
     const all = await api.nodes()
     nodes.value = all.filter(n => n.kind === 'south')
   } catch (e) {
-    error.value = '加载节点失败: ' + e.message
+    error.value = t('south.loadFailed') + e.message
   } finally {
     loading.value = false
   }
@@ -59,9 +61,9 @@ async function startNode(id) {
   try {
     await api.startNode(id)
     await loadNodes()
-    ElMessage.success('已启动')
+    ElMessage.success(t('south.startSuccess'))
   } catch (e) {
-    ElMessage.error('启动失败: ' + e.message)
+    ElMessage.error(t('south.startFailed') + e.message)
   }
 }
 
@@ -69,9 +71,9 @@ async function stopNode(id) {
   try {
     await api.stopNode(id)
     await loadNodes()
-    ElMessage.success('已停止')
+    ElMessage.success(t('south.stopSuccess'))
   } catch (e) {
-    ElMessage.error('停止失败: ' + e.message)
+    ElMessage.error(t('south.stopFailed') + e.message)
   }
 }
 
@@ -82,16 +84,16 @@ async function toggleNode(node) {
 
 async function deleteNode(id) {
   try {
-    await ElMessageBox.confirm('确定删除该南向设备？相关配置将被清除。', '确认删除', {
+    await ElMessageBox.confirm(t('south.deleteConfirm'), t('common.confirmDelete'), {
       type: 'warning',
-      confirmButtonText: '删除',
-      cancelButtonText: '取消'
+      confirmButtonText: t('common.delete'),
+      cancelButtonText: t('common.cancel')
     })
     await api.deleteNode(id)
     await loadNodes()
-    ElMessage.success('已删除')
+    ElMessage.success(t('south.deleteSuccess'))
   } catch (e) {
-    if (e !== 'cancel') ElMessage.error('删除失败: ' + e.message)
+    if (e !== 'cancel') ElMessage.error(t('south.deleteFailed') + e.message)
   }
 }
 
@@ -110,9 +112,9 @@ function getStateType(state) {
 }
 
 function getStateText(state) {
-  if (state === 'running') return '运行中'
-  if (state === 'error') return '错误'
-  return '已停止'
+  if (state === 'running') return t('common.running')
+  if (state === 'error') return t('common.error')
+  return t('common.stopped')
 }
 
 function handleExport() {
@@ -133,19 +135,19 @@ onMounted(loadNodes)
 <template>
   <div class="page-container">
     <div class="page-header south-header">
-      <h2 class="page-title">南向设备</h2>
+      <h2 class="page-title">{{ t('south.title') }}</h2>
       <div class="header-toolbar">
-        <el-select v-model="pluginFilter" placeholder="请选择插件类型" clearable style="width: 160px" class="mr-1">
+        <el-select v-model="pluginFilter" :placeholder="t('south.selectPlugin')" clearable style="width: 160px" class="mr-1">
           <el-option v-for="p in pluginOptions" :key="p.name" :label="p.name" :value="p.name" />
         </el-select>
-        <el-input v-model="keywordSearch" placeholder="输入关键字搜索" clearable style="width: 180px" class="mr-1" />
+        <el-input v-model="keywordSearch" :placeholder="t('south.keywordSearch')" clearable style="width: 180px" class="mr-1" />
         <div class="toolbar-btns">
-          <el-button :icon="Upload" text title="导入" @click="handleImport" />
-          <el-button :icon="Download" text title="导出" @click="handleExport" />
-          <el-button :icon="Grid" text :type="viewMode === 'grid' ? 'primary' : ''" title="网格视图" @click="viewMode = 'grid'" />
-          <el-button :icon="List" text :type="viewMode === 'list' ? 'primary' : ''" title="列表视图" @click="viewMode = 'list'" />
+          <el-button :icon="Upload" text :title="t('south.import')" @click="handleImport" />
+          <el-button :icon="Download" text :title="t('south.export')" @click="handleExport" />
+          <el-button :icon="Grid" text :type="viewMode === 'grid' ? 'primary' : ''" :title="t('south.gridView')" @click="viewMode = 'grid'" />
+          <el-button :icon="List" text :type="viewMode === 'list' ? 'primary' : ''" :title="t('south.listView')" @click="viewMode = 'list'" />
         </div>
-        <el-button type="primary" :icon="Plus" @click="goToCreate">添加设备</el-button>
+        <el-button type="primary" :icon="Plus" @click="goToCreate">{{ t('south.addDevice') }}</el-button>
       </div>
     </div>
 
@@ -164,30 +166,30 @@ onMounted(loadNodes)
         :header-cell-style="{ background: 'var(--el-fill-color-light)' }"
       >
         <el-table-column type="selection" width="48" />
-        <el-table-column prop="name" label="名称" min-width="140">
+        <el-table-column prop="name" :label="t('common.name')" min-width="140">
           <template #default="{ row }">
             <el-link type="primary" @click="goToDetail(row)">{{ row.name }}</el-link>
           </template>
         </el-table-column>
-        <el-table-column label="工作状态" width="100">
+        <el-table-column :label="t('south.workState')" width="100">
           <template #default="{ row }">
             <el-tag :type="getStateType(row.state)" size="small" effect="light">
               {{ getStateText(row.state) }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="连接状态" width="100">
+        <el-table-column :label="t('south.connState')" width="100">
           <template #default="{ row }">
             <span :class="{ 'text-success': row.state === 'running' }">
-              {{ row.state === 'running' ? '已连接' : '断开' }}
+              {{ row.state === 'running' ? t('south.connected') : t('south.disconnected') }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="延时(毫秒)" width="110">
+        <el-table-column label="Delay(ms)" width="110">
           <template #default> - </template>
         </el-table-column>
-        <el-table-column prop="plugin_name" label="插件" width="120" />
-        <el-table-column label="操作" width="140" fixed="right">
+        <el-table-column prop="plugin_name" :label="t('south.pluginType')" width="120" />
+        <el-table-column :label="t('common.operation')" width="140" fixed="right">
           <template #default="{ row }">
             <el-switch
               :model-value="row.state === 'running'"
@@ -199,13 +201,13 @@ onMounted(loadNodes)
                 <el-dropdown-menu>
                   <el-dropdown-item command="edit">
                     <el-icon><Edit /></el-icon>
-                    编辑设备
+                    {{ t('south.editDevice') }}
                   </el-dropdown-item>
-                  <el-dropdown-item command="stats">数据统计</el-dropdown-item>
-                  <el-dropdown-item command="setting">设备配置</el-dropdown-item>
-                  <el-dropdown-item command="copy">复制</el-dropdown-item>
+                  <el-dropdown-item command="stats">{{ t('south.dataMonitor') }}</el-dropdown-item>
+                  <el-dropdown-item command="setting">{{ t('south.deviceConfig') }}</el-dropdown-item>
+                  <el-dropdown-item command="copy">{{ t('common.copy') }}</el-dropdown-item>
                   <el-dropdown-item command="delete" divided>
-                    <span style="color: var(--el-color-danger)">删除</span>
+                    <span style="color: var(--el-color-danger)">{{ t('common.delete') }}</span>
                   </el-dropdown-item>
                 </el-dropdown-menu>
               </template>
@@ -236,8 +238,8 @@ onMounted(loadNodes)
           </template>
           <div class="card-body">
             <div class="info-row">
-              <span class="info-label">连接状态</span>
-              <span class="info-value">{{ node.state === 'running' ? '已连接' : '断开' }}</span>
+              <span class="info-label">{{ t('south.connState') }}</span>
+              <span class="info-value">{{ node.state === 'running' ? t('south.connected') : t('south.disconnected') }}</span>
             </div>
           </div>
           <template #footer>
@@ -246,8 +248,8 @@ onMounted(loadNodes)
                 :model-value="node.state === 'running'"
                 @change="toggleNode(node)"
               />
-              <el-button type="primary" size="small" :icon="Edit" @click="goToDetail(node)">配置</el-button>
-              <el-button type="danger" size="small" :icon="Delete" @click="deleteNode(node.id)">删除</el-button>
+              <el-button type="primary" size="small" :icon="Edit" @click="goToDetail(node)">{{ t('nodeDetail.config') }}</el-button>
+              <el-button type="danger" size="small" :icon="Delete" @click="deleteNode(node.id)">{{ t('common.delete') }}</el-button>
             </div>
           </template>
         </el-card>
@@ -257,10 +259,10 @@ onMounted(loadNodes)
         <span class="total-hint">共 {{ filteredNodes.length }} 条</span>
       </div>
 
-      <el-empty v-if="!filteredNodes.length" description="暂无南向设备" class="empty-block">
+      <el-empty v-if="!filteredNodes.length" :description="t('south.noNodes')" class="empty-block">
         <template #description>
-          <p v-if="nodes.length">没有匹配的设备，可调整筛选条件。</p>
-          <p v-else>点击「添加设备」创建第一个南向设备驱动。</p>
+          <p v-if="nodes.length">{{ t('south.noMatch') }}</p>
+          <p v-else>{{ t('south.createFirst') }}</p>
         </template>
       </el-empty>
     </template>

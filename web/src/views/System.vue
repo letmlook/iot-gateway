@@ -1,8 +1,11 @@
 <script setup>
 import { ref, onMounted } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
 import { Download, CopyDocument, Link } from '@element-plus/icons-vue'
 import { api } from '../api.js'
+
+const { t } = useI18n()
 
 const version = ref(null)
 const health = ref(null)
@@ -25,7 +28,7 @@ async function loadSystemInfo() {
     health.value = h
     metrics.value = m
   } catch (e) {
-    error.value = '加载系统信息失败: ' + e.message
+    error.value = t('system.loadFailed') + e.message
   } finally {
     loading.value = false
   }
@@ -37,7 +40,7 @@ async function exportConfig() {
     exportData.value = JSON.stringify(data, null, 2)
     showExportModal.value = true
   } catch (e) {
-    error.value = '导出配置失败: ' + e.message
+    error.value = t('system.exportFailed') + e.message
   }
 }
 
@@ -54,9 +57,9 @@ function downloadExport() {
 async function copyExport() {
   try {
     await navigator.clipboard.writeText(exportData.value)
-    ElMessage.success('已复制到剪贴板')
+    ElMessage.success(t('monitor.copied'))
   } catch (e) {
-    ElMessage.error('复制失败')
+    ElMessage.error(t('monitor.copyFailed'))
   }
 }
 
@@ -75,104 +78,130 @@ onMounted(loadSystemInfo)
 </script>
 
 <template>
-  <div class="page-container">
-    <div class="page-header">
-      <div class="header-info">
-        <p class="header-desc">查看系统信息、版本、监控指标，导出配置。</p>
+  <div class="page-container system-page">
+    <div class="system-body">
+      <div class="page-header system-header">
+        <p class="header-desc">{{ t('system.desc') }}</p>
       </div>
-      <el-button type="primary" :icon="Download" @click="exportConfig">导出配置</el-button>
-    </div>
 
-    <el-alert v-if="error" type="error" :title="error" closable show-icon @close="error = ''" class="mb-2" />
+      <div class="system-actions">
+        <el-button type="primary" :icon="Download" @click="exportConfig">{{ t('system.exportConfig') }}</el-button>
+      </div>
 
-    <el-skeleton v-if="loading" :rows="8" animated />
+      <el-alert v-if="error" type="error" :title="error" closable show-icon @close="error = ''" class="mb-2" />
 
-    <div v-else class="system-grid">
+      <el-skeleton v-if="loading" :rows="8" animated />
+
+      <div v-else class="system-grid">
       <el-card shadow="hover" class="system-card">
-        <template #header><span>版本信息</span></template>
+        <template #header><span>{{ t('system.versionInfo') }}</span></template>
         <div v-if="version" class="info-grid">
           <div class="info-item">
-            <span class="info-label">版本号</span>
+            <span class="info-label">{{ t('system.version') }}</span>
             <span class="info-value highlight">v{{ version.version }}</span>
           </div>
           <div v-if="version.build_date" class="info-item">
-            <span class="info-label">构建日期</span>
+            <span class="info-label">{{ t('system.buildDate') }}</span>
             <span class="info-value">{{ version.build_date }}</span>
           </div>
           <div v-if="version.revision" class="info-item">
-            <span class="info-label">Git 版本</span>
+            <span class="info-label">{{ t('system.gitRevision') }}</span>
             <span class="info-value font-mono">{{ version.revision.slice(0, 8) }}</span>
           </div>
         </div>
-        <div v-else class="no-data">无法获取版本信息</div>
+        <div v-else class="no-data">{{ t('system.noVersion') }}</div>
       </el-card>
 
       <el-card shadow="hover" class="system-card">
-        <template #header><span>运行状态</span></template>
+        <template #header><span>{{ t('system.runStatus') }}</span></template>
         <div v-if="health" class="info-grid">
           <div class="info-item">
-            <span class="info-label">系统状态</span>
+            <span class="info-label">{{ t('system.systemStatus') }}</span>
             <el-tag :type="health.status === 'ok' ? 'success' : 'danger'" size="small">
-              {{ health.status === 'ok' ? '正常运行' : '异常' }}
+              {{ health.status === 'ok' ? t('common.normal') : t('common.error') }}
             </el-tag>
           </div>
           <div class="info-item">
-            <span class="info-label">节点总数</span>
+            <span class="info-label">{{ t('system.nodesTotal') }}</span>
             <span class="info-value">{{ health.nodes_count || 0 }}</span>
           </div>
           <div class="info-item">
-            <span class="info-label">运行中</span>
+            <span class="info-label">{{ t('system.running') }}</span>
             <span class="info-value highlight">{{ health.nodes_running || 0 }}</span>
           </div>
           <div class="info-item">
-            <span class="info-label">南向插件</span>
+            <span class="info-label">{{ t('system.southPlugins') }}</span>
             <span class="info-value">{{ health.plugins_south || 0 }}</span>
           </div>
           <div class="info-item">
-            <span class="info-label">北向插件</span>
+            <span class="info-label">{{ t('system.northPlugins') }}</span>
             <span class="info-value">{{ health.plugins_north || 0 }}</span>
           </div>
         </div>
-        <div v-else class="no-data">无法获取运行状态</div>
+        <div v-else class="no-data">{{ t('system.noHealth') }}</div>
       </el-card>
 
       <el-card shadow="hover" class="system-card metrics-card">
-        <template #header><span>Prometheus 指标</span></template>
+        <template #header><span>{{ t('system.prometheusMetrics') }}</span></template>
         <div v-if="parseMetrics(metrics).length" class="metrics-list">
           <div class="metric-item" v-for="m in parseMetrics(metrics)" :key="m.name">
             <span class="metric-name">{{ m.name }}</span>
             <span class="metric-value">{{ m.value }}</span>
           </div>
         </div>
-        <div v-else class="no-data">暂无监控指标</div>
-        <el-link href="/api/metrics" target="_blank" type="primary" :icon="Link" class="mt-2">查看原始数据</el-link>
-      </el-card>
-
-      <el-card shadow="hover" class="system-card api-card">
-        <template #header><span>API 端点</span></template>
-        <div class="api-list">
-          <div class="api-item" v-for="path in ['/api/health', '/api/version', '/api/metrics', '/api/export', '/api/nodes', '/api/plugins/south', '/api/plugins/north']" :key="path">
-            <el-tag size="small" type="success">GET</el-tag>
-            <code class="api-path">{{ path }}</code>
-          </div>
-        </div>
+        <div v-else class="no-data">{{ t('system.noMetrics') }}</div>
+        <el-link href="/api/metrics" target="_blank" type="primary" :icon="Link" class="mt-2">{{ t('system.viewRaw') }}</el-link>
       </el-card>
     </div>
+    </div>
 
-    <el-dialog v-model="showExportModal" title="导出配置" width="640px" destroy-on-close>
+    <el-dialog v-model="showExportModal" :title="t('system.exportConfig')" width="640px" destroy-on-close>
       <el-input :model-value="exportData" type="textarea" :rows="18" readonly class="font-mono export-textarea" />
       <template #footer>
-        <el-button :icon="CopyDocument" @click="copyExport">复制</el-button>
-        <el-button type="primary" :icon="Download" @click="downloadExport">下载 JSON</el-button>
+        <el-button :icon="CopyDocument" @click="copyExport">{{ t('system.copyExport') }}</el-button>
+        <el-button type="primary" :icon="Download" @click="downloadExport">{{ t('system.downloadJson') }}</el-button>
       </template>
     </el-dialog>
   </div>
 </template>
 
 <style scoped>
+/* 系统页整体与下方内容同宽，导出配置按钮与卡片右侧对齐 */
+.system-page {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+/* 头部与卡片同一包裹层，保证同宽 */
+.system-body {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+.system-header {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  margin-bottom: 0.5rem;
+}
+
+/* 导出配置按钮放在描述下方、与卡片同宽区域（位置 2） */
+.system-actions {
+  width: 100%;
+  margin-bottom: 1.5rem;
+}
+
 .mb-2 { margin-bottom: 1rem; }
 .mt-2 { margin-top: 0.5rem; }
-.system-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1rem; }
+.system-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1rem; width: 100%; }
 .info-grid { display: grid; gap: 0.75rem; }
 .info-item { display: flex; justify-content: space-between; align-items: center; }
 .info-label { font-size: 0.9rem; color: var(--text-muted); }
@@ -182,11 +211,7 @@ onMounted(loadSystemInfo)
 .metric-item { display: flex; justify-content: space-between; padding: 0.4rem 0.6rem; background: var(--el-fill-color-light); border-radius: 6px; font-size: 0.85rem; }
 .metric-name { font-family: var(--font-mono); color: var(--text-secondary); }
 .metric-value { font-weight: 600; color: var(--el-color-primary); }
-.api-list { display: grid; gap: 0.4rem; }
-.api-item { display: flex; align-items: center; gap: 0.5rem; }
-.api-path { font-size: 0.85rem; color: var(--text-secondary); }
 .metrics-card { grid-column: span 2; }
-.api-card { grid-column: span 2; }
 .font-mono { font-family: var(--font-mono); }
-@media (max-width: 900px) { .metrics-card, .api-card { grid-column: span 1; } }
+@media (max-width: 900px) { .metrics-card { grid-column: span 1; } }
 </style>

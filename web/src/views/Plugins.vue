@@ -1,11 +1,13 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
-import { Plus, Document, CollectionTag } from '@element-plus/icons-vue'
+import { Plus } from '@element-plus/icons-vue'
 import { api } from '../api.js'
 
 const router = useRouter()
+const { t } = useI18n()
 
 const southPlugins = ref([])
 const northPlugins = ref([])
@@ -49,14 +51,6 @@ async function loadData() {
   }
 }
 
-function goToConfigSchema(plugin) {
-  router.push(`/plugins/schema/${plugin.kind}/${encodeURIComponent(plugin.name)}`)
-}
-
-function goToTagSchema(plugin) {
-  router.push({ path: `/plugins/schema/${plugin.kind}/${encodeURIComponent(plugin.name)}`, query: { type: 'tag' } })
-}
-
 function goCreateNode(plugin) {
   router.push(plugin.kind === 'south' ? '/south/new' : '/north/new')
 }
@@ -75,14 +69,14 @@ onMounted(loadData)
 <template>
   <div class="page-container">
     <div class="page-header plugins-header">
-      <h2 class="page-title">插件</h2>
+      <h2 class="page-title">{{ t('plugins.title') }}</h2>
       <div class="header-toolbar">
         <el-select v-model="activeTab" style="width: 120px" class="mr-1">
-          <el-option label="南向插件" value="south" />
-          <el-option label="北向插件" value="north" />
+          <el-option :label="t('plugins.southPlugins')" value="south" />
+          <el-option :label="t('plugins.northPlugins')" value="north" />
         </el-select>
-        <el-input v-model="pluginSearch" placeholder="请输入搜索名称" clearable style="width: 200px" class="mr-1" />
-        <el-button type="primary" :icon="Plus" @click="goAddPlugin">+ 添加插件</el-button>
+        <el-input v-model="pluginSearch" :placeholder="t('plugins.searchPlaceholder')" clearable style="width: 200px" class="mr-1" />
+        <el-button type="primary" :icon="Plus" @click="goAddPlugin">{{ t('plugins.addPlugin') }}</el-button>
       </div>
     </div>
 
@@ -94,36 +88,34 @@ onMounted(loadData)
       <el-tabs v-model="activeTab" class="plugins-tabs">
         <el-tab-pane name="south">
           <template #label>
-            <span class="tab-label"><span class="dot south" /> 南向插件 <el-tag size="small" type="info" class="ml-1">{{ southPlugins.length }}</el-tag></span>
+            <span class="tab-label"><span class="dot south" /> {{ t('plugins.southPlugins') }} <el-tag size="small" type="info" class="ml-1">{{ southPlugins.length }}</el-tag></span>
           </template>
           <!-- 表格视图（对标 Neuron） -->
           <el-table :data="plugins" size="default" stripe class="plugins-table">
-            <el-table-column prop="name" label="名称" min-width="120" />
-            <el-table-column label="插件类型" width="120">
+            <el-table-column prop="name" :label="t('common.name')" min-width="120" />
+            <el-table-column :label="t('plugins.pluginType')" width="120">
               <template #default="{ row }">
                 <el-tag size="small" :type="row.kind === 'south' ? 'success' : 'primary'">
-                  {{ row.kind === 'south' ? '南向设备' : '北向应用' }}
+                  {{ row.kind === 'south' ? t('plugins.southDevice') : t('plugins.northApp') }}
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="插件类别" width="100">
+            <el-table-column :label="t('plugins.pluginCategory')" width="100">
               <template #default>System</template>
             </el-table-column>
-            <el-table-column prop="version" label="插件版本" width="100">
+            <el-table-column prop="version" :label="t('plugins.version')" width="100">
               <template #default="{ row }">v{{ row.version || '-' }}</template>
             </el-table-column>
-            <el-table-column prop="description" label="描述" min-width="280" show-overflow-tooltip />
-            <el-table-column label="操作" width="240" fixed="right">
+            <el-table-column prop="description" :label="t('common.description')" min-width="280" show-overflow-tooltip />
+            <el-table-column :label="t('common.operation')" width="140" fixed="right">
               <template #default="{ row }">
-                <el-button type="primary" link size="small" :icon="Document" @click="goToConfigSchema(row)">Schema</el-button>
-                <el-button v-if="row.kind === 'south'" type="primary" link size="small" :icon="CollectionTag" @click="goToTagSchema(row)">标签</el-button>
                 <el-button type="primary" link size="small" :icon="Plus" @click="goCreateNode(row)">
-                  {{ row.kind === 'south' ? '创建设备' : '创建应用' }}
+                  {{ row.kind === 'south' ? t('plugins.createDevice') : t('plugins.createApp') }}
                 </el-button>
               </template>
             </el-table-column>
           </el-table>
-          <el-empty v-if="!plugins.length" description="暂无插件" class="empty-block" />
+          <el-empty v-if="!plugins.length" :description="t('plugins.noPlugins')" class="empty-block" />
           <div class="plugins-grid" style="display: none">
             <el-card v-for="p in plugins" :key="p.name + p.kind" class="plugin-card" :class="p.kind" shadow="hover">
               <template #header>
@@ -155,8 +147,6 @@ onMounted(loadData)
               </div>
               <template #footer>
                 <div class="plugin-actions">
-                  <el-button size="small" :icon="Document" @click="goToConfigSchema(p)">配置 Schema</el-button>
-                  <el-button v-if="p.kind === 'south'" size="small" :icon="CollectionTag" @click="goToTagSchema(p)">标签 Schema</el-button>
                   <el-button type="primary" size="small" :icon="Plus" @click="goCreateNode(p)">
                     {{ p.kind === 'south' ? '创建设备' : '创建应用' }}
                   </el-button>
@@ -172,30 +162,29 @@ onMounted(loadData)
         </el-tab-pane>
         <el-tab-pane name="north">
           <template #label>
-            <span class="tab-label"><span class="dot north" /> 北向插件 <el-tag size="small" type="info" class="ml-1">{{ northPlugins.length }}</el-tag></span>
+            <span class="tab-label"><span class="dot north" /> {{ t('plugins.northPlugins') }} <el-tag size="small" type="info" class="ml-1">{{ northPlugins.length }}</el-tag></span>
           </template>
           <el-table :data="plugins" size="default" stripe class="plugins-table">
-            <el-table-column prop="name" label="名称" min-width="120" />
-            <el-table-column label="插件类型" width="120">
+            <el-table-column prop="name" :label="t('common.name')" min-width="120" />
+            <el-table-column :label="t('plugins.pluginType')" width="120">
               <template #default="{ row }">
-                <el-tag size="small" type="primary">北向应用</el-tag>
+                <el-tag size="small" type="primary">{{ t('plugins.northApp') }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="插件类别" width="100">
+            <el-table-column :label="t('plugins.pluginCategory')" width="100">
               <template #default>System</template>
             </el-table-column>
-            <el-table-column prop="version" label="插件版本" width="100">
+            <el-table-column prop="version" :label="t('plugins.version')" width="100">
               <template #default="{ row }">v{{ row.version || '-' }}</template>
             </el-table-column>
-            <el-table-column prop="description" label="描述" min-width="280" show-overflow-tooltip />
-            <el-table-column label="操作" width="200" fixed="right">
+            <el-table-column prop="description" :label="t('common.description')" min-width="280" show-overflow-tooltip />
+            <el-table-column :label="t('common.operation')" width="120" fixed="right">
               <template #default="{ row }">
-                <el-button type="primary" link size="small" :icon="Document" @click="goToConfigSchema(row)">Schema</el-button>
-                <el-button type="primary" link size="small" :icon="Plus" @click="goCreateNode(row)">创建应用</el-button>
+                <el-button type="primary" link size="small" :icon="Plus" @click="goCreateNode(row)">{{ t('plugins.createApp') }}</el-button>
               </template>
             </el-table-column>
           </el-table>
-          <el-empty v-if="!plugins.length" description="暂无北向插件" class="empty-block" />
+          <el-empty v-if="!plugins.length" :description="t('plugins.noPlugins')" class="empty-block" />
           <div class="plugins-grid" style="display: none">
             <el-card v-for="p in plugins" :key="p.name + p.kind" class="plugin-card" :class="p.kind" shadow="hover">
               <template #header>
@@ -227,8 +216,6 @@ onMounted(loadData)
               </div>
               <template #footer>
                 <div class="plugin-actions">
-                  <el-button size="small" :icon="Document" @click="goToConfigSchema(p)">配置 Schema</el-button>
-                  <el-button v-if="p.kind === 'south'" size="small" :icon="CollectionTag" @click="goToTagSchema(p)">标签 Schema</el-button>
                   <el-button type="primary" size="small" :icon="Plus" @click="goCreateNode(p)">
                     {{ p.kind === 'south' ? '创建设备' : '创建应用' }}
                   </el-button>

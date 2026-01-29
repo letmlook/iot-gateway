@@ -1,0 +1,21 @@
+[package]
+name = "plugin-sim"
+version = "0.1.0"
+edition = "2021"
+description = "南向示例插件：模拟设备，用于测试与演示"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+default = []
+ffi = []  # 构建 .so 时启用，内置链接时不启用
+
+[dependencies]
+gateway-sdk = { path = "../../gateway-sdk" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }

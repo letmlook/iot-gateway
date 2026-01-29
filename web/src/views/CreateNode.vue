@@ -1,6 +1,7 @@
 <script setup>
 import { ref, inject, onMounted, computed, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { api } from '../api.js'
@@ -8,6 +9,7 @@ import NodeConfigForm from '../components/NodeConfigForm.vue'
 
 const router = useRouter()
 const route = useRoute()
+const { t } = useI18n()
 
 const kind = computed(() => route.path.startsWith('/north') ? 'north' : 'south')
 const southPlugins = inject('southPlugins', ref([]))
@@ -65,7 +67,7 @@ async function submit() {
     try {
       config = JSON.parse(createForm.value.config || '{}')
     } catch {
-      ElMessage.error('配置必须是合法 JSON')
+      ElMessage.error(t('createNode.configMustBeJson'))
       return
     }
   }
@@ -78,10 +80,10 @@ async function submit() {
       plugin_name: createForm.value.plugin_name,
       config
     })
-    ElMessage.success('创建成功')
+    ElMessage.success(t('createNode.createSuccess'))
     router.push(kind.value === 'south' ? '/south' : '/north')
   } catch (e) {
-    error.value = '创建失败: ' + e.message
+    error.value = t('createNode.createFailed') + e.message
   } finally {
     loading.value = false
   }
@@ -102,17 +104,17 @@ onMounted(async () => {
 <template>
   <div class="page-container create-page">
     <div class="page-header">
-      <el-button :icon="ArrowLeft" @click="goBack">返回</el-button>
-      <h2 class="page-title">{{ kind === 'south' ? '添加南向设备' : '添加北向应用' }}</h2>
+      <el-button :icon="ArrowLeft" @click="goBack">{{ t('createNode.back') }}</el-button>
+      <h2 class="page-title">{{ kind === 'south' ? t('createNode.addSouth') : t('createNode.addNorth') }}</h2>
     </div>
     <el-alert v-if="error" type="error" :title="error" closable show-icon @close="error = ''" class="mb-2" />
     <el-card class="form-card">
       <el-form :model="createForm" label-width="100px" label-position="top">
-        <el-form-item label="名称" required>
-          <el-input v-model="createForm.name" :placeholder="kind === 'south' ? '例如：modbus-device-1' : '例如：mqtt-cloud-1'" clearable />
+        <el-form-item :label="t('createNode.nodeName')" required>
+          <el-input v-model="createForm.name" :placeholder="kind === 'south' ? t('createNode.namePlaceholderSouth') : t('createNode.namePlaceholderNorth')" clearable />
         </el-form-item>
-        <el-form-item :label="kind === 'south' ? '插件' : '应用插件'" required>
-          <el-select v-model="createForm.plugin_name" placeholder="请选择" style="width: 100%">
+        <el-form-item :label="kind === 'south' ? t('createNode.pluginLabel') : t('createNode.appPluginLabel')" required>
+          <el-select v-model="createForm.plugin_name" :placeholder="t('createNode.selectPlugin')" style="width: 100%">
             <el-option
               v-for="p in pluginOptions"
               :key="p.name"
@@ -124,13 +126,13 @@ onMounted(async () => {
             {{ pluginOptions.find(pp => pp.name === createForm.plugin_name)?.description }}
           </div>
         </el-form-item>
-        <el-form-item label="节点配置">
+        <el-form-item :label="t('createNode.nodeConfig')">
           <template v-if="!createForm.plugin_name">
             <el-input
               v-model="createForm.config"
               type="textarea"
               :rows="6"
-              placeholder="请先选择插件"
+              :placeholder="t('schema.selectPluginFirst')"
               class="font-mono"
               disabled
             />
@@ -144,7 +146,7 @@ onMounted(async () => {
             />
           </template>
           <template v-else>
-            <div class="config-fallback-hint">该插件未提供配置 Schema，请使用 JSON 编辑。</div>
+            <div class="config-fallback-hint">{{ t('schema.noSchemaHint') }}</div>
             <el-input
               v-model="createForm.config"
               type="textarea"
@@ -155,9 +157,9 @@ onMounted(async () => {
           </template>
         </el-form-item>
         <el-form-item>
-          <el-button @click="goBack">取消</el-button>
+          <el-button @click="goBack">{{ t('createNode.cancel') }}</el-button>
           <el-button type="primary" :loading="loading" :disabled="!createForm.name || !createForm.plugin_name" @click="submit">
-            创建
+            {{ t('createNode.create') }}
           </el-button>
         </el-form-item>
       </el-form>

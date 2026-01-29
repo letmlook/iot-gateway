@@ -1,10 +1,12 @@
 <script setup>
 import { ref, inject, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import { Connection, Upload, Cpu, Monitor, Setting, Document } from '@element-plus/icons-vue'
 import { api } from '../api.js'
 
 const router = useRouter()
+const { t } = useI18n()
 const health = ref(null)
 const version = ref(null)
 const nodes = ref([])
@@ -18,11 +20,11 @@ const northNodes = computed(() => nodes.value.filter(n => n.kind === 'north'))
 const runningCount = computed(() => nodes.value.filter(n => n.state === 'running').length)
 
 const quickLinks = [
-  { path: '/south', icon: Connection, label: '南向设备', desc: '管理设备驱动', color: 'var(--el-color-success)' },
-  { path: '/north', icon: Upload, label: '北向应用', desc: '数据上报应用', color: 'var(--el-color-primary)' },
-  { path: '/monitor', icon: Monitor, label: '数据监控', desc: '实时数据与写值', color: 'var(--el-color-warning)' },
-  { path: '/plugins', icon: Cpu, label: '插件管理', desc: '驱动与 Schema', color: 'var(--el-color-info)' },
-  { path: '/system', icon: Setting, label: '系统管理', desc: '版本与导出', color: 'var(--el-color-info)' },
+  { path: '/south', icon: Connection, labelKey: 'dashboard.southDevices', descKey: 'dashboard.manageDrivers', color: 'var(--el-color-success)' },
+  { path: '/north', icon: Upload, labelKey: 'dashboard.northApps', descKey: 'menu.northAppsDesc', color: 'var(--el-color-primary)' },
+  { path: '/monitor', icon: Monitor, labelKey: 'dashboard.dataMonitor', descKey: 'dashboard.dataMonitorDesc', color: 'var(--el-color-warning)' },
+  { path: '/plugins', icon: Cpu, labelKey: 'dashboard.pluginManage', descKey: 'dashboard.pluginManageDesc', color: 'var(--el-color-info)' },
+  { path: '/system', icon: Setting, labelKey: 'dashboard.systemManage', descKey: 'dashboard.systemManageDesc', color: 'var(--el-color-info)' },
 ]
 
 async function loadData() {
@@ -38,7 +40,7 @@ async function loadData() {
     version.value = v
     nodes.value = nd
   } catch (e) {
-    error.value = '加载概览失败: ' + e.message
+    error.value = t('dashboard.loadOverviewFailed') + e.message
   } finally {
     loading.value = false
   }
@@ -65,8 +67,8 @@ onMounted(loadData)
   <div class="page-container dashboard">
     <div class="page-header">
       <div class="header-info">
-        <h2 class="dashboard-title">概览</h2>
-        <p class="header-desc">网关运行状态与快捷入口，对标 Neuron Dashboard 首页。</p>
+        <h2 class="dashboard-title">{{ t('dashboard.title') }}</h2>
+        <p class="header-desc">{{ t('dashboard.desc') }}</p>
       </div>
     </div>
 
@@ -82,7 +84,7 @@ onMounted(loadData)
           </div>
           <div class="stat-content">
             <span class="stat-value">{{ health?.nodes_count ?? 0 }}</span>
-            <span class="stat-label">节点总数</span>
+            <span class="stat-label">{{ t('header.nodesTotal') }}</span>
           </div>
         </el-card>
         <el-card shadow="hover" class="stat-card running" @click="go('/south')">
@@ -91,7 +93,7 @@ onMounted(loadData)
           </div>
           <div class="stat-content">
             <span class="stat-value">{{ health?.nodes_running ?? 0 }}</span>
-            <span class="stat-label">运行中</span>
+            <span class="stat-label">{{ t('header.runningCount') }}</span>
           </div>
         </el-card>
         <el-card shadow="hover" class="stat-card south">
@@ -100,7 +102,7 @@ onMounted(loadData)
           </div>
           <div class="stat-content">
             <span class="stat-value">{{ health?.plugins_south ?? 0 }}</span>
-            <span class="stat-label">南向插件</span>
+            <span class="stat-label">{{ t('header.southPlugins') }}</span>
           </div>
         </el-card>
         <el-card shadow="hover" class="stat-card north" @click="go('/plugins')">
@@ -109,13 +111,13 @@ onMounted(loadData)
           </div>
           <div class="stat-content">
             <span class="stat-value">{{ health?.plugins_north ?? 0 }}</span>
-            <span class="stat-label">北向插件</span>
+            <span class="stat-label">{{ t('header.northPlugins') }}</span>
           </div>
         </el-card>
       </div>
 
       <div class="section">
-        <h3 class="section-title">快捷入口</h3>
+        <h3 class="section-title">{{ t('dashboard.quickEntry') }}</h3>
         <div class="quick-grid">
           <el-card
             v-for="link in quickLinks"
@@ -128,8 +130,8 @@ onMounted(loadData)
               <component :is="link.icon" />
             </div>
             <div class="quick-info">
-              <span class="quick-label">{{ link.label }}</span>
-              <span class="quick-desc">{{ link.desc }}</span>
+              <span class="quick-label">{{ t(link.labelKey) }}</span>
+              <span class="quick-desc">{{ t(link.descKey) }}</span>
             </div>
           </el-card>
         </div>
@@ -138,8 +140,8 @@ onMounted(loadData)
       <div class="section two-col">
         <el-card shadow="hover" class="list-card">
           <template #header>
-            <span>南向设备</span>
-            <el-button type="primary" link size="small" @click="go('/south')">查看全部</el-button>
+            <span>{{ t('dashboard.southDevices') }}</span>
+            <el-button type="primary" link size="small" @click="go('/south')">{{ t('common.viewAll') }}</el-button>
           </template>
           <div v-if="southNodes.length" class="node-list">
             <div
@@ -149,15 +151,15 @@ onMounted(loadData)
               @click="goNode(n)"
             >
               <span class="node-name">{{ n.name }}</span>
-              <el-tag :type="getStateType(n.state)" size="small">{{ n.state === 'running' ? '运行中' : '已停止' }}</el-tag>
+              <el-tag :type="getStateType(n.state)" size="small">{{ n.state === 'running' ? t('common.running') : t('common.stopped') }}</el-tag>
             </div>
           </div>
-          <el-empty v-else description="暂无南向设备" :image-size="60" />
+          <el-empty v-else :description="t('south.noNodes')" :image-size="60" />
         </el-card>
         <el-card shadow="hover" class="list-card">
           <template #header>
-            <span>北向应用</span>
-            <el-button type="primary" link size="small" @click="go('/north')">查看全部</el-button>
+            <span>{{ t('dashboard.northApps') }}</span>
+            <el-button type="primary" link size="small" @click="go('/north')">{{ t('common.viewAll') }}</el-button>
           </template>
           <div v-if="northNodes.length" class="node-list">
             <div
@@ -167,15 +169,15 @@ onMounted(loadData)
               @click="goNode(n)"
             >
               <span class="node-name">{{ n.name }}</span>
-              <el-tag :type="getStateType(n.state)" size="small">{{ n.state === 'running' ? '运行中' : '已停止' }}</el-tag>
+              <el-tag :type="getStateType(n.state)" size="small">{{ n.state === 'running' ? t('common.running') : t('common.stopped') }}</el-tag>
             </div>
           </div>
-          <el-empty v-else description="暂无北向应用" :image-size="60" />
+          <el-empty v-else :description="t('north.noNodes')" :image-size="60" />
         </el-card>
       </div>
 
       <div v-if="version" class="footer-info">
-        <span>网关版本 v{{ version.version }}</span>
+        <span>{{ t('dashboard.gatewayVersion') }} v{{ version.version }}</span>
         <span v-if="version.revision" class="revision">{{ version.revision.slice(0, 8) }}</span>
       </div>
     </template>

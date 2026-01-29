@@ -60,12 +60,6 @@ const routes = [
     meta: { title: '插件管理' }
   },
   {
-    path: '/plugins/schema/:kind/:name',
-    name: 'PluginSchema',
-    component: () => import('./views/PluginSchema.vue'),
-    meta: { title: '插件 Schema' }
-  },
-  {
     path: '/system',
     name: 'System',
     component: () => import('./views/System.vue'),

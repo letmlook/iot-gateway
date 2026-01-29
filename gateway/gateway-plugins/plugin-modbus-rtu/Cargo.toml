@@ -1,0 +1,24 @@
+[package]
+name = "plugin-modbus-rtu"
+version = "0.1.0"
+edition = "2021"
+description = "南向 Modbus RTU 插件：通过串口连接 Modbus 设备"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+default = ["modbus-client"]
+modbus-client = ["dep:tokio-modbus", "dep:tokio-serial"]
+ffi = []  # 构建 .so/.dll 时启用
+
+[dependencies]
+gateway-sdk = { path = "../../gateway-sdk" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "io-util"] }
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+tokio-modbus = { version = "0.17", default-features = false, features = ["rtu"], optional = true }
+tokio-serial = { version = "5", optional = true }

@@ -1,0 +1,24 @@
+[package]
+name = "plugin-opcua"
+version = "0.1.0"
+edition = "2021"
+description = "南向 OPC UA 插件：对标 NeuronEX OPC UA，连接 OPC UA 服务器采集与写点位"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+default = []
+# 启用 opcua-client 需要系统安装 OpenSSL（Windows 需设置 OPENSSL_DIR）
+opcua-client = ["dep:opcua"]
+ffi = []  # 构建 .so/.dll 时启用
+
+[dependencies]
+gateway-sdk = { path = "../../gateway-sdk" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+opcua = { version = "0.12", default-features = false, features = ["client"], optional = true }

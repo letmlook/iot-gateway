@@ -1,11 +1,13 @@
 <script setup>
 import { ref, inject, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, VideoPlay, VideoPause, Edit, Delete, MoreFilled, Grid, List } from '@element-plus/icons-vue'
 import { api } from '../api.js'
 
 const router = useRouter()
+const { t } = useI18n()
 const northPlugins = inject('northPlugins', ref([]))
 
 const nodes = ref([])
@@ -59,7 +61,7 @@ async function loadNodes() {
       loadSubscriptionCount(n.id)
     }
   } catch (e) {
-    error.value = '加载节点失败: ' + e.message
+    error.value = t('north.loadFailed') + e.message
   } finally {
     loading.value = false
   }
@@ -77,9 +79,9 @@ async function startNode(id) {
   try {
     await api.startNode(id)
     await loadNodes()
-    ElMessage.success('已启动')
+    ElMessage.success(t('north.startSuccess'))
   } catch (e) {
-    ElMessage.error('启动失败: ' + e.message)
+    ElMessage.error(t('south.startFailed') + e.message)
   }
 }
 
@@ -87,9 +89,9 @@ async function stopNode(id) {
   try {
     await api.stopNode(id)
     await loadNodes()
-    ElMessage.success('已停止')
+    ElMessage.success(t('north.stopSuccess'))
   } catch (e) {
-    ElMessage.error('停止失败: ' + e.message)
+    ElMessage.error(t('south.stopFailed') + e.message)
   }
 }
 
@@ -124,14 +126,14 @@ function getStateType(state) {
 }
 
 function getStateText(state) {
-  if (state === 'running') return '运行中'
-  if (state === 'error') return '错误'
-  return '已停止'
+  if (state === 'running') return t('common.running')
+  if (state === 'error') return t('common.error')
+  return t('common.stopped')
 }
 
 function getConnText(state) {
-  if (state === 'running') return '已连接'
-  return '断开'
+  if (state === 'running') return t('south.connected')
+  return t('south.disconnected')
 }
 
 onMounted(loadNodes)
@@ -140,17 +142,17 @@ onMounted(loadNodes)
 <template>
   <div class="page-container">
     <div class="page-header north-header">
-      <h2 class="page-title">北向应用</h2>
+      <h2 class="page-title">{{ t('north.title') }}</h2>
       <div class="header-toolbar">
-        <el-select v-model="pluginFilter" placeholder="请选择插件类型" clearable style="width: 160px" class="mr-1">
+        <el-select v-model="pluginFilter" :placeholder="t('north.selectPlugin')" clearable style="width: 160px" class="mr-1">
           <el-option v-for="p in pluginOptions" :key="p.name" :label="p.name" :value="p.name" />
         </el-select>
-        <el-input v-model="keywordSearch" placeholder="输入关键字搜索" clearable style="width: 180px" class="mr-1" />
+        <el-input v-model="keywordSearch" :placeholder="t('north.keywordSearch')" clearable style="width: 180px" class="mr-1" />
         <div class="toolbar-btns">
-          <el-button :icon="Grid" text :type="viewMode === 'grid' ? 'primary' : ''" title="网格视图" @click="viewMode = 'grid'" />
-          <el-button :icon="List" text :type="viewMode === 'list' ? 'primary' : ''" title="列表视图" @click="viewMode = 'list'" />
+          <el-button :icon="Grid" text :type="viewMode === 'grid' ? 'primary' : ''" :title="t('south.gridView')" @click="viewMode = 'grid'" />
+          <el-button :icon="List" text :type="viewMode === 'list' ? 'primary' : ''" :title="t('south.listView')" @click="viewMode = 'list'" />
         </div>
-        <el-button type="primary" :icon="Plus" @click="goToCreate">添加应用</el-button>
+        <el-button type="primary" :icon="Plus" @click="goToCreate">{{ t('north.addApp') }}</el-button>
       </div>
     </div>
 
@@ -168,30 +170,30 @@ onMounted(loadNodes)
         :header-cell-style="{ background: 'var(--el-fill-color-light)' }"
       >
         <el-table-column type="selection" width="48" />
-        <el-table-column prop="name" label="名称" min-width="140">
+        <el-table-column prop="name" :label="t('common.name')" min-width="140">
           <template #default="{ row }">
             <el-link type="primary" @click="goToDetail(row)">{{ row.name }}</el-link>
           </template>
         </el-table-column>
-        <el-table-column label="工作状态" width="100">
+        <el-table-column :label="t('south.workState')" width="100">
           <template #default="{ row }">
             <el-tag :type="getStateType(row.state)" size="small" effect="light">
               {{ getStateText(row.state) }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="连接状态" width="100">
+        <el-table-column :label="t('south.connState')" width="100">
           <template #default="{ row }">
             <span :class="{ 'text-success': row.state === 'running' }">
               {{ getConnText(row.state) }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="订阅组总数" width="110">
+        <el-table-column :label="t('north.subscriptions')" width="110">
           <template #default="{ row }">{{ getSubCount(row.id) }}</template>
         </el-table-column>
-        <el-table-column prop="plugin_name" label="插件" width="120" />
-        <el-table-column label="操作" width="140" fixed="right">
+        <el-table-column prop="plugin_name" :label="t('south.pluginType')" width="120" />
+        <el-table-column :label="t('common.operation')" width="140" fixed="right">
           <template #default="{ row }">
             <el-switch
               :model-value="row.state === 'running'"
@@ -203,10 +205,10 @@ onMounted(loadNodes)
                 <el-dropdown-menu>
                   <el-dropdown-item command="edit">
                     <el-icon><Edit /></el-icon>
-                    编辑应用
+                    {{ t('north.editApp') }}
                   </el-dropdown-item>
                   <el-dropdown-item command="delete" divided>
-                    <span style="color: var(--el-color-danger)">删除</span>
+                    <span style="color: var(--el-color-danger)">{{ t('common.delete') }}</span>
                   </el-dropdown-item>
                 </el-dropdown-menu>
               </template>
@@ -254,10 +256,10 @@ onMounted(loadNodes)
         <span class="total-hint">共 {{ filteredNodes.length }} 条</span>
       </div>
 
-      <el-empty v-if="!filteredNodes.length" description="暂无北向应用" class="empty-block">
+      <el-empty v-if="!filteredNodes.length" :description="t('north.noNodes')" class="empty-block">
         <template #description>
-          <p v-if="nodes.length">没有匹配的应用，可调整筛选条件。</p>
-          <p v-else>点击「添加应用」创建第一个北向数据应用。</p>
+          <p v-if="nodes.length">{{ t('north.noMatch') }}</p>
+          <p v-else>{{ t('north.createFirst') }}</p>
         </template>
       </el-empty>
     </template>

@@ -13,6 +13,7 @@
     "@vue/shared": "^3.5.27",
     "element-plus": "^2.13.1",
     "vue": "^3.5.24",
+    "vue-i18n": "^11.2.8",
     "vue-router": "^4.6.4"
   },
   "devDependencies": {

@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Back, Setting, VideoPlay, VideoPause, Plus, Edit, Delete, RefreshRight, EditPen } from '@element-plus/icons-vue'
 import { api } from '../api.js'
@@ -8,6 +9,7 @@ import NodeConfigForm from '../components/NodeConfigForm.vue'
 
 const route = useRoute()
 const router = useRouter()
+const { t } = useI18n()
 
 const nodeId = computed(() => route.params.id)
 const isNorth = computed(() => route.path.startsWith('/north'))
@@ -300,7 +302,7 @@ async function openSettingModal() {
     }
     showSettingModal.value = true
   } catch (e) {
-    error.value = '获取配置失败: ' + e.message
+    error.value = t('nodeDetail.loadConfigFailed') + e.message
   }
 }
 
@@ -325,9 +327,9 @@ async function saveSetting() {
     await api.updateNodeSetting(nodeId.value, body)
     showSettingModal.value = false
     await loadNode()
-    ElMessage.success('配置已保存')
+    ElMessage.success(t('nodeDetail.saveSuccess'))
   } catch (e) {
-    error.value = '保存配置失败: ' + e.message
+    error.value = t('nodeDetail.saveFailed') + e.message
   }
 }
 
@@ -441,7 +443,7 @@ watch(nodeId, loadNode)
         <el-button :icon="Back" @click="router.push(isNorth ? '/north' : '/south')">返回</el-button>
         <div class="node-info">
           <h2 class="node-name">{{ node.name }}</h2>
-          <el-button type="primary" link size="small" :icon="EditPen" @click="openNameModal">编辑名称</el-button>
+          <el-button type="primary" link size="small" :icon="EditPen" @click="openNameModal">{{ t('nodeDetail.editName') }}</el-button>
           <el-tag size="small" type="info">{{ node.plugin_name }}</el-tag>
           <el-tag :type="node.state === 'running' ? 'success' : node.state === 'error' ? 'danger' : 'info'" size="small" effect="light">
             {{ node.state === 'running' ? '运行中' : node.state === 'error' ? '错误' : '已停止' }}
@@ -449,7 +451,7 @@ watch(nodeId, loadNode)
         </div>
       </div>
       <div class="header-right">
-        <el-button :icon="Setting" @click="openSettingModal">配置</el-button>
+        <el-button :icon="Setting" @click="openSettingModal">{{ t('nodeDetail.config') }}</el-button>
         <el-button
           :type="node.state === 'running' ? 'warning' : 'success'"
           :icon="node.state === 'running' ? VideoPause : VideoPlay"
@@ -565,7 +567,7 @@ watch(nodeId, loadNode)
       </el-tab-pane>
     </el-tabs>
 
-    <el-dialog v-model="showGroupModal" :title="editingGroup ? '编辑组' : '添加组'" width="440px" destroy-on-close>
+    <el-dialog v-model="showGroupModal" :title="editingGroup ? t('nodeDetail.editGroup') : t('nodeDetail.addGroup')" width="440px" destroy-on-close>
       <el-form :model="groupForm" label-width="100px" label-position="top">
         <el-form-item label="组名称" required>
           <el-input v-model="groupForm.name" placeholder="例如：default" clearable />
@@ -574,7 +576,7 @@ watch(nodeId, loadNode)
           <el-input-number v-model="groupForm.interval_ms" :min="100" :step="100" style="width: 100%" />
         </el-form-item>
         <el-form-item label="描述">
-          <el-input v-model="groupForm.description" placeholder="可选" clearable />
+          <el-input v-model="groupForm.description" :placeholder="t('nodeDetail.optional')" clearable />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -583,7 +585,7 @@ watch(nodeId, loadNode)
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showTagModal" :title="editingTag ? '编辑标签' : '添加点位'" width="440px" destroy-on-close>
+    <el-dialog v-model="showTagModal" :title="editingTag ? t('nodeDetail.editTag') : t('nodeDetail.addTag')" width="440px" destroy-on-close>
       <el-form :model="tagForm" label-width="100px" label-position="top">
         <el-form-item label="名称" required>
           <el-input v-model="tagForm.name" placeholder="例如：temperature" clearable />
@@ -607,11 +609,11 @@ watch(nodeId, loadNode)
           </el-select>
         </el-form-item>
         <el-form-item label="描述">
-          <el-input v-model="tagForm.description" placeholder="可选" clearable />
+          <el-input v-model="tagForm.description" :placeholder="t('nodeDetail.optional')" clearable />
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="showTagModal = false">取消</el-button>
+        <el-button @click="showTagModal = false">{{ t('common.cancel') }}</el-button>
         <el-button type="primary" :disabled="!tagForm.name || !tagForm.group_id || !tagForm.address" @click="saveTag">保存</el-button>
       </template>
     </el-dialog>
@@ -650,7 +652,7 @@ watch(nodeId, loadNode)
           </el-table-column>
           <el-table-column label="描述" min-width="100">
             <template #default="{ row }">
-              <el-input v-model="row.description" placeholder="可选" size="small" />
+              <el-input v-model="row.description" :placeholder="t('nodeDetail.optional')" size="small" />
             </template>
           </el-table-column>
           <el-table-column label="操作" width="90" fixed="right">
@@ -687,9 +689,9 @@ watch(nodeId, loadNode)
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showSettingModal" title="节点配置" width="600px" destroy-on-close>
+    <el-dialog v-model="showSettingModal" :title="t('nodeDetail.nodeConfig')" width="600px" destroy-on-close>
       <el-radio-group v-model="settingEditMode" size="small" class="setting-mode-group">
-        <el-radio-button value="form">表单</el-radio-button>
+        <el-radio-button value="form">{{ t('schema.form') }}</el-radio-button>
         <el-radio-button value="json">JSON</el-radio-button>
       </el-radio-group>
       <template v-if="settingEditMode === 'form' && node">
@@ -708,12 +710,12 @@ watch(nodeId, loadNode)
         class="font-mono setting-json-input"
       />
       <template #footer>
-        <el-button @click="showSettingModal = false">取消</el-button>
-        <el-button type="primary" @click="saveSetting">保存配置</el-button>
+        <el-button @click="showSettingModal = false">{{ t('common.cancel') }}</el-button>
+        <el-button type="primary" @click="saveSetting">{{ t('nodeDetail.saveConfig') }}</el-button>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showNameModal" title="编辑节点名称" width="400px" destroy-on-close>
+    <el-dialog v-model="showNameModal" :title="t('nodeDetail.editName')" width="400px" destroy-on-close>
       <el-form label-position="top">
         <el-form-item label="名称">
           <el-input v-model="editNameValue" placeholder="输入节点名称" clearable />

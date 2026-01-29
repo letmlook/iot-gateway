@@ -4,7 +4,10 @@
  * 支持 Int / String / Bool 类型，必填/可选、默认值、min/max/regex 校验。
  */
 import { ref, watch, computed, onMounted } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { api } from '../api.js'
+
+const { t, locale } = useI18n()
 
 const props = defineProps({
   /** 插件名称，如 sim / mqtt */
@@ -27,6 +30,24 @@ const formValues = ref({})
 const hasSchema = computed(() => schema.value && schema.value.params && schema.value.params.length > 0)
 
 const params = computed(() => schema.value?.params || [])
+
+/** 按当前语言取参数展示标签：name_zh/name_en，无则用 name */
+function paramLabel(p) {
+  if (!p) return ''
+  const isZh = locale.value === 'zh'
+  if (isZh && p.name_zh) return p.name_zh
+  if (!isZh && p.name_en) return p.name_en
+  return p.name || ''
+}
+
+/** 按当前语言取参数展示描述：description_zh/description_en，无则用 description 或 name */
+function paramDesc(p) {
+  if (!p) return ''
+  const isZh = locale.value === 'zh'
+  if (isZh && p.description_zh) return p.description_zh
+  if (!isZh && p.description_en) return p.description_en
+  return p.description || p.name || ''
+}
 
 function getParamType(p) {
   const t = (p.ty ?? p.type ?? 'string').toString().toLowerCase()
@@ -98,7 +119,7 @@ async function loadSchema() {
     initFormValues()
   } catch (e) {
     schema.value = null
-    schemaError.value = e.message || '加载配置 Schema 失败'
+    schemaError.value = e.message || t('schema.loadFailed')
     formValues.value = {}
     emit('update:modelValue', {})
   } finally {
@@ -146,7 +167,7 @@ onMounted(() => {
         <el-form-item
           v-for="p in params"
           :key="p.name"
-          :label="p.name"
+          :label="paramLabel(p)"
           :required="isRequired(p)"
         >
           <template v-if="getParamType(p) === 'int'">
@@ -154,7 +175,7 @@ onMounted(() => {
               :model-value="formValues[p.name]"
               :min="p.valid?.min ?? undefined"
               :max="p.valid?.max ?? undefined"
-              :placeholder="p.description || p.name"
+              :placeholder="paramDesc(p)"
               style="width: 100%"
               @update:model-value="formValues[p.name] = $event; onFieldChange()"
             />
@@ -165,30 +186,30 @@ onMounted(() => {
                 :model-value="!!formValues[p.name]"
                 @update:model-value="formValues[p.name] = $event; onFieldChange()"
               />
-              <span v-if="p.description" class="param-desc inline">{{ p.description }}</span>
+              <span v-if="paramDesc(p)" class="param-desc inline">{{ paramDesc(p) }}</span>
             </div>
           </template>
           <template v-else>
             <el-input
               :model-value="formValues[p.name]"
               :type="(p.name || '').toLowerCase().includes('password') ? 'password' : 'text'"
-              :placeholder="p.description || p.name"
+              :placeholder="paramDesc(p)"
               :maxlength="p.valid?.length"
               show-password
               clearable
               @update:model-value="formValues[p.name] = $event; onFieldChange()"
             />
           </template>
-          <div v-if="p.description && getParamType(p) !== 'bool'" class="param-desc">
-            {{ p.description }}
+          <div v-if="paramDesc(p) && getParamType(p) !== 'bool'" class="param-desc">
+            {{ paramDesc(p) }}
           </div>
         </el-form-item>
       </el-form>
     </template>
 
     <div v-else class="no-schema-hint">
-      <span v-if="pluginName">该插件未提供配置 Schema，请使用 JSON 编辑。</span>
-      <span v-else>请先选择插件。</span>
+      <span v-if="pluginName">{{ t('schema.noSchemaHint') }}</span>
+      <span v-else>{{ t('schema.selectPluginFirst') }}</span>
     </div>
   </div>
 </template>

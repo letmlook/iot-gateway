@@ -1,10 +1,12 @@
 <script setup>
 import { ref, onMounted, computed, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Close, Setting, VideoPlay, VideoPause, Plus, Edit, Delete, RefreshRight, EditPen } from '@element-plus/icons-vue'
 import { api } from '../api.js'
 import NodeConfigForm from './NodeConfigForm.vue'
 
+const { t } = useI18n()
 const props = defineProps({
   nodeId: { type: String, required: true },
   kind: { type: String, required: true } // 'south' | 'north'
@@ -269,7 +271,7 @@ async function openSettingPanel() {
     }
     showSettingPanel.value = true
   } catch (e) {
-    error.value = '获取配置失败: ' + e.message
+    error.value = t('nodeDetail.loadConfigFailed') + e.message
   }
 }
 function onSettingConfigFromForm(v) {
@@ -282,9 +284,9 @@ async function saveSetting() {
     showSettingPanel.value = false
     await loadNode()
     emit('refresh')
-    ElMessage.success('配置已保存')
+    ElMessage.success(t('nodeDetail.saveSuccess'))
   } catch (e) {
-    error.value = '保存配置失败: ' + e.message
+    error.value = t('nodeDetail.saveFailed') + e.message
   }
 }
 
@@ -412,11 +414,11 @@ watch(() => props.nodeId, loadNode)
       <!-- 配置：右侧内联 -->
       <div v-if="showSettingPanel" class="inline-section setting-section">
         <div class="inline-section-header">
-          <span>节点配置</span>
+          <span>{{ t('nodeDetail.nodeConfig') }}</span>
           <el-button text size="small" @click="showSettingPanel = false">收起</el-button>
         </div>
         <el-radio-group v-model="settingEditMode" size="small" class="mb-2">
-          <el-radio-button value="form">表单</el-radio-button>
+          <el-radio-button value="form">{{ t('schema.form') }}</el-radio-button>
           <el-radio-button value="json">JSON</el-radio-button>
         </el-radio-group>
         <template v-if="settingEditMode === 'form'">
@@ -429,8 +431,8 @@ watch(() => props.nodeId, loadNode)
         </template>
         <el-input v-else v-model="settingForm" type="textarea" :rows="10" class="font-mono" />
         <div class="inline-section-footer">
-          <el-button size="small" @click="showSettingPanel = false">取消</el-button>
-          <el-button size="small" type="primary" @click="saveSetting">保存配置</el-button>
+          <el-button size="small" @click="showSettingPanel = false">{{ t('common.cancel') }}</el-button>
+          <el-button size="small" type="primary" @click="saveSetting">{{ t('nodeDetail.saveConfig') }}</el-button>
         </div>
       </div>
 
@@ -449,7 +451,7 @@ watch(() => props.nodeId, loadNode)
                 <el-input-number v-model="groupForm.interval_ms" :min="100" :step="100" style="width: 100%" />
               </el-form-item>
               <el-form-item label="描述">
-                <el-input v-model="groupForm.description" placeholder="可选" clearable />
+                <el-input v-model="groupForm.description" :placeholder="t('nodeDetail.optional')" clearable />
               </el-form-item>
               <el-form-item>
                 <el-button @click="showGroupForm = false">取消</el-button>
