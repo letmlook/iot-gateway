@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/gateway-sdk",
+    "crates/gateway-core",
+    "crates/gateway-server",
+    "crates/gateway-plugin-sim",
+    "crates/gateway-plugin-mqtt",
+]

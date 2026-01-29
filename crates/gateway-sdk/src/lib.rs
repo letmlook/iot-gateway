@@ -1,0 +1,21 @@
+//! # Gateway SDK
+//!
+//! 南/北向插件共享的类型与 trait 定义，对标 Neuron 的插件体系。
+//! 插件可静态链接或编译为 .so（cdylib），经 `gateway-sdk/ffi` ABI 动态加载。
+
+pub mod error;
+pub mod ffi;
+pub mod messages;
+pub mod plugin;
+pub mod schema;
+pub mod types;
+
+pub use error::{PluginError, PluginErrorCode, PluginResult};
+pub use ffi::{parse_result, ptr_to_string, FfiPluginMeta, FfiResult};
+pub use messages::{GroupData, GroupSubscription, TagRead, TagWrite};
+pub use plugin::{NorthPlugin, PluginMeta, SouthPlugin};
+pub use schema::{ConfigSchema, ParamAttribute, ParamSchema, ParamType, ParamValid, TagRegexEntry, TagSchema};
+pub use types::{
+    DataType, DataValue, Group, GroupId, NodeId, NodeKind, NodeState, PluginConfig, PluginKind,
+    Tag, TagAttr, TagId,
+};

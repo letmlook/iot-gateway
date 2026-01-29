@@ -1,0 +1,31 @@
+# Rust / Cargo
+/target/
+
+# Plugin build artifacts
+/plugins/*.so
+/plugins/*.dylib
+/plugins/*.dll
+
+# Runtime data
+/data/*.db
+/data/*.db.bak
+/data/*.json
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+
+# Local env
+.env
+.env.*
+!.env.example
