@@ -11,8 +11,9 @@ const { t } = useI18n()
 const loading = ref(true)
 const uploading = ref(false)
 const resetting = ref(false)
+const generatingMachineId = ref(false)
 const error = ref('')
-const machineId = ref('')
+const machineId = ref('') // 默认不显示，仅点击「生成」后临时显示
 const licenseStatus = ref(null) // { hasLicense, features }
 const fileInputRef = ref(null)
 
@@ -20,16 +21,27 @@ async function loadLicenseInfo() {
   loading.value = true
   error.value = ''
   try {
-    const [midRes, statusRes] = await Promise.all([
-      api.licenseMachineId().catch(() => null),
-      api.licenseStatus().catch(() => null),
-    ])
-    machineId.value = midRes?.machineId ?? ''
+    const statusRes = await api.licenseStatus().catch(() => null)
     licenseStatus.value = statusRes ?? null
+    // 机器码不在加载时请求，由用户点击「生成机器码」后再获取
   } catch (e) {
     error.value = t('license.loadFailed') + getErrorMessage(t, e)
   } finally {
     loading.value = false
+  }
+}
+
+async function generateMachineId() {
+  generatingMachineId.value = true
+  error.value = ''
+  try {
+    const res = await api.licenseMachineId()
+    machineId.value = res?.machineId ?? ''
+  } catch (e) {
+    error.value = t('license.loadFailed') + getErrorMessage(t, e)
+    machineId.value = ''
+  } finally {
+    generatingMachineId.value = false
   }
 }
 
@@ -128,7 +140,7 @@ onMounted(loadLicenseInfo)
       <el-alert v-if="error" type="error" :title="error" show-icon class="mb-2" />
 
       <div v-loading="loading" class="license-content">
-        <!-- 机器码 -->
+        <!-- 机器码：默认不显示，仅显示「生成」「复制」按钮；生成后临时显示 -->
         <div class="license-section">
           <div class="section-title">
             <el-icon><Key /></el-icon>
@@ -136,17 +148,29 @@ onMounted(loadLicenseInfo)
           </div>
           <p class="section-hint">{{ t('license.machineIdHint') }}</p>
           <div class="machine-id-row">
-            <el-input
-              :model-value="machineId"
-              readonly
-              type="textarea"
-              :rows="2"
-              class="machine-id-input"
-            />
-            <el-button type="primary" :icon="CopyDocument" @click="copyMachineId" :disabled="!machineId">
+            <el-button
+              type="primary"
+              :loading="generatingMachineId"
+              @click="generateMachineId"
+            >
+              {{ t('license.generateMachineId') }}
+            </el-button>
+            <el-button
+              :icon="CopyDocument"
+              @click="copyMachineId"
+              :disabled="!machineId"
+            >
               {{ t('license.copyMachineId') }}
             </el-button>
           </div>
+          <el-input
+            v-if="machineId"
+            :model-value="machineId"
+            readonly
+            type="textarea"
+            :rows="2"
+            class="machine-id-input machine-id-temp"
+          />
         </div>
 
         <!-- 授权状态 -->
@@ -289,8 +313,15 @@ onMounted(loadLicenseInfo)
   gap: 0.75rem;
   align-items: flex-start;
 }
+.machine-id-row {
+  flex-wrap: wrap;
+}
 .machine-id-input {
   flex: 1;
+  min-width: 100%;
+}
+.machine-id-temp {
+  margin-top: 0.75rem;
 }
 .machine-id-input :deep(textarea) {
   font-family: ui-monospace, monospace;

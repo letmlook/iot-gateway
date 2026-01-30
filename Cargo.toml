@@ -9,4 +9,5 @@ members = [
     "gateway/gateway-plugins/plugin-modbus-tcp",
     "gateway/gateway-plugins/plugin-modbus-rtu",
     "gateway/gateway-plugins/plugin-opcua",
+    "gateway/gateway-plugins/plugin-virb",
 ]

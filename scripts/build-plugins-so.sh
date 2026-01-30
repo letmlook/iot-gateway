@@ -5,6 +5,6 @@
 set -e
 cd "$(dirname "$0")/.."
 mkdir -p plugins
-cargo build -p plugin-sim -p plugin-mqtt -p plugin-modbus-tcp -p plugin-modbus-rtu -p plugin-opcua --features ffi
-cp target/debug/libplugin_sim.so target/debug/libplugin_mqtt.so target/debug/libplugin_modbus_tcp.so target/debug/libplugin_modbus_rtu.so target/debug/libplugin_opcua.so plugins/
+cargo build -p plugin-sim -p plugin-mqtt -p plugin-modbus-tcp -p plugin-modbus-rtu -p plugin-opcua -p plugin-virb --features ffi
+cp target/debug/libplugin_sim.so target/debug/libplugin_mqtt.so target/debug/libplugin_modbus_tcp.so target/debug/libplugin_modbus_rtu.so target/debug/libplugin_opcua.so target/debug/libplugin_virb.so plugins/
 echo "plugins: $(ls plugins/*.so 2>/dev/null || true)"

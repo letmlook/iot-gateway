@@ -107,6 +107,12 @@ function optionList(p) {
   })
 }
 
+/** select 类型：选项不超过 2 个用单选按钮，大于 2 个用下拉 */
+function useRadioForSelect(p) {
+  const opts = p.options || []
+  return opts.length > 0 && opts.length <= 2
+}
+
 function isRequired(p) {
   const a = (p.attribute ?? '').toString().toLowerCase()
   return a === 'required'
@@ -283,7 +289,22 @@ onMounted(() => {
             </div>
           </template>
           <template v-else-if="getParamType(p) === 'select'">
+            <el-radio-group
+              v-if="useRadioForSelect(p)"
+              :model-value="formValues[p.name]"
+              class="select-radio-group"
+              @update:model-value="formValues[p.name] = $event; onFieldChange()"
+            >
+              <el-radio
+                v-for="opt in optionList(p)"
+                :key="String(opt.value)"
+                :value="opt.value"
+              >
+                {{ opt.label }}
+              </el-radio>
+            </el-radio-group>
             <el-select
+              v-else
               :model-value="formValues[p.name]"
               :placeholder="paramDesc(p)"
               style="width: 100%"
@@ -358,5 +379,6 @@ onMounted(() => {
   cursor: help;
 }
 .bool-row { display: flex; align-items: center; gap: 0.5rem; }
+.select-radio-group { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; }
 .file-path-hint { font-size: 0.75rem; color: var(--el-text-color-secondary); margin-top: 0.25rem; word-break: break-all; }
 </style>

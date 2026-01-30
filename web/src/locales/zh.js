@@ -267,6 +267,7 @@ export default {
     desc: '查看本机机器码、授权状态与已开通功能。授权文件为完全离线校验，无网络请求。',
     machineId: '机器码',
     machineIdHint: '将机器码提供给管理员，用于生成绑定本机的授权文件。',
+    generateMachineId: '生成机器码',
     copyMachineId: '复制机器码',
     copySuccess: '已复制到剪贴板',
     status: '授权状态',

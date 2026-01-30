@@ -267,6 +267,7 @@ export default {
     desc: 'View machine ID, license status and granted features. License is verified offline only.',
     machineId: 'Machine ID',
     machineIdHint: 'Send this ID to your administrator to generate a license file bound to this machine.',
+    generateMachineId: 'Generate Machine ID',
     copyMachineId: 'Copy Machine ID',
     copySuccess: 'Copied to clipboard',
     status: 'License Status',

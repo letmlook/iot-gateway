@@ -1,0 +1,20 @@
+[package]
+name = "plugin-virb"
+version = "0.1.0"
+edition = "2021"
+description = "南向振动采集插件：支持 TCP 设备连接与模拟模式，采集加速度/速度/位移等振动数据"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+default = []
+ffi = []  # 构建 .so/.dll 时启用
+
+[dependencies]
+gateway-sdk = { path = "../../gateway-sdk" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "net"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
