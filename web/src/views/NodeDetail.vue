@@ -60,7 +60,7 @@ async function loadNode() {
       await loadSouthNodes()
     }
   } catch (e) {
-    error.value = '加载节点信息失败: ' + getErrorMessage(t, e)
+    error.value = t('nodeDetail.loadNodeFailed') + getErrorMessage(t, e)
   } finally {
     loading.value = false
   }
@@ -145,21 +145,21 @@ async function saveGroup() {
     }
     showGroupModal.value = false
     await loadGroups()
-    ElMessage.success('保存成功')
+    ElMessage.success(t('nodeDetail.saveGroupSuccess'))
   } catch (e) {
-    error.value = '保存组失败: ' + getErrorMessage(t, e)
+    error.value = t('nodeDetail.saveGroupFailed') + getErrorMessage(t, e)
   }
 }
 
 async function deleteGroup(gid) {
   try {
-    await ElMessageBox.confirm('确定删除该组？组内标签也会被删除。', '确认删除', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
+    await ElMessageBox.confirm(t('nodeDetail.deleteGroupConfirm'), t('common.confirmDelete'), { type: 'warning', confirmButtonText: t('common.delete'), cancelButtonText: t('common.cancel') })
     await api.deleteGroup(nodeId.value, gid)
     await loadGroups()
     await loadTags()
-    ElMessage.success('已删除')
+    ElMessage.success(t('nodeDetail.deleteGroupSuccess'))
   } catch (e) {
-    if (e !== 'cancel') error.value = '删除组失败: ' + getErrorMessage(t, e)
+    if (e !== 'cancel') error.value = t('nodeDetail.deleteGroupFailed') + getErrorMessage(t, e)
   }
 }
 
@@ -198,20 +198,20 @@ async function saveTag() {
     }
     showTagModal.value = false
     await loadTags()
-    ElMessage.success('保存成功')
+    ElMessage.success(t('nodeDetail.saveGroupSuccess'))
   } catch (e) {
-    error.value = '保存标签失败: ' + getErrorMessage(t, e)
+    error.value = t('nodeDetail.saveTagFailed') + getErrorMessage(t, e)
   }
 }
 
 async function deleteTag(tid) {
   try {
-    await ElMessageBox.confirm('确定删除该标签？', '确认删除', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
+    await ElMessageBox.confirm(t('nodeDetail.deleteTagConfirm'), t('common.confirmDelete'), { type: 'warning', confirmButtonText: t('common.delete'), cancelButtonText: t('common.cancel') })
     await api.deleteTag(nodeId.value, tid)
     await loadTags()
-    ElMessage.success('已删除')
+    ElMessage.success(t('nodeDetail.deleteTagSuccess'))
   } catch (e) {
-    if (e !== 'cancel') error.value = '删除标签失败: ' + getErrorMessage(t, e)
+    if (e !== 'cancel') error.value = t('nodeDetail.deleteTagFailed') + getErrorMessage(t, e)
   }
 }
 
@@ -230,7 +230,7 @@ async function readAllTags() {
       tagValues.value[tid] = val
     })
   } catch (e) {
-    error.value = '读取标签失败: ' + getErrorMessage(t, e)
+    error.value = t('nodeDetail.readTagsFailed') + getErrorMessage(t, e)
   } finally {
     readingTags.value = false
   }
@@ -257,21 +257,21 @@ async function addSubscription() {
     await api.setSubscriptions(nodeId.value, newSubs)
     showSubModal.value = false
     await loadSubscriptions()
-    ElMessage.success('订阅已添加')
+    ElMessage.success(t('nodeDetail.addSubSuccess'))
   } catch (e) {
-    error.value = '添加订阅失败: ' + getErrorMessage(t, e)
+    error.value = t('nodeDetail.addSubFailed') + getErrorMessage(t, e)
   }
 }
 
 async function removeSub(index) {
   try {
-    await ElMessageBox.confirm('确定取消该订阅？', '确认', { type: 'warning', confirmButtonText: '取消订阅', cancelButtonText: '返回' })
+    await ElMessageBox.confirm(t('nodeDetail.unsubscribeConfirm'), t('common.confirm'), { type: 'warning', confirmButtonText: t('nodeDetail.unsubscribeConfirmBtn'), cancelButtonText: t('nodeDetail.cancelBack') })
     const newSubs = subscriptions.value.filter((_, i) => i !== index)
-    await api.setSubscriptions(nodeId.value, newSubs) // subscriptions 为 [{ south_node_id, group_id }]
+    await api.setSubscriptions(nodeId.value, newSubs)
     await loadSubscriptions()
-    ElMessage.success('已取消订阅')
+    ElMessage.success(t('nodeDetail.unsubscribeSuccess'))
   } catch (e) {
-    if (e !== 'cancel') error.value = '取消订阅失败: ' + getErrorMessage(t, e)
+    if (e !== 'cancel') error.value = t('nodeDetail.unsubscribeFailed') + getErrorMessage(t, e)
   }
 }
 
@@ -279,14 +279,14 @@ async function toggleNode() {
   try {
     if (node.value.state === 'running') {
       await api.stopNode(nodeId.value)
-      ElMessage.success('已停止')
+      ElMessage.success(t('nodeDetail.stopSuccess'))
     } else {
       await api.startNode(nodeId.value)
-      ElMessage.success('已启动')
+      ElMessage.success(t('nodeDetail.startSuccess'))
     }
     await loadNode()
   } catch (e) {
-    error.value = '操作失败: ' + getErrorMessage(t, e)
+    error.value = t('nodeDetail.opFailed') + getErrorMessage(t, e)
   }
 }
 
@@ -299,16 +299,16 @@ function openNameModal() {
 async function saveNodeName() {
   const name = (editNameValue.value || '').trim()
   if (!name) {
-    ElMessage.warning('名称不能为空')
+    ElMessage.warning(t('nodeDetail.nameRequired'))
     return
   }
   try {
     await api.updateNode(nodeId.value, { name })
     showNameModal.value = false
     await loadNode()
-    ElMessage.success('名称已更新')
+    ElMessage.success(t('nodeDetail.nameUpdated'))
   } catch (e) {
-    error.value = '更新名称失败: ' + getErrorMessage(t, e)
+    error.value = t('nodeDetail.updateNameFailed') + getErrorMessage(t, e)
   }
 }
 
@@ -339,11 +339,11 @@ function removeBatchTagRow(index) {
 async function saveBatchTags() {
   const valid = batchTagRows.value.filter(r => r.name && r.address)
   if (!valid.length) {
-    ElMessage.warning('请至少填写一行名称与地址')
+    ElMessage.warning(t('nodeDetail.batchNameAddressRequired'))
     return
   }
   if (!batchTagGroupId.value) {
-    ElMessage.warning('请选择组')
+    ElMessage.warning(t('nodeDetail.selectGroupRequired'))
     return
   }
   try {
@@ -358,9 +358,9 @@ async function saveBatchTags() {
     await api.batchCreateTags(nodeId.value, payload)
     showBatchTagModal.value = false
     await loadTags()
-    ElMessage.success(`已创建 ${payload.length} 个点位`)
+    ElMessage.success(t('nodeDetail.batchCreated', { n: payload.length }))
   } catch (e) {
-    error.value = '批量创建失败: ' + getErrorMessage(t, e)
+    error.value = t('nodeDetail.batchCreateFailed') + getErrorMessage(t, e)
   }
 }
 
@@ -382,13 +382,13 @@ watch(nodeId, loadNode)
   <div class="page-container">
     <div class="detail-header" v-if="node">
       <div class="header-left">
-        <el-button :icon="Back" @click="router.push(isNorth ? '/north' : '/south')">返回</el-button>
+        <el-button :icon="Back" @click="router.push(isNorth ? '/north' : '/south')">{{ t('nodeDetail.cancelBack') }}</el-button>
         <div class="node-info">
           <h2 class="node-name">{{ node.name }}</h2>
           <el-button type="primary" link size="small" :icon="EditPen" @click="openNameModal">{{ t('nodeDetail.editName') }}</el-button>
           <el-tag size="small" type="info">{{ node.plugin_name }}</el-tag>
           <el-tag :type="node.state === 'running' ? 'success' : node.state === 'error' ? 'danger' : 'info'" size="small" effect="light">
-            {{ node.state === 'running' ? '运行中' : node.state === 'error' ? '错误' : '已停止' }}
+            {{ node.state === 'running' ? t('common.running') : node.state === 'error' ? t('common.error') : t('common.stopped') }}
           </el-tag>
         </div>
       </div>
@@ -399,7 +399,7 @@ watch(nodeId, loadNode)
           :icon="node.state === 'running' ? VideoPause : VideoPlay"
           @click="toggleNode"
         >
-          {{ node.state === 'running' ? '停止' : '启动' }}
+          {{ node.state === 'running' ? t('common.stop') : t('common.start') }}
         </el-button>
       </div>
     </div>
@@ -410,236 +410,236 @@ watch(nodeId, loadNode)
 
     <el-tabs v-else-if="node" v-model="activeTab" class="detail-tabs">
       <el-tab-pane name="groups">
-        <template #label>组列表 <el-tag size="small" type="info">{{ groups.length }}</el-tag></template>
+        <template #label>{{ t('nodeDetail.groupList') }} <el-tag size="small" type="info">{{ groups.length }}</el-tag></template>
         <div class="tab-header">
-          <h3>点位组</h3>
-          <el-button type="primary" size="small" :icon="Plus" @click="openGroupModal()">添加组</el-button>
+          <h3>{{ t('nodeDetail.pointGroup') }}</h3>
+          <el-button type="primary" size="small" :icon="Plus" @click="openGroupModal()">{{ t('nodeDetail.addGroup') }}</el-button>
         </div>
         <el-table v-if="groups.length" :data="groups" size="small" stripe>
-          <el-table-column prop="name" label="组名称" min-width="100" />
-          <el-table-column label="点位数量" width="80">
+          <el-table-column prop="name" :label="t('nodeDetail.groupNameLabel')" min-width="100" />
+          <el-table-column :label="t('nodeDetail.pointCount')" width="80">
             <template #default="{ row }">{{ tags.filter(t => t.group_id === row.id).length }}</template>
           </el-table-column>
-          <el-table-column label="间隔(ms)" width="80">
+          <el-table-column :label="t('nodeDetail.intervalMs')" width="80">
             <template #default="{ row }">{{ row.interval_ms || 1000 }}</template>
           </el-table-column>
-          <el-table-column prop="description" label="描述" min-width="100" show-overflow-tooltip>
+          <el-table-column prop="description" :label="t('nodeDetail.description')" min-width="100" show-overflow-tooltip>
             <template #default="{ row }">{{ row.description || '-' }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="180" fixed="right">
+          <el-table-column :label="t('nodeDetail.opLabel')" width="180" fixed="right">
             <template #default="{ row }">
-              <el-button type="primary" link size="small" :icon="Edit" @click="openGroupModal(row)">编辑</el-button>
-              <el-button type="primary" link size="small" @click="goToGroupTags(row)">点位列表</el-button>
-              <el-button type="danger" link size="small" :icon="Delete" @click="deleteGroup(row.id)">删除</el-button>
+              <el-button type="primary" link size="small" :icon="Edit" @click="openGroupModal(row)">{{ t('nodeDetail.edit') }}</el-button>
+              <el-button type="primary" link size="small" @click="goToGroupTags(row)">{{ t('nodeDetail.tagList') }}</el-button>
+              <el-button type="danger" link size="small" :icon="Delete" @click="deleteGroup(row.id)">{{ t('common.delete') }}</el-button>
             </template>
           </el-table-column>
         </el-table>
-        <el-empty v-else description="暂无点位组，请先创建。" />
+        <el-empty v-else :description="t('nodeDetail.noPointGroupHint')" />
       </el-tab-pane>
       <el-tab-pane name="tags">
-        <template #label>标签列表 <el-tag size="small" type="info">{{ tags.length }}</el-tag></template>
+        <template #label>{{ t('nodeDetail.tagList') }} <el-tag size="small" type="info">{{ tags.length }}</el-tag></template>
         <div class="tab-header">
-          <h3>数据标签</h3>
+          <h3>{{ t('nodeDetail.dataTags') }}</h3>
           <div class="header-actions">
-            <el-button size="small" :icon="RefreshRight" :loading="readingTags" :disabled="!tags.length" @click="readAllTags">{{ readingTags ? '读取中...' : '读取全部' }}</el-button>
-            <el-button size="small" :disabled="!groups.length" @click="openBatchTagModal()">批量添加</el-button>
-            <el-button type="primary" size="small" :icon="Plus" :disabled="!groups.length" @click="openTagModal()">添加点位</el-button>
+            <el-button size="small" :icon="RefreshRight" :loading="readingTags" :disabled="!tags.length" @click="readAllTags">{{ readingTags ? t('nodeDetail.readAllReading') : t('nodeDetail.readAll') }}</el-button>
+            <el-button size="small" :disabled="!groups.length" @click="openBatchTagModal()">{{ t('nodeDetail.batchAdd') }}</el-button>
+            <el-button type="primary" size="small" :icon="Plus" :disabled="!groups.length" @click="openTagModal()">{{ t('nodeDetail.addPoint') }}</el-button>
           </div>
         </div>
-        <el-alert v-if="!groups.length" type="warning" title="请先创建点位组，再添加标签。" show-icon class="mb-2" />
+        <el-alert v-if="!groups.length" type="warning" :title="t('nodeDetail.noGroupsCreateFirst')" show-icon class="mb-2" />
         <el-table v-else-if="tags.length" :data="tags" size="small" stripe>
-          <el-table-column prop="name" label="名称" min-width="80" />
-          <el-table-column prop="address" label="地址" min-width="80">
+          <el-table-column prop="name" :label="t('common.name')" min-width="80" />
+          <el-table-column prop="address" :label="t('nodeDetail.addressLabel')" min-width="80">
             <template #default="{ row }"><span class="font-mono">{{ row.address || '-' }}</span></template>
           </el-table-column>
-          <el-table-column label="类型" width="70">
+          <el-table-column :label="t('nodeDetail.typeLabel')" width="70">
             <template #default="{ row }"><el-tag size="small" type="info">{{ row.data_type || '-' }}</el-tag></template>
           </el-table-column>
-          <el-table-column label="属性" width="70">
+          <el-table-column :label="t('nodeDetail.attrLabel')" width="70">
             <template #default="{ row }">{{ row.attr === 'write' ? 'Write' : row.attr === 'readwrite' ? 'RW' : 'Read' }}</template>
           </el-table-column>
-          <el-table-column label="系数" width="50">
+          <el-table-column :label="t('nodeDetail.multiplierLabel')" width="50">
             <template #default>-</template>
           </el-table-column>
-          <el-table-column label="偏移" width="50">
+          <el-table-column :label="t('nodeDetail.offsetLabel')" width="50">
             <template #default>-</template>
           </el-table-column>
-          <el-table-column label="精度" width="50">
+          <el-table-column :label="t('nodeDetail.precisionLabel')" width="50">
             <template #default>-</template>
           </el-table-column>
-          <el-table-column label="当前值" min-width="80">
+          <el-table-column :label="t('nodeDetail.currentValue')" min-width="80">
             <template #default="{ row }">
               <span v-if="tagValues[row.id] !== undefined">{{ typeof tagValues[row.id] === 'object' ? JSON.stringify(tagValues[row.id]) : tagValues[row.id] }}</span>
               <span v-else class="text-muted">-</span>
             </template>
           </el-table-column>
-          <el-table-column prop="description" label="描述" min-width="60" show-overflow-tooltip>
+          <el-table-column prop="description" :label="t('nodeDetail.description')" min-width="60" show-overflow-tooltip>
             <template #default="{ row }">{{ row.description || '-' }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="100" fixed="right">
+          <el-table-column :label="t('nodeDetail.opLabel')" width="100" fixed="right">
             <template #default="{ row }">
-              <el-button type="primary" link size="small" :icon="Edit" @click="openTagModal(row)">编辑</el-button>
-              <el-button type="danger" link size="small" :icon="Delete" @click="deleteTag(row.id)">删除</el-button>
+              <el-button type="primary" link size="small" :icon="Edit" @click="openTagModal(row)">{{ t('nodeDetail.edit') }}</el-button>
+              <el-button type="danger" link size="small" :icon="Delete" @click="deleteTag(row.id)">{{ t('common.delete') }}</el-button>
             </template>
           </el-table-column>
         </el-table>
-        <el-empty v-else description="暂无标签，请添加。" />
+        <el-empty v-else :description="t('nodeDetail.noTagsHint')" />
       </el-tab-pane>
       <el-tab-pane v-if="isNorth" name="subs">
-        <template #label>订阅管理 <el-tag size="small" type="info">{{ subscriptions.length }}</el-tag></template>
+        <template #label>{{ t('nodeDetail.subManage') }} <el-tag size="small" type="info">{{ subscriptions.length }}</el-tag></template>
         <div class="tab-header">
-          <h3>数据订阅</h3>
-          <el-button type="primary" size="small" :icon="Plus" :disabled="!southNodes.length" @click="openSubModal()">添加订阅</el-button>
+          <h3>{{ t('nodeDetail.dataSubs') }}</h3>
+          <el-button type="primary" size="small" :icon="Plus" :disabled="!southNodes.length" @click="openSubModal()">{{ t('nodeDetail.addSub') }}</el-button>
         </div>
-        <el-alert v-if="!southNodes.length" type="warning" title="暂无可订阅的南向设备，请先创建南向设备。" show-icon class="mb-2" />
+        <el-alert v-if="!southNodes.length" type="warning" :title="t('nodeDetail.noSouthCreateFirst')" show-icon class="mb-2" />
         <el-table v-else-if="subscriptions.length" :data="subscriptions" size="small" stripe>
-          <el-table-column label="南向设备" min-width="100">
+          <el-table-column :label="t('nodeDetail.southDevice')" min-width="100">
             <template #default="{ row }">{{ getSouthNodeName(row.south_node_id) }}</template>
           </el-table-column>
-          <el-table-column label="订阅组" min-width="100">
+          <el-table-column :label="t('nodeDetail.subGroup')" min-width="100">
             <template #default="{ row }">{{ getSouthGroupName(row.south_node_id, row.group_id) }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="90" fixed="right">
+          <el-table-column :label="t('nodeDetail.opLabel')" width="90" fixed="right">
             <template #default="scope">
-              <el-button type="danger" link size="small" :icon="Delete" @click="removeSub(scope.$index)">取消订阅</el-button>
+              <el-button type="danger" link size="small" :icon="Delete" @click="removeSub(scope.$index)">{{ t('nodeDetail.unsubscribeConfirmBtn') }}</el-button>
             </template>
           </el-table-column>
         </el-table>
-        <el-empty v-else description="暂无订阅，北向应用需要订阅南向设备的数据组才能获取数据。" />
+        <el-empty v-else :description="t('nodeDetail.noSubsHint')" />
       </el-tab-pane>
     </el-tabs>
 
     <el-dialog v-model="showGroupModal" :title="editingGroup ? t('nodeDetail.editGroup') : t('nodeDetail.addGroup')" width="440px" destroy-on-close>
       <el-form :model="groupForm" label-width="100px" label-position="top">
-        <el-form-item label="组名称" required>
-          <el-input v-model="groupForm.name" placeholder="例如：default" clearable />
+        <el-form-item :label="t('nodeDetail.groupName')" required>
+          <el-input v-model="groupForm.name" :placeholder="t('nodeDetail.exampleDefault')" clearable />
         </el-form-item>
-        <el-form-item label="采集间隔 (ms)">
+        <el-form-item :label="t('nodeDetail.collectIntervalMs')">
           <el-input-number v-model="groupForm.interval_ms" :min="100" :step="100" style="width: 100%" />
         </el-form-item>
-        <el-form-item label="描述">
+        <el-form-item :label="t('nodeDetail.description')">
           <el-input v-model="groupForm.description" :placeholder="t('nodeDetail.optional')" clearable />
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="showGroupModal = false">取消</el-button>
-        <el-button type="primary" :disabled="!groupForm.name" @click="saveGroup">保存</el-button>
+        <el-button @click="showGroupModal = false">{{ t('nodeDetail.cancel') }}</el-button>
+        <el-button type="primary" :disabled="!groupForm.name" @click="saveGroup">{{ t('nodeDetail.save') }}</el-button>
       </template>
     </el-dialog>
 
     <el-dialog v-model="showTagModal" :title="editingTag ? t('nodeDetail.editTag') : t('nodeDetail.addTag')" width="440px" destroy-on-close>
       <el-form :model="tagForm" label-width="100px" label-position="top">
-        <el-form-item label="名称" required>
-          <el-input v-model="tagForm.name" placeholder="例如：temperature" clearable />
+        <el-form-item :label="t('common.name')" required>
+          <el-input v-model="tagForm.name" :placeholder="t('nodeDetail.exampleTemperature')" clearable />
         </el-form-item>
-        <el-form-item label="所属组" required>
-          <el-select v-model="tagForm.group_id" placeholder="请选择" style="width: 100%">
+        <el-form-item :label="t('nodeDetail.dataGroup')" required>
+          <el-select v-model="tagForm.group_id" :placeholder="t('nodeDetail.selectPlaceholder')" style="width: 100%">
             <el-option v-for="g in groups" :key="g.id" :label="g.name" :value="g.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="类型">
-          <el-select v-model="tagForm.data_type" placeholder="请选择" style="width: 100%">
+        <el-form-item :label="t('nodeDetail.typeLabel')">
+          <el-select v-model="tagForm.data_type" :placeholder="t('nodeDetail.selectPlaceholder')" style="width: 100%">
             <el-option v-for="dt in dataTypes" :key="dt" :label="dt" :value="dt" />
           </el-select>
         </el-form-item>
-        <el-form-item label="地址" required>
-          <el-input v-model="tagForm.address" placeholder="根据驱动协议填写" clearable class="font-mono" />
+        <el-form-item :label="t('nodeDetail.addressLabel')" required>
+          <el-input v-model="tagForm.address" :placeholder="t('nodeDetail.addressPlaceholder')" clearable class="font-mono" />
         </el-form-item>
-        <el-form-item label="属性">
-          <el-select v-model="tagForm.attr" placeholder="请选择" style="width: 100%">
+        <el-form-item :label="t('nodeDetail.attrLabel')">
+          <el-select v-model="tagForm.attr" :placeholder="t('nodeDetail.selectPlaceholder')" style="width: 100%">
             <el-option v-for="a in attrOptions" :key="a.value" :label="a.label" :value="a.value" />
           </el-select>
         </el-form-item>
-        <el-form-item label="描述">
+        <el-form-item :label="t('nodeDetail.description')">
           <el-input v-model="tagForm.description" :placeholder="t('nodeDetail.optional')" clearable />
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="showTagModal = false">{{ t('common.cancel') }}</el-button>
-        <el-button type="primary" :disabled="!tagForm.name || !tagForm.group_id || !tagForm.address" @click="saveTag">保存</el-button>
+        <el-button @click="showTagModal = false">{{ t('nodeDetail.cancel') }}</el-button>
+        <el-button type="primary" :disabled="!tagForm.name || !tagForm.group_id || !tagForm.address" @click="saveTag">{{ t('nodeDetail.save') }}</el-button>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showBatchTagModal" title="批量添加点位" width="800px" destroy-on-close>
+    <el-dialog v-model="showBatchTagModal" :title="t('nodeDetail.batchAddPoints')" width="800px" destroy-on-close>
       <el-form label-position="top">
-        <el-form-item label="选择组" required>
-          <el-select v-model="batchTagGroupId" placeholder="请选择" style="width: 100%">
+        <el-form-item :label="t('nodeDetail.selectGroup')" required>
+          <el-select v-model="batchTagGroupId" :placeholder="t('nodeDetail.selectPlaceholder')" style="width: 100%">
             <el-option v-for="g in groups" :key="g.id" :label="g.name" :value="g.id" />
           </el-select>
         </el-form-item>
         <el-table :data="batchTagRows" size="small" border>
-          <el-table-column label="*名称" min-width="100">
+          <el-table-column :label="t('common.name')" min-width="100">
             <template #default="{ row, $index }">
-              <el-input v-model="row.name" placeholder="名称" size="small" />
+              <el-input v-model="row.name" :placeholder="t('common.name')" size="small" />
             </template>
           </el-table-column>
-          <el-table-column label="*类型" width="90">
+          <el-table-column :label="t('nodeDetail.typeLabel')" width="90">
             <template #default="{ row }">
-              <el-select v-model="row.data_type" placeholder="类型" size="small" style="width: 100%">
+              <el-select v-model="row.data_type" :placeholder="t('nodeDetail.typeLabel')" size="small" style="width: 100%">
                 <el-option v-for="dt in dataTypes" :key="dt" :label="dt" :value="dt" />
               </el-select>
             </template>
           </el-table-column>
-          <el-table-column label="*地址" min-width="100">
+          <el-table-column :label="t('nodeDetail.addressLabel')" min-width="100">
             <template #default="{ row }">
-              <el-input v-model="row.address" placeholder="地址" size="small" class="font-mono" />
+              <el-input v-model="row.address" :placeholder="t('nodeDetail.addressLabel')" size="small" class="font-mono" />
             </template>
           </el-table-column>
-          <el-table-column label="*属性" width="90">
+          <el-table-column :label="t('nodeDetail.attrLabel')" width="90">
             <template #default="{ row }">
               <el-select v-model="row.attr" size="small" style="width: 100%">
                 <el-option v-for="a in attrOptions" :key="a.value" :label="a.label" :value="a.value" />
               </el-select>
             </template>
           </el-table-column>
-          <el-table-column label="描述" min-width="80">
+          <el-table-column :label="t('nodeDetail.description')" min-width="80">
             <template #default="{ row }">
               <el-input v-model="row.description" :placeholder="t('nodeDetail.optional')" size="small" />
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="70" fixed="right">
+          <el-table-column :label="t('nodeDetail.opLabel')" width="70" fixed="right">
             <template #default="{ $index }">
-              <el-button type="danger" link size="small" :disabled="batchTagRows.length <= 1" @click="removeBatchTagRow($index)">删除</el-button>
+              <el-button type="danger" link size="small" :disabled="batchTagRows.length <= 1" @click="removeBatchTagRow($index)">{{ t('common.delete') }}</el-button>
             </template>
           </el-table-column>
         </el-table>
-        <el-button type="primary" text :icon="Plus" class="mt-1" @click="addBatchTagRow">+ 添加</el-button>
+        <el-button type="primary" text :icon="Plus" class="mt-1" @click="addBatchTagRow">+ {{ t('nodeDetail.add') }}</el-button>
       </el-form>
       <template #footer>
-        <el-button @click="showBatchTagModal = false">取消</el-button>
-        <el-button type="primary" @click="saveBatchTags">创建</el-button>
+        <el-button @click="showBatchTagModal = false">{{ t('nodeDetail.cancel') }}</el-button>
+        <el-button type="primary" @click="saveBatchTags">{{ t('nodeDetail.create') }}</el-button>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showSubModal" title="添加订阅" width="440px" destroy-on-close>
+    <el-dialog v-model="showSubModal" :title="t('nodeDetail.addSub')" width="440px" destroy-on-close>
       <el-form :model="subForm" label-width="100px" label-position="top">
-        <el-form-item label="南向设备" required>
-          <el-select v-model="subForm.south_node_id" placeholder="请选择" style="width: 100%">
+        <el-form-item :label="t('nodeDetail.southDevice')" required>
+          <el-select v-model="subForm.south_node_id" :placeholder="t('nodeDetail.selectPlaceholder')" style="width: 100%">
             <el-option v-for="n in southNodes" :key="n.id" :label="n.name" :value="n.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="数据组" required>
-          <el-select v-model="subForm.group_id" placeholder="请选择" style="width: 100%" :disabled="!southGroups.length">
+        <el-form-item :label="t('nodeDetail.dataGroup')" required>
+          <el-select v-model="subForm.group_id" :placeholder="t('nodeDetail.selectPlaceholder')" style="width: 100%" :disabled="!southGroups.length">
             <el-option v-for="g in southGroups" :key="g.id" :label="g.name" :value="g.id" />
           </el-select>
-          <div v-if="!southGroups.length && subForm.south_node_id" class="form-hint">该设备暂无数据组</div>
+          <div v-if="!southGroups.length && subForm.south_node_id" class="form-hint">{{ t('nodeDetail.noDataGroupHint') }}</div>
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="showSubModal = false">取消</el-button>
-        <el-button type="primary" :disabled="!subForm.south_node_id || !subForm.group_id" @click="addSubscription">订阅</el-button>
+        <el-button @click="showSubModal = false">{{ t('nodeDetail.cancel') }}</el-button>
+        <el-button type="primary" :disabled="!subForm.south_node_id || !subForm.group_id" @click="addSubscription">{{ t('nodeDetail.subscribe') }}</el-button>
       </template>
     </el-dialog>
 
     <el-dialog v-model="showNameModal" :title="t('nodeDetail.editName')" width="400px" destroy-on-close>
       <el-form label-position="top">
-        <el-form-item label="名称">
-          <el-input v-model="editNameValue" placeholder="输入节点名称" clearable />
+        <el-form-item :label="t('common.name')">
+          <el-input v-model="editNameValue" :placeholder="t('nodeDetail.nodeNamePlaceholder')" clearable />
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="showNameModal = false">取消</el-button>
-        <el-button type="primary" :disabled="!editNameValue?.trim()" @click="saveNodeName">保存</el-button>
+        <el-button @click="showNameModal = false">{{ t('nodeDetail.cancel') }}</el-button>
+        <el-button type="primary" :disabled="!editNameValue?.trim()" @click="saveNodeName">{{ t('nodeDetail.save') }}</el-button>
       </template>
     </el-dialog>
   </div>

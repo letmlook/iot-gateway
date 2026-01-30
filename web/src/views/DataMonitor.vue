@@ -259,14 +259,14 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
     <div class="control-panel">
       <div class="control-row">
         <div class="control-group">
-          <label>{{ t('south.selectPlugin') }}</label>
+          <label>{{ t('monitor.selectDevice') }}</label>
           <el-select v-model="selectedNode" class="control-select" @change="onNodeChange">
             <el-option v-for="n in nodes" :key="n.id" :label="n.name" :value="n.id" />
           </el-select>
         </div>
         <div class="control-group">
-          <label>Group</label>
-          <el-select v-model="selectedGroup" placeholder="All" clearable class="control-select" @change="applyFilters">
+          <label>{{ t('monitor.group') }}</label>
+          <el-select v-model="selectedGroup" :placeholder="t('monitor.all')" clearable class="control-select" @change="applyFilters">
             <el-option v-for="g in groups" :key="g.id" :label="g.name" :value="g.id" />
           </el-select>
         </div>
@@ -288,10 +288,10 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
       <div class="control-row control-row-actions">
         <div class="refresh-controls">
           <el-select v-model="refreshInterval" class="interval-select" :disabled="autoRefresh">
-            <el-option :value="1000" :label="locale === 'zh' ? '1 秒' : '1s'" />
-            <el-option :value="2000" :label="locale === 'zh' ? '2 秒' : '2s'" />
-            <el-option :value="5000" :label="locale === 'zh' ? '5 秒' : '5s'" />
-            <el-option :value="10000" :label="locale === 'zh' ? '10 秒' : '10s'" />
+            <el-option :value="1000" :label="t('monitor.intervalSeconds', { n: 1 })" />
+            <el-option :value="2000" :label="t('monitor.intervalSeconds', { n: 2 })" />
+            <el-option :value="5000" :label="t('monitor.intervalSeconds', { n: 5 })" />
+            <el-option :value="10000" :label="t('monitor.intervalSeconds', { n: 10 })" />
           </el-select>
           <el-button
             :type="autoRefresh ? 'warning' : 'primary'"

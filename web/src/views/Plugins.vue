@@ -152,14 +152,14 @@ onMounted(loadData)
                     <span class="plugin-name">{{ pluginDisplayName(p) || p.name }}</span>
                     <el-tag v-if="p.version" size="small" type="info">v{{ p.version }}</el-tag>
                     <el-tag :type="p.kind === 'south' ? 'success' : ''" size="small" effect="plain">
-                      {{ p.kind === 'south' ? '南向' : '北向' }}
+                      {{ p.kind === 'south' ? t('plugins.southShort') : t('plugins.northShort') }}
                     </el-tag>
                   </div>
                 </div>
               </template>
               <p v-if="pluginDisplayDesc(p) || p.description" class="plugin-desc">{{ pluginDisplayDesc(p) || p.description }}</p>
               <div v-if="nodesUsingPlugin(p.name, p.kind).length" class="plugin-usage">
-                <span class="usage-label">使用该插件的节点：</span>
+                <span class="usage-label">{{ t('plugins.usedByNodes') }}</span>
                 <div class="usage-nodes">
                   <el-button
                     v-for="n in nodesUsingPlugin(p.name, p.kind)"
@@ -176,14 +176,14 @@ onMounted(loadData)
               <template #footer>
                 <div class="plugin-actions">
                   <el-button type="primary" size="small" :icon="Plus" @click="goCreateNode(p)">
-                    {{ p.kind === 'south' ? '创建设备' : '创建应用' }}
+                    {{ p.kind === 'south' ? t('plugins.createDevice') : t('plugins.createApp') }}
                   </el-button>
                 </div>
               </template>
             </el-card>
-            <el-empty v-if="!plugins.length" description="暂无南向插件" class="empty-block">
+            <el-empty v-if="!plugins.length" :description="t('plugins.noSouthPlugins')" class="empty-block">
               <template #description>
-                <p>插件从 plugins 目录加载 .so 动态库，请检查 GATEWAY_PLUGINS_DIR 配置。</p>
+                <p>{{ t('plugins.pluginLoadHint') }}</p>
               </template>
             </el-empty>
           </div>
@@ -236,14 +236,14 @@ onMounted(loadData)
                     <span class="plugin-name">{{ pluginDisplayName(p) || p.name }}</span>
                     <el-tag v-if="p.version" size="small" type="info">v{{ p.version }}</el-tag>
                     <el-tag :type="p.kind === 'south' ? 'success' : ''" size="small" effect="plain">
-                      {{ p.kind === 'south' ? '南向' : '北向' }}
+                      {{ p.kind === 'south' ? t('plugins.southShort') : t('plugins.northShort') }}
                     </el-tag>
                   </div>
                 </div>
               </template>
               <p v-if="pluginDisplayDesc(p) || p.description" class="plugin-desc">{{ pluginDisplayDesc(p) || p.description }}</p>
               <div v-if="nodesUsingPlugin(p.name, p.kind).length" class="plugin-usage">
-                <span class="usage-label">使用该插件的节点：</span>
+                <span class="usage-label">{{ t('plugins.usedByNodes') }}</span>
                 <div class="usage-nodes">
                   <el-button
                     v-for="n in nodesUsingPlugin(p.name, p.kind)"
@@ -260,14 +260,14 @@ onMounted(loadData)
               <template #footer>
                 <div class="plugin-actions">
                   <el-button type="primary" size="small" :icon="Plus" @click="goCreateNode(p)">
-                    {{ p.kind === 'south' ? '创建设备' : '创建应用' }}
+                    {{ p.kind === 'south' ? t('plugins.createDevice') : t('plugins.createApp') }}
                   </el-button>
                 </div>
               </template>
             </el-card>
-            <el-empty v-if="!plugins.length" description="暂无北向插件" class="empty-block">
+            <el-empty v-if="!plugins.length" :description="t('plugins.noNorthPlugins')" class="empty-block">
               <template #description>
-                <p>插件从 plugins 目录加载 .so 动态库，请检查 GATEWAY_PLUGINS_DIR 配置。</p>
+                <p>{{ t('plugins.pluginLoadHint') }}</p>
               </template>
             </el-empty>
           </div>
