@@ -540,18 +540,22 @@ code {
   letter-spacing: 0.05em;
 }
 
-/* Content Area：仅占主内容区 3/4 宽度，右侧留 1/4 空白 */
+/* Content Area：仅占主内容区 3/4 宽度，右侧留 1/4 空白；圆角背景与顶栏/侧栏一致，与导航栏和菜单栏留间隙 */
 .content-area {
   flex: 1;
   min-height: 0;
   width: 75%;
   max-width: 75%;
   align-self: flex-start;
+  margin: 1rem 1rem 1rem 1.25rem; /* 与顶栏、侧栏、右侧、底部的间隙 */
   padding: 1.5rem;
   overflow-y: auto;
   overflow-x: hidden;
   display: flex;
   flex-direction: column;
+  background: var(--bg-surface);
+  border-radius: 12px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
 }
 
 /* 路由内容不超出内容区，避免按钮跑到右侧空白 */
@@ -2001,6 +2005,8 @@ select.form-input {
   .content-area {
     width: 100%;
     max-width: 100%;
+    margin: 0.75rem;
+    padding: 1rem;
   }
   
   .top-header {
@@ -2009,10 +2015,6 @@ select.form-input {
   
   .stats-bar {
     display: none;
-  }
-  
-  .content-area {
-    padding: 1rem;
   }
   
   .page-header {

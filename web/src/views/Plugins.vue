@@ -102,7 +102,7 @@ onMounted(loadData)
           <template #label>
             <span class="tab-label"><span class="dot south" /> {{ t('plugins.southPlugins') }} <el-tag size="small" type="info" class="ml-1">{{ southPlugins.length }}</el-tag></span>
           </template>
-          <!-- 表格视图（对标 Neuron） -->
+          <!-- 表格视图 -->
           <el-table :data="plugins" size="default" stripe class="plugins-table">
             <el-table-column :label="t('common.name')" min-width="120">
               <template #default="{ row }">{{ pluginDisplayName(row) || row.name }}</template>

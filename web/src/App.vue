@@ -13,7 +13,6 @@ const { t, locale } = useI18n()
 
 const sidebarCollapsed = ref(false)
 const health = ref(null)
-const version = ref(null)
 const southPlugins = ref([])
 const northPlugins = ref([])
 
@@ -59,14 +58,12 @@ const userInitial = ref('U')
 
 async function loadInitData() {
   try {
-    const [h, v, sp, np] = await Promise.all([
+    const [h, sp, np] = await Promise.all([
       api.health().catch(() => null),
-      api.version().catch(() => null),
       api.pluginsSouth().catch(() => []),
       api.pluginsNorth().catch(() => []),
     ])
     health.value = h
-    version.value = v
     southPlugins.value = sp
     northPlugins.value = np
   } catch (e) {
@@ -232,9 +229,6 @@ onMounted(() => {
         <div class="status-indicator" :class="health?.status === 'ok' ? 'online' : 'offline'">
           <span class="status-dot"></span>
           <span>{{ health?.status === 'ok' ? t('common.statusOk') : t('common.connecting') + '...' }}</span>
-        </div>
-        <div class="version-info" v-if="version">
-          v{{ version.version }}
         </div>
       </div>
     </aside>

@@ -1,4 +1,4 @@
-//! 路由核心：插件管理、节点启停、消息路由。对标 Neuron Manager。
+//! 路由核心：插件管理、节点启停、消息路由。
 
 use crate::bus::{Bus, SubscriptionTable, subscription_set};
 use crate::node::Node;
@@ -7,6 +7,7 @@ use gateway_sdk::{
     Group, GroupData, GroupSubscription, NorthPlugin, SouthPlugin, PluginConfig,
     NodeId, NodeKind, NodeState, PluginInfo, Tag,
 };
+use gateway_sdk::log;
 use gateway_sdk::types::{DataValue, TagId};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -139,7 +140,7 @@ impl Manager {
         self.store.node_get(id)
     }
 
-    /// 更新节点名称。对标 Neuron Update node。
+    /// 更新节点名称。
     pub fn node_update(&self, id: NodeId, name: Option<String>) -> Result<(), String> {
         let Some(n) = name else { return Ok(()); };
         self.store.node_update_name(id, n);
@@ -282,6 +283,7 @@ impl Manager {
             }
         }
         self.store.node_update_state(id, NodeState::Running);
+        log::info(id, "node started");
         Ok(())
     }
 
@@ -310,6 +312,7 @@ impl Manager {
             let _ = p.stop(id).await;
         }
         self.store.node_update_state(id, NodeState::Stopped);
+        log::info(id, "node stopped");
         Ok(())
     }
 
@@ -560,7 +563,7 @@ impl Manager {
         self.store.tags_by_group(node_id, group_id)
     }
 
-    /// 修改节点插件配置（不删节点）。对标 Neuron setting。
+    /// 修改节点插件配置（不删节点）。
     pub async fn node_setting(&self, id: NodeId, config: PluginConfig) -> Result<(), String> {
         let node = self.store.node_get(id).ok_or("node not found")?;
         let plugin_name = node.config.plugin_name.clone();
@@ -580,7 +583,7 @@ impl Manager {
         Ok(())
     }
 
-    /// 南向写 Tag。对标 Neuron write_tag。根据 TagId 查 Tag 后以 (Tag, DataValue) 交给插件以便解析地址。
+    /// 南向写 Tag。根据 TagId 查 Tag 后以 (Tag, DataValue) 交给插件以便解析地址。
     pub async fn write_tags(
         &self,
         node_id: NodeId,

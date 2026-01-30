@@ -1,4 +1,4 @@
-//! 总线消息类型。南向 -> Core -> 北向；对标 Neuron NNG 消息格式。
+//! 总线消息类型。南向 -> Core -> 北向。
 
 use crate::types::{DataValue, GroupId, NodeId, TagId};
 use chrono::{DateTime, Utc};

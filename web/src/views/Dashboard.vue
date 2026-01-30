@@ -8,7 +8,6 @@ import { api } from '../api.js'
 const router = useRouter()
 const { t } = useI18n()
 const health = ref(null)
-const version = ref(null)
 const nodes = ref([])
 const southPlugins = inject('southPlugins', ref([]))
 const northPlugins = inject('northPlugins', ref([]))
@@ -31,13 +30,11 @@ async function loadData() {
   loading.value = true
   error.value = ''
   try {
-    const [h, v, nd] = await Promise.all([
+    const [h, nd] = await Promise.all([
       api.health().catch(() => null),
-      api.version().catch(() => null),
       api.nodes().catch(() => []),
     ])
     health.value = h
-    version.value = v
     nodes.value = nd
   } catch (e) {
     error.value = t('dashboard.loadOverviewFailed') + e.message
@@ -174,11 +171,6 @@ onMounted(loadData)
           </div>
           <el-empty v-else :description="t('north.noNodes')" :image-size="60" />
         </el-card>
-      </div>
-
-      <div v-if="version" class="footer-info">
-        <span>{{ t('dashboard.gatewayVersion') }} v{{ version.version }}</span>
-        <span v-if="version.revision" class="revision">{{ version.revision.slice(0, 8) }}</span>
       </div>
     </template>
   </div>

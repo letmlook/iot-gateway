@@ -1,8 +1,8 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { ElMessage } from 'element-plus'
-import { Download, CopyDocument, Link } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Download, Upload, Link } from '@element-plus/icons-vue'
 import { api } from '../api.js'
 
 const { t } = useI18n()
@@ -10,10 +10,12 @@ const { t } = useI18n()
 const version = ref(null)
 const health = ref(null)
 const metrics = ref('')
-const exportData = ref(null)
 const loading = ref(false)
 const error = ref('')
-const showExportModal = ref(false)
+const showRestoreModal = ref(false)
+const restoreLoading = ref(false)
+const restoreFile = ref(null)
+const restorePassword = ref('')
 
 async function loadSystemInfo() {
   loading.value = true
@@ -34,32 +36,60 @@ async function loadSystemInfo() {
   }
 }
 
-async function exportConfig() {
+async function doBackup() {
+  error.value = ''
   try {
-    const data = await api.export()
-    exportData.value = JSON.stringify(data, null, 2)
-    showExportModal.value = true
+    const { blob, filename } = await api.backup()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.click()
+    URL.revokeObjectURL(url)
+    ElMessage.success(t('system.backupSuccess'))
   } catch (e) {
-    error.value = t('system.exportFailed') + e.message
+    error.value = t('system.backupFailed') + e.message
   }
 }
 
-function downloadExport() {
-  const blob = new Blob([exportData.value], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `gateway-config-${new Date().toISOString().slice(0, 10)}.json`
-  a.click()
-  URL.revokeObjectURL(url)
+function openRestoreModal() {
+  restoreFile.value = null
+  restorePassword.value = ''
+  showRestoreModal.value = true
 }
 
-async function copyExport() {
+function onRestoreFileChange(uploadFile) {
+  restoreFile.value = uploadFile?.raw ?? null
+}
+
+async function doRestore() {
+  if (!restoreFile.value) {
+    ElMessage.warning(t('system.selectBackupFile'))
+    return
+  }
   try {
-    await navigator.clipboard.writeText(exportData.value)
-    ElMessage.success(t('monitor.copied'))
+    await ElMessageBox.confirm(t('system.restoreConfirm'), t('system.restoreTitle'), {
+      type: 'warning',
+      confirmButtonText: t('system.restore'),
+      cancelButtonText: t('common.cancel'),
+    })
+  } catch {
+    return
+  }
+  restoreLoading.value = true
+  error.value = ''
+  try {
+    const formData = new FormData()
+    formData.append('file', restoreFile.value)
+    if (restorePassword.value) formData.append('password', restorePassword.value)
+    await api.restore(formData)
+    ElMessage.success(t('system.restoreSuccess'))
+    showRestoreModal.value = false
+    await loadSystemInfo()
   } catch (e) {
-    ElMessage.error(t('monitor.copyFailed'))
+    error.value = t('system.restoreFailed') + e.message
+  } finally {
+    restoreLoading.value = false
   }
 }
 
@@ -85,7 +115,8 @@ onMounted(loadSystemInfo)
       </div>
 
       <div class="system-actions">
-        <el-button type="primary" :icon="Download" @click="exportConfig">{{ t('system.exportConfig') }}</el-button>
+        <el-button type="primary" :icon="Download" @click="doBackup">{{ t('system.backup') }}</el-button>
+        <el-button :icon="Upload" @click="openRestoreModal">{{ t('system.restore') }}</el-button>
       </div>
 
       <el-alert v-if="error" type="error" :title="error" closable show-icon @close="error = ''" class="mb-2" />
@@ -155,11 +186,22 @@ onMounted(loadSystemInfo)
     </div>
     </div>
 
-    <el-dialog v-model="showExportModal" :title="t('system.exportConfig')" width="640px" destroy-on-close>
-      <el-input :model-value="exportData" type="textarea" :rows="18" readonly class="font-mono export-textarea" />
+    <el-dialog v-model="showRestoreModal" :title="t('system.restoreTitle')" width="480px" destroy-on-close>
+      <p class="restore-hint">{{ t('system.restoreHint') }}</p>
+      <el-upload
+        :auto-upload="false"
+        :show-file-list="true"
+        :limit="1"
+        accept=".bin"
+        @change="onRestoreFileChange"
+        @remove="restoreFile = null"
+      >
+        <el-button type="default" size="small">{{ t('system.selectBackupFile') }}</el-button>
+      </el-upload>
+      <el-input v-model="restorePassword" type="password" :placeholder="t('system.restorePasswordPlaceholder')" class="mt-2" show-password clearable />
       <template #footer>
-        <el-button :icon="CopyDocument" @click="copyExport">{{ t('system.copyExport') }}</el-button>
-        <el-button type="primary" :icon="Download" @click="downloadExport">{{ t('system.downloadJson') }}</el-button>
+        <el-button @click="showRestoreModal = false">{{ t('common.cancel') }}</el-button>
+        <el-button type="primary" :icon="Upload" :loading="restoreLoading" @click="doRestore">{{ t('system.restore') }}</el-button>
       </template>
     </el-dialog>
   </div>
@@ -193,11 +235,14 @@ onMounted(loadSystemInfo)
   margin-bottom: 0.5rem;
 }
 
-/* 导出配置按钮放在描述下方、与卡片同宽区域（位置 2） */
+/* 备份和恢复按钮放在描述下方 */
 .system-actions {
   width: 100%;
   margin-bottom: 1.5rem;
+  display: flex;
+  gap: 0.5rem;
 }
+.restore-hint { font-size: 0.9rem; color: var(--text-muted); margin-bottom: 0.5rem; }
 
 .mb-2 { margin-bottom: 1rem; }
 .mt-2 { margin-top: 0.5rem; }

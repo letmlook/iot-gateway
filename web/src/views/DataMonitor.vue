@@ -217,7 +217,7 @@ async function writeTag(tag) {
     writeInputs.value[tag.id] = ''
     await readValues()
   } catch (e) {
-    ElMessage.error('写入失败: ' + e.message)
+    ElMessage.error(t('monitor.writeFailed') + e.message)
   } finally {
     writingTagId.value = null
   }

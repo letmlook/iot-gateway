@@ -1,4 +1,4 @@
-//! 对标 Neuron：Tag、Group、Node、DataValue 等核心类型。
+//! 本系统核心类型：Tag、Group、Node、DataValue 等。
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -12,7 +12,7 @@ pub enum PluginKind {
     North,
 }
 
-/// 统一数据值类型（对标 Neuron 统一数据类型）
+/// 统一数据值类型
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value")]
 pub enum DataValue {
@@ -31,7 +31,7 @@ pub enum DataValue {
     Bytes(Vec<u8>),
 }
 
-/// 数据类型标识（用于 Schema、校验、UI）。对标 Neuron tag type。
+/// 数据类型标识（用于 Schema、校验、UI）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DataType {
@@ -206,7 +206,7 @@ pub enum TagAttr {
     ReadWrite,
 }
 
-/// 点位（Tag）配置。对标 Neuron Tag。
+/// 点位（Tag）配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tag {
     pub id: TagId,
@@ -235,7 +235,7 @@ impl Tag {
     }
 }
 
-/// 组（Group）配置。对标 Neuron Group。采集与订阅的基本单元。
+/// 组（Group）配置。采集与订阅的基本单元。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Group {
     pub id: GroupId,

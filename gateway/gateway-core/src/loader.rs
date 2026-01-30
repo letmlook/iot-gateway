@@ -1,4 +1,4 @@
-//! 从 `plugins_dir` 扫描并加载 .so 插件，对标 Neuron 动态库加载。
+//! 从 `plugins_dir` 扫描并加载 .so 插件。
 
 use gateway_sdk::ffi::*;
 use gateway_sdk::{
@@ -23,6 +23,8 @@ type StrFn = unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char;
 type StrStrStrFn =
     unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, *const c_char) -> *mut c_char;
 type VoidFn = unsafe extern "C" fn(*mut c_void) -> *mut c_char;
+/// set_log(handle, node_id_cstr, log_callback)
+type SetLogFn = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_void);
 
 /// 持有已加载的 .so，保证符号在插件生命周期内有效。
 pub struct PluginLoader {
@@ -39,6 +41,27 @@ fn ffi_result(free_fn: FreeStringFn, ptr: *mut c_char) -> Result<(), String> {
 
 fn cstr(s: &str) -> CString {
     CString::new(s).unwrap_or_else(|_| CString::new("").unwrap())
+}
+
+/// 宿主提供给 .so 插件的节点日志回调：将插件发来的 level/node_id/message 转为 tracing 事件，由 NodeFileLayer 按节点写文件。
+#[allow(dead_code)]
+pub unsafe extern "C" fn gateway_host_log(level: u8, node_id: *const c_char, message: *const c_char) {
+    let node_id_str = match gateway_sdk::ptr_to_string(node_id) {
+        Some(s) => s,
+        None => return,
+    };
+    let message_str = match gateway_sdk::ptr_to_string(message) {
+        Some(s) => s,
+        None => return,
+    };
+    match level {
+        0 => tracing::event!(tracing::Level::ERROR, node_id = %node_id_str, message = %message_str),
+        1 => tracing::event!(tracing::Level::WARN, node_id = %node_id_str, message = %message_str),
+        2 => tracing::event!(tracing::Level::INFO, node_id = %node_id_str, message = %message_str),
+        3 => tracing::event!(tracing::Level::DEBUG, node_id = %node_id_str, message = %message_str),
+        4 => tracing::event!(tracing::Level::TRACE, node_id = %node_id_str, message = %message_str),
+        _ => tracing::event!(tracing::Level::INFO, node_id = %node_id_str, message = %message_str),
+    }
 }
 
 /// 南向 .so 适配器：将 FFI 调用转发为 `SouthPlugin`，阻塞调用在 `spawn_blocking` 中执行。
@@ -62,6 +85,8 @@ struct SouthSoAdapter {
     list_tags: StrStrFn,
     config_schema: VoidFn,
     tag_schema: VoidFn,
+    /// 可选：插件实现 set_log 时，open 成功后调用以传入宿主日志回调
+    set_log: Option<SetLogFn>,
     cached_meta: std::sync::OnceLock<PluginMeta>,
 }
 
@@ -144,11 +169,18 @@ impl SouthPlugin for SouthSoAdapter {
         let c = serde_json::to_string(&config).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
         let free = self.free_string;
         let open = self.open;
+        let set_log = self.set_log;
         self.run_sync(move |handle| {
             let n = cstr(&n);
             let c = cstr(&c);
             let ptr = unsafe { open(handle, n.as_ptr(), c.as_ptr()) };
-            ffi_result(free, ptr)
+            ffi_result(free, ptr)?;
+            if let Some(set_log_fn) = set_log {
+                unsafe {
+                    set_log_fn(handle, n.as_ptr(), gateway_host_log as *const c_void);
+                }
+            }
+            Ok(())
         })
         .map_err(gateway_sdk::PluginError::msg)
     }
@@ -346,6 +378,7 @@ struct NorthSoAdapter {
     set_subscriptions: StrStrFn,
     on_group_data: StrStrFn,
     config_schema: VoidFn,
+    set_log: Option<SetLogFn>,
     cached_meta: std::sync::OnceLock<PluginMeta>,
 }
 
@@ -419,11 +452,18 @@ impl NorthPlugin for NorthSoAdapter {
         let c = serde_json::to_string(&config).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
         let free = self.free_string;
         let open = self.open;
+        let set_log = self.set_log;
         self.run_sync(move |handle| {
             let n = cstr(&n);
             let c = cstr(&c);
             let ptr = unsafe { open(handle, n.as_ptr(), c.as_ptr()) };
-            ffi_result(free, ptr)
+            ffi_result(free, ptr)?;
+            if let Some(set_log_fn) = set_log {
+                unsafe {
+                    set_log_fn(handle, n.as_ptr(), gateway_host_log as *const c_void);
+                }
+            }
+            Ok(())
         })
         .map_err(gateway_sdk::PluginError::msg)
     }
@@ -616,6 +656,7 @@ impl PluginLoader {
         let list_tags: StrStrFn = *unsafe { lib.get(SYM_SOUTH_LIST_TAGS).map_err(|e| e.to_string())? };
         let config_schema: VoidFn = *unsafe { lib.get(SYM_SOUTH_CONFIG_SCHEMA).map_err(|e| e.to_string())? };
         let tag_schema: VoidFn = *unsafe { lib.get(SYM_SOUTH_TAG_SCHEMA).map_err(|e| e.to_string())? };
+        let set_log: Option<SetLogFn> = unsafe { lib.get(SYM_SOUTH_SET_LOG).ok().map(|s| *s) };
 
         Ok(SouthSoAdapter {
             handle,
@@ -636,6 +677,7 @@ impl PluginLoader {
             list_tags,
             config_schema,
             tag_schema,
+            set_log,
             cached_meta: std::sync::OnceLock::new(),
         })
     }
@@ -666,6 +708,7 @@ impl PluginLoader {
         let on_group_data: StrStrFn =
             *unsafe { lib.get(SYM_NORTH_ON_GROUP_DATA).map_err(|e| e.to_string())? };
         let config_schema: VoidFn = *unsafe { lib.get(SYM_NORTH_CONFIG_SCHEMA).map_err(|e| e.to_string())? };
+        let set_log: Option<SetLogFn> = unsafe { lib.get(SYM_NORTH_SET_LOG).ok().map(|s| *s) };
 
         Ok(NorthSoAdapter {
             handle,
@@ -682,6 +725,7 @@ impl PluginLoader {
             set_subscriptions,
             on_group_data,
             config_schema,
+            set_log,
             cached_meta: std::sync::OnceLock::new(),
         })
     }

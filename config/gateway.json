@@ -1,0 +1,13 @@
+{
+  "port": 3000,
+  "data_dir": "data",
+  "static_dir": "web/dist",
+  "plugins_dir": "plugins",
+  "log_filter": "info,tower_http=debug",
+  "log_level": "info",
+  "log_file": "logs/gateway.log",
+  "log_dir_nodes": "logs/nodes",
+  "disable_auth": false,
+  "token": null,
+  "backup_secret": "gateway-backup-default-secret-change-in-production"
+}

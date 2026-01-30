@@ -113,7 +113,7 @@ function getStateText(state) {
 }
 
 function handleExport() {
-  ElMessage.info('导出功能：请使用系统管理中的「导出配置」')
+  ElMessage.info('备份功能：请使用系统管理中的「备份」')
 }
 
 function handleImport() {
@@ -151,7 +151,7 @@ onMounted(loadNodes)
     <el-skeleton v-if="loading" :rows="6" animated />
 
     <template v-else>
-      <!-- 列表视图（对标 Neuron 表格） -->
+      <!-- 列表视图 -->
       <el-table
         v-if="viewMode === 'list'"
         :data="filteredNodes"

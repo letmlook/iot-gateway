@@ -1,5 +1,5 @@
-//! 南向 OPC UA 插件：对标 NeuronEX OPC UA。
-//! 功能：端点 URL、用户名/密码、证书/密钥、地址格式 NS!NODEID、读写、数据类型对齐 Neuron。
+//! 南向 OPC UA 插件。
+//! 功能：端点 URL、用户名/密码、证书/密钥、地址格式 NS!NODEID、读写。
 
 #[cfg(feature = "ffi")]
 mod ffi;
@@ -32,7 +32,7 @@ enum OpcNodeId {
     String(String),
 }
 
-/// 解析 Neuron 地址格式：NS!NODEID。例如 0!2258、2!Device1.Module1.Tag1
+/// 解析地址格式：NS!NODEID。例如 0!2258、2!Device1.Module1.Tag1
 fn parse_address(addr: &str) -> Option<ParsedOpcAddress> {
     let addr = addr.trim();
     let mut it = addr.split('!');
@@ -103,7 +103,7 @@ impl SouthPlugin for OpcuaPlugin {
         PluginMeta {
             name: "opcua",
             kind: PluginKind::South,
-            description: Some("OPC UA 南向驱动，连接 OPC UA 服务器采集与写点位，对标 NeuronEX OPC UA"),
+            description: Some("OPC UA 南向驱动，连接 OPC UA 服务器采集与写点位"),
             version: "0.1.0",
             name_zh: Some("OPC UA"),
             name_en: Some("OPC UA"),

@@ -1,6 +1,6 @@
 <script setup>
 /**
- * 根据插件 config_schema 自动生成节点配置表单，对标 Neuron 节点配置界面。
+ * 根据插件 config_schema 自动生成节点配置表单。
  * 支持 Int / String / Bool 类型，必填/可选、默认值、min/max/regex 校验。
  */
 import { ref, watch, computed, onMounted } from 'vue'

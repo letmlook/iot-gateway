@@ -1,4 +1,4 @@
-//! 插件配置与点位 Schema，对标 Neuron modbus-tcp.json、tag_regex 等。
+//! 插件配置与点位 Schema：params、tag_regex 等。
 
 use crate::types::PluginConfig;
 use serde::{Deserialize, Serialize};
@@ -66,7 +66,7 @@ pub struct TagRegexEntry {
     pub regex: String,
 }
 
-/// 插件配置 Schema（对标 Neuron 驱动 json）
+/// 插件配置 Schema
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConfigSchema {
     /// 配置参数列表

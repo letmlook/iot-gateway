@@ -1,4 +1,4 @@
-//! 北向 MQTT 插件：接收 GroupData，发布到 MQTT Broker。对标 Neuron MQTT 北向完整功能。
+//! 北向 MQTT 插件：接收 GroupData，发布到 MQTT Broker。
 //!
 //! 功能：QoS 0/1/2、主题模板（变量替换）、TLS/SSL、离线内存缓存与恢复补发、
 //! 上传格式（group_data / tags_format）、retain、keep_alive、cache_sync_interval。
@@ -165,7 +165,7 @@ impl NorthPlugin for MqttPlugin {
         PluginMeta {
             name: "mqtt",
             kind: PluginKind::North,
-            description: Some("MQTT 北向（对标 Neuron）：QoS 0/1/2、主题模板、TLS、离线缓存与恢复补发、上传格式 group_data/tags_format"),
+            description: Some("MQTT 北向：QoS 0/1/2、主题模板、TLS、离线缓存与恢复补发、上传格式 group_data/tags_format"),
             version: "0.2.0",
             name_zh: Some("MQTT"),
             name_en: Some("MQTT"),

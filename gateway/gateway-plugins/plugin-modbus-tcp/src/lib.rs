@@ -1,5 +1,5 @@
-//! 南向 Modbus TCP 插件：对标 Neuron Modbus TCP，支持 TCP 客户端、线圈/离散/输入/保持寄存器、
-//! Neuron 地址格式（SLAVE!ADDRESS[.BIT][#ENDIAN]）、读写、超时重试、字节序、STRING/BYTES 等。
+//! 南向 Modbus TCP 插件：支持 TCP 客户端、线圈/离散/输入/保持寄存器、
+//! 地址格式（SLAVE!ADDRESS[.BIT][#ENDIAN]）、读写、超时重试、字节序、STRING/BYTES 等。
 
 #[cfg(feature = "ffi")]
 mod ffi;
@@ -10,6 +10,7 @@ use gateway_sdk::{
 };
 use gateway_sdk::types::{DataValue, PluginKind};
 use gateway_sdk::{PluginConfig, PluginError, PluginResult};
+use gateway_sdk::log;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,7 +25,7 @@ enum ModbusArea {
     HoldingRegister,
 }
 
-/// 字节序：Neuron #L/#B(16bit) #LL/#LB/#BL/#BB(32/64bit)
+/// 字节序：#L/#B(16bit) #LL/#LB/#BL/#BB(32/64bit)
 #[derive(Clone, Copy, Default)]
 struct Endianness {
     /// 16bit: false=#L(1,2) true=#B(2,1)
@@ -33,7 +34,7 @@ struct Endianness {
     order32: u8,
 }
 
-/// 解析后的地址（支持 4x!addr 与 Neuron 1!400001[.BIT][#ENDIAN]）
+/// 解析后的地址（支持 4x!addr 与 1!400001[.BIT][#ENDIAN]）
 #[derive(Clone)]
 struct ParsedAddress {
     area: ModbusArea,
@@ -47,7 +48,7 @@ fn parse_address(addr: &str) -> Option<(ModbusArea, u16, u16)> {
     parse_address_full(addr, 1).map(|p| (p.area, p.start, p.count))
 }
 
-/// 完整解析：支持 4x!100、4x!100!2 与 Neuron 1!400001、1!400001.4、1!400001#LB
+/// 完整解析：支持 4x!100、4x!100!2 与 1!400001、1!400001.4、1!400001#LB
 fn parse_address_full(addr: &str, start_address: u8) -> Option<ParsedAddress> {
     let addr = addr.trim();
     let mut endian = Endianness::default();
@@ -297,11 +298,11 @@ impl SouthPlugin for ModbusTcpPlugin {
                 })
                 .param(ParamSchema {
                     name: "start_address".to_string(),
-                    description: Some("地址起始：0 或 1（Neuron 风格 400001=第1个保持寄存器时填 1）".to_string()),
+                    description: Some("地址起始：0 或 1（400001 表示第 1 个保持寄存器时填 1）".to_string()),
                     name_zh: Some("地址起始".to_string()),
                     name_en: Some("Start address".to_string()),
-                    description_zh: Some("地址起始：0 或 1，Neuron 风格 400001 表示第 1 个保持寄存器时填 1".to_string()),
-                    description_en: Some("Start address 0 or 1; use 1 for Neuron-style 400001 as first holding register".to_string()),
+                    description_zh: Some("地址起始：0 或 1，400001 表示第 1 个保持寄存器时填 1".to_string()),
+                    description_en: Some("Start address 0 or 1; use 1 when 400001 denotes first holding register".to_string()),
                     attribute: ParamAttribute::Optional,
                     ty: ParamType::Int,
                     default: Some(serde_json::json!(1)),
@@ -348,10 +349,10 @@ impl SouthPlugin for ModbusTcpPlugin {
                 "bytes".to_string(),
             ]),
             address_format: Some(
-                "0x!addr/1x!addr/3x!addr/4x!addr 或 Neuron: 1!400001[.BIT][#ENDIAN]，.LEN 用于 STRING".to_string(),
+                "0x!addr/1x!addr/3x!addr/4x!addr 或 1!400001[.BIT][#ENDIAN]，.LEN 用于 STRING".to_string(),
             ),
-            address_format_zh: Some("0x!addr/1x!addr/3x!addr/4x!addr 或 Neuron: 1!400001[.BIT][#ENDIAN]，.LEN 用于 STRING".to_string()),
-            address_format_en: Some("0x!addr/1x!addr/3x!addr/4x!addr or Neuron: 1!400001[.BIT][#ENDIAN], .LEN for STRING".to_string()),
+            address_format_zh: Some("0x!addr/1x!addr/3x!addr/4x!addr 或 1!400001[.BIT][#ENDIAN]，.LEN 用于 STRING".to_string()),
+            address_format_en: Some("0x!addr/1x!addr/3x!addr/4x!addr or 1!400001[.BIT][#ENDIAN], .LEN for STRING".to_string()),
         })
     }
 
@@ -367,6 +368,7 @@ impl SouthPlugin for ModbusTcpPlugin {
     async fn open(&self, node_id: NodeId, config: PluginConfig) -> PluginResult<()> {
         let host = config_str(&config, "host", "127.0.0.1");
         let port = config_u16(&config, "port", 502);
+        log::info(node_id, format!("open: host={}, port={}", host, port));
         let slave_id = config.get("slave_id").and_then(|v| v.as_u64()).map(|n| n as u8).unwrap_or(1);
         let connection_timeout_ms = config.get("connection_timeout_ms").and_then(|v| v.as_u64()).unwrap_or(3000);
         let send_interval_ms = config.get("send_interval_ms").and_then(|v| v.as_u64()).unwrap_or(20);
@@ -410,6 +412,7 @@ impl SouthPlugin for ModbusTcpPlugin {
     }
 
     async fn close(&self, node_id: NodeId) -> PluginResult<()> {
+        log::info(node_id, "close");
         let mut state = self.state.write().await;
         state.remove(&node_id);
         Ok(())

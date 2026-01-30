@@ -2,7 +2,7 @@
 name = "plugin-opcua"
 version = "0.1.0"
 edition = "2021"
-description = "南向 OPC UA 插件：对标 NeuronEX OPC UA，连接 OPC UA 服务器采集与写点位"
+description = "南向 OPC UA 插件，连接 OPC UA 服务器采集与写点位"
 
 [lib]
 crate-type = ["lib", "cdylib"]

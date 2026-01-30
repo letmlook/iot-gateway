@@ -53,7 +53,7 @@ impl Store {
         }
     }
 
-    /// 更新节点名称（对标 Neuron Update node）
+    /// 更新节点名称
     pub fn node_update_name(&self, id: NodeId, name: String) {
         if let Some(mut n) = self.nodes.get_mut(&id) {
             n.config.name = name;
@@ -101,7 +101,7 @@ impl Store {
             .map(|r| r.value().clone())
     }
 
-    /// 更新组字段（name、interval_ms、description）。对标 Neuron Update Group。
+    /// 更新组字段（name、interval_ms、description）。
     pub fn group_update(
         &self,
         node_id: NodeId,
@@ -198,7 +198,7 @@ impl Store {
             .find(|t| t.name == name)
     }
 
-    /// 更新标签字段。对标 Neuron Update Tag。
+    /// 更新标签字段。
     pub fn tag_update(
         &self,
         tag_id: TagId,

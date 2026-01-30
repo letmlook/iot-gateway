@@ -1,9 +1,12 @@
-//! .so 插件 C ABI：对标 Neuron 动态库插件，所有跨边界数据以 JSON 字符串传递。
+//! .so 插件 C ABI：本系统动态库插件，所有跨边界数据以 JSON 字符串传递。
 //!
 //! 插件编译为 cdylib，导出约定符号；网关通过 libloading 加载 .so 并调用。
 
 use std::ffi::CStr;
 use std::os::raw::c_char;
+
+/// 宿主提供给 .so 插件的节点日志回调：level (0=Error,1=Warn,2=Info,3=Debug,4=Trace)，node_id 与 message 均为 UTF-8 C 字符串。
+pub type PluginLogCallback = unsafe extern "C" fn(level: u8, node_id: *const c_char, message: *const c_char);
 
 /// 结果 JSON：`{"ok":true}` 或 `{"ok":false,"err":"..."}`。插件分配，宿主复制后调用 `gateway_plugin_free_string` 释放。
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -83,6 +86,8 @@ pub const SYM_SOUTH_LIST_GROUPS: &[u8] = b"gateway_south_plugin_list_groups";
 pub const SYM_SOUTH_LIST_TAGS: &[u8] = b"gateway_south_plugin_list_tags";
 pub const SYM_SOUTH_CONFIG_SCHEMA: &[u8] = b"gateway_south_plugin_config_schema";
 pub const SYM_SOUTH_TAG_SCHEMA: &[u8] = b"gateway_south_plugin_tag_schema";
+/// 可选：南向插件实现此符号后，宿主在每次 open 成功后调用，传入 (handle, node_id_json, log_callback)，插件可据此按节点打日志。
+pub const SYM_SOUTH_SET_LOG: &[u8] = b"gateway_south_plugin_set_log";
 
 pub const SYM_NORTH_CREATE: &[u8] = b"gateway_north_plugin_create";
 pub const SYM_NORTH_DESTROY: &[u8] = b"gateway_north_plugin_destroy";
@@ -97,6 +102,8 @@ pub const SYM_NORTH_SETTING: &[u8] = b"gateway_north_plugin_setting";
 pub const SYM_NORTH_SET_SUBSCRIPTIONS: &[u8] = b"gateway_north_plugin_set_subscriptions";
 pub const SYM_NORTH_ON_GROUP_DATA: &[u8] = b"gateway_north_plugin_on_group_data";
 pub const SYM_NORTH_CONFIG_SCHEMA: &[u8] = b"gateway_north_plugin_config_schema";
+/// 可选：北向插件实现此符号后，宿主在每次 open 成功后调用，传入 (handle, node_id_json, log_callback)，插件可据此按节点打日志。
+pub const SYM_NORTH_SET_LOG: &[u8] = b"gateway_north_plugin_set_log";
 
 // ---------- 插件侧：Meta 转换与分配 ----------
 

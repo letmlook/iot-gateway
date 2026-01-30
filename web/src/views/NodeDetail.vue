@@ -348,7 +348,7 @@ async function toggleNode() {
   }
 }
 
-// 编辑节点名称（对标 Neuron Update node）
+// 编辑节点名称
 function openNameModal() {
   editNameValue.value = node.value?.name || ''
   showNameModal.value = true

@@ -1,4 +1,4 @@
-//! 南/北向插件 trait 定义，对标 Neuron neu_plugin_intf_funs_t、驱动/应用生命周期。
+//! 南/北向插件 trait 定义，驱动/应用生命周期。
 
 use crate::error::{PluginError, PluginResult};
 use crate::messages::{GroupData, GroupSubscription};
@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use serde::Serialize;
 use std::sync::Arc;
 
-/// 插件元信息（对标 neu_plugin_module_t：version、module_name、module_descr、kind）
+/// 插件元信息：version、name、description、kind
 /// 支持中英文名称与描述，前端按语言选用。
 #[derive(Debug, Clone)]
 pub struct PluginMeta {
@@ -58,12 +58,12 @@ impl PluginInfo {
     }
 }
 
-/// 南向插件：连接设备、按 Group 轮询、读写、校验。对标 Neuron 南向驱动。
+/// 南向插件：连接设备、按 Group 轮询、读写、校验。
 #[async_trait]
 pub trait SouthPlugin: Send + Sync {
     fn meta(&self) -> PluginMeta;
 
-    /// 配置 Schema（可选）。用于 UI 表单、校验。对标 modbus-tcp.json。
+    /// 配置 Schema（可选）。用于 UI 表单、校验。
     fn config_schema(&self) -> Option<ConfigSchema> {
         None
     }
@@ -144,7 +144,7 @@ pub trait SouthPlugin: Send + Sync {
     async fn list_tags(&self, node_id: NodeId, group_id: GroupId) -> PluginResult<Vec<Tag>>;
 }
 
-/// 北向插件：订阅南向 Group，接收 GroupData，转发到云/应用。对标 Neuron 北向应用。
+/// 北向插件：订阅南向 Group，接收 GroupData，转发到云/应用。
 #[async_trait]
 pub trait NorthPlugin: Send + Sync {
     fn meta(&self) -> PluginMeta;

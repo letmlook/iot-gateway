@@ -1,6 +1,6 @@
 //! # Gateway Core
 //!
-//! 消息总线、路由核心、节点/组/标签管理，对标 Neuron 的 Manager + NNG 总线。
+//! 消息总线、路由核心、节点/组/标签管理。
 //! 支持从 `plugins_dir` 动态加载 .so 插件（参见 `loader`）。
 
 mod bus;

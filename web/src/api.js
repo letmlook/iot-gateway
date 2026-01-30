@@ -18,7 +18,28 @@ export const api = {
   health: () => req('GET', '/health'),
   version: () => req('GET', '/version'),
   metrics: () => fetch(`${BASE}/metrics`).then(r => r.text()),
-  export: () => req('GET', '/export'),
+  backup: (password) =>
+    fetch(`${BASE}/backup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(password != null && password !== '' ? { password } : {}),
+    }).then(async (r) => {
+      if (!r.ok) throw new Error(await r.text() || r.statusText)
+      const blob = await r.blob()
+      const disposition = r.headers.get('Content-Disposition')
+      const match = disposition && disposition.match(/filename="?([^";]+)"?/)
+      const filename = match ? match[1].trim() : `gateway-backup-${Date.now()}.bin`
+      return { blob, filename }
+    }),
+  restore: (formData) =>
+    fetch(`${BASE}/restore`, {
+      method: 'POST',
+      body: formData,
+    }).then(async (r) => {
+      const text = await r.text()
+      if (!r.ok) throw new Error(text || r.statusText)
+      return text ? JSON.parse(text) : null
+    }),
 
   // 插件
   pluginsSouth: () => req('GET', '/plugins/south'),

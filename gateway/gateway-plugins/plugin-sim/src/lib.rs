@@ -1,4 +1,4 @@
-//! 南向示例插件：模拟设备。用于测试与演示，对标 Neuron 的 sim 驱动。
+//! 南向示例插件：模拟设备。用于测试与演示。
 //! 可静态链接或编译为 .so（cdylib，`--features ffi`）经 FFI 动态加载。
 
 #[cfg(feature = "ffi")]

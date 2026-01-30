@@ -1,4 +1,4 @@
-//! 插件错误类型，对标 Neuron 驱动错误码与语义。
+//! 插件错误类型，用于 API 与日志。
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -6,7 +6,7 @@ use thiserror::Error;
 
 pub type PluginResult<T> = Result<T, PluginError>;
 
-/// 插件错误码（对标 Neuron，便于 API 与日志）
+/// 插件错误码，便于 API 与日志
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginErrorCode {

@@ -1,34 +1,34 @@
-# Gateway SDK 与 Neuron 对标
+# Gateway SDK 说明
 
-> 南/北向插件 SDK 详细说明，对标 Neuron 驱动/应用接口。
+> 南/北向插件 SDK 详细说明。
 
 ---
 
 ## 一、SDK 模块概览
 
-| 模块 | 说明 | Neuron 对应 |
-|------|------|-------------|
-| `error` | `PluginError`、`PluginErrorCode`、`PluginResult` | 驱动错误码、plog |
-| `types` | `DataValue`、`DataType`、`Tag`、`Group`、`NodeId` 等 | `neu_value_u`、`neu_datatag_t`、统一类型 |
-| `schema` | `ConfigSchema`、`ParamSchema`、`TagRegexEntry`、`TagSchema` | modbus-tcp.json、tag_regex、params |
-| `messages` | `GroupData`、`GroupSubscription`、`TagRead`、`TagWrite` | NNG 消息、订阅表 |
-| `plugin` | `SouthPlugin`、`NorthPlugin`、`PluginMeta` | `neu_plugin_intf_funs_t`、`neu_plugin_module_t` |
+| 模块 | 说明 |
+|------|------|
+| `error` | `PluginError`、`PluginErrorCode`、`PluginResult` |
+| `types` | `DataValue`、`DataType`、`Tag`、`Group`、`NodeId` 等 |
+| `schema` | `ConfigSchema`、`ParamSchema`、`TagRegexEntry`、`TagSchema` |
+| `messages` | `GroupData`、`GroupSubscription`、`TagRead`、`TagWrite` |
+| `plugin` | `SouthPlugin`、`NorthPlugin`、`PluginMeta` |
 
 ---
 
-## 二、生命周期（对标 open/close/init/uninit/start/stop/setting）
+## 二、生命周期（open/close/init/uninit/start/stop/setting）
 
 ### 南向 SouthPlugin
 
-| 接口 | 时机 | 对标 Neuron |
-|------|------|-------------|
-| `open(node_id, config)` | 创建 node 时首先调用 | `driver_open`，创建 per-node 状态 |
-| `close(node_id)` | 删除 node 时最后调用 | `driver_close`，释放状态 |
-| `init(node_id)` | open 之后 | `driver_init`，初始化资源 |
-| `uninit(node_id)` | 删除 node 时首先调用 | `driver_uninit`，释放 init 资源 |
-| `start(node_id)` | 用户点击「启动」 | `driver_start`，连接设备，group_timer 开始 |
-| `stop(node_id)` | 用户点击「停止」 | `driver_stop`，断开，group_timer 停止 |
-| `setting(node_id, config)` | 用户修改插件配置 | `driver_setting`，JSON 配置更新 |
+| 接口 | 时机 |
+|------|------|
+| `open(node_id, config)` | 创建 node 时首先调用 |
+| `close(node_id)` | 删除 node 时最后调用 |
+| `init(node_id)` | open 之后 |
+| `uninit(node_id)` | 删除 node 时首先调用 |
+| `start(node_id)` | 用户点击「启动」 |
+| `stop(node_id)` | 用户点击「停止」 |
+| `setting(node_id, config)` | 用户修改插件配置 |
 
 ### 北向 NorthPlugin
 
@@ -38,12 +38,12 @@
 
 ## 三、南向采集与读写
 
-| 接口 | 说明 | Neuron |
-|------|------|--------|
-| `poll_group(node_id, group_id, tags)` | 按 Group 定时采集，返回 `(TagId, DataValue)[]` | `driver.group_timer` |
-| `write_tags(node_id, values)` | 写 Tag，默认 `NotSupported` | `driver.write_tag` |
-| `validate_tag(node_id, tag)` | 添加/更新 tag 时校验，默认通过 | `driver.validate_tag` |
-| `list_groups` / `list_tags` | 默认 groups/tags（如 sim） | 驱动自维护 |
+| 接口 | 说明 |
+|------|------|
+| `poll_group(node_id, group_id, tags)` | 按 Group 定时采集，返回 `(TagId, DataValue)[]` |
+| `write_tags(node_id, values)` | 写 Tag，默认 `NotSupported` |
+| `validate_tag(node_id, tag)` | 添加/更新 tag 时校验，默认通过 |
+| `list_groups` / `list_tags` | 默认 groups/tags（如 sim） |
 
 ---
 
@@ -56,7 +56,7 @@
 
 ---
 
-## 五、ConfigSchema / TagSchema（对标 modbus-tcp.json）
+## 五、ConfigSchema / TagSchema
 
 ### ConfigSchema
 
@@ -114,12 +114,12 @@
 
 ---
 
-## 九、与 Neuron 差异小结
+## 九、实现要点
 
-| 项目 | Neuron | 本 SDK |
-|------|--------|--------|
-| 实现语言 | C，.so 动态库 | Rust，静态链接 crate |
-| 模块导出 | `neu_plugin_module_t` 常量 | `PluginMeta` + trait 实现 |
-| 配置 Schema | 独立 json 文件 | `config_schema()` 返回 `ConfigSchema` |
-| 生命周期 | open→init→start / stop→uninit→close | 同序，`async` |
-| 校验 | `validate_tag` + tag_regex | `validate_tag` + 可选 `ConfigSchema::validate_address` |
+| 项目 | 本 SDK |
+|------|--------|
+| 实现语言 | Rust，静态链接 crate 或 .so |
+| 模块导出 | `PluginMeta` + trait 实现 |
+| 配置 Schema | `config_schema()` 返回 `ConfigSchema` |
+| 生命周期 | open→init→start / stop→uninit→close，`async` |
+| 校验 | `validate_tag` + 可选 `ConfigSchema::validate_address` |

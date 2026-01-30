@@ -1,7 +1,9 @@
 //! 网关服务入口：插件注册（.so 动态加载 + 可选内置）、REST API、前端静态资源。
 
 mod api;
+mod backup;
 mod config;
+mod logging;
 mod state;
 
 use axum::Router;
@@ -9,7 +11,6 @@ use gateway_core::{persist_load, persist_load_json, persist_save, PluginLoader, 
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use config::Config;
 use state::AppState;
@@ -17,10 +18,7 @@ use state::AppState;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = Config::from_env();
-    tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| config.log_filter.clone().into()))
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    logging::init_logging(&config);
 
     let mut mgr = Manager::new();
     let mut loader_opt: Option<PluginLoader> = None;

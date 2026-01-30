@@ -1,4 +1,4 @@
-# 自研 IoT 网关：架构与 Neuron 对标
+# 自研 IoT 网关：架构说明
 
 > 南向设备、北向应用均通过插件实现；后端 Rust，前端 Vue + JavaScript。
 
@@ -35,21 +35,21 @@
 
 ---
 
-## 二、与 Neuron 对标
+## 二、能力概览
 
-| 能力 | Neuron | 本网关 |
-|------|--------|--------|
-| 南向插件 | 动态库 .so + C SDK | **.so 动态加载**（cdylib + libloading）或静态链接；trait `SouthPlugin` |
-| 北向插件 | 同上 | 同上，trait `NorthPlugin` |
-| 消息总线 | NNG 星型 | tokio `broadcast` 广播 GroupData |
-| 节点 | 适配器 + 插件实例 | `Node` = 配置 + 插件名；每个节点对应轮询/消费任务 |
-| Tag / Group | 点位、分组、轮询间隔 | `Tag`、`Group`，`Group.interval_ms` 控制轮询 |
-| 统一数据类型 | Neuron 统一类型 → JSON | `DataValue` 枚举 → JSON |
-| 北向订阅 | 订阅表路由 GroupData | `SubscriptionTable`：北向 node → [(south_node, group)] |
-| REST API | 节点/组/标签/插件管理 | `/api/health`、`/api/nodes`、groups、tags、subscriptions、plugins 等 |
-| Web UI | 内置控制台 | Vue3 + JS 管理台，列表/创建/启停、插件 version |
-| 持久化 | 配置与状态落盘 | **SQLite** `data/data.db`，事务写入、启动加载、变更保存；支持从旧版 `data.json` 迁移 |
-| 热插拔 | 动态加载 .so | **支持**：`plugins/` 下 .so 启动时加载；内置插件（无 plugins 时） |
+| 能力 | 本网关 |
+|------|--------|
+| 南向插件 | .so 动态加载（cdylib + libloading）或静态链接；trait `SouthPlugin` |
+| 北向插件 | 同上，trait `NorthPlugin` |
+| 消息总线 | tokio `broadcast` 广播 GroupData |
+| 节点 | `Node` = 配置 + 插件名；每个节点对应轮询/消费任务 |
+| Tag / Group | `Tag`、`Group`，`Group.interval_ms` 控制轮询 |
+| 统一数据类型 | `DataValue` 枚举 → JSON |
+| 北向订阅 | `SubscriptionTable`：北向 node → [(south_node, group)] |
+| REST API | `/api/health`、`/api/nodes`、groups、tags、subscriptions、plugins 等 |
+| Web UI | Vue3 + JS 管理台，列表/创建/启停、插件 version |
+| 持久化 | **SQLite** `data/data.db`，事务写入、启动加载、变更保存；支持从旧版 `data.json` 迁移 |
+| 热插拔 | `plugins/` 下 .so 启动时加载；内置插件（无 plugins 时） |
 
 ---
 
@@ -77,7 +77,7 @@ iot-gateway/
 │   └── dist/                  # 构建产出，网关服务于此
 └── docs/
     ├── IoT网关调研报告.md
-    └── 架构与Neuron对标.md
+    └── 架构说明.md（本文档）
 ```
 
 ---
@@ -113,7 +113,7 @@ iot-gateway/
 |------|------|------|
 | GET | /api/health | 健康检查（status、nodes_count、nodes_running、plugins_south/north） |
 | GET | /api/metrics | Prometheus 格式指标 |
-| GET | /api/version | 版本信息（version、build_date、revision，对标 Neuron） |
+| GET | /api/version | 版本信息（version、build_date、revision） |
 | GET | /api/export | 导出当前快照 JSON |
 | GET | /api/plugins/south | 南向插件列表 (name, description, version) |
 | GET | /api/plugins/south/:name/config_schema | 南向插件配置 Schema |
@@ -123,7 +123,7 @@ iot-gateway/
 | GET | /api/nodes | 节点列表 |
 | POST | /api/nodes | 创建节点（name, kind, plugin_name, config） |
 | GET | /api/nodes/:id | 节点详情 |
-| PUT | /api/nodes/:id | 更新节点（body: name?，对标 Neuron Update node） |
+| PUT | /api/nodes/:id | 更新节点（body: name?） |
 | DELETE | /api/nodes/:id | 删除节点 |
 | POST | /api/nodes/:id/start | 启动节点 |
 | POST | /api/nodes/:id/stop | 停止节点 |
@@ -139,10 +139,10 @@ iot-gateway/
 | DELETE | /api/nodes/:id/tags/:tid | 删除标签 |
 | GET | /api/nodes/:id/subscriptions | 北向订阅列表 |
 | PUT | /api/nodes/:id/subscriptions | 设置北向订阅 |
-| GET | /api/nodes/:id/setting | 获取节点插件配置（仅返回 { config }，对标 Neuron GET setting） |
-| PUT | /api/nodes/:id/setting | 修改节点插件配置（对标 Neuron setting） |
-| POST | /api/nodes/:id/read_tags | 南向按需读 Tag（对标 Neuron read_tag） |
-| POST | /api/nodes/:id/write_tags | 南向写 Tag（对标 Neuron write_tag） |
+| GET | /api/nodes/:id/setting | 获取节点插件配置（仅返回 { config }） |
+| PUT | /api/nodes/:id/setting | 修改节点插件配置 |
+| POST | /api/nodes/:id/read_tags | 南向按需读 Tag |
+| POST | /api/nodes/:id/write_tags | 南向写 Tag |
 
 ---
 
@@ -155,13 +155,13 @@ iot-gateway/
 | `GATEWAY_PORT` | 3000 | HTTP 监听端口 |
 | `GATEWAY_DATA_DIR` | data | 数据目录，持久化 `data.db`（SQLite） |
 | `GATEWAY_STATIC_DIR` | web/dist | 前端静态资源根 |
-| `GATEWAY_PLUGINS_DIR` | plugins | 插件 .so 目录（对标 Neuron plugins） |
+| `GATEWAY_PLUGINS_DIR` | plugins | 插件 .so 目录 |
 | `GATEWAY_CONFIG` | （无） | 配置文件路径；缺省时尝试 `config/gateway.json` |
 | `GATEWAY_DISABLE_AUTH` | 0 | 设为 1 或 true 关闭 API 认证 |
 | `GATEWAY_TOKEN` | （无） | API Bearer Token；设置后除 /api/health、/api/metrics、/api/version 外需带 Authorization |
 | `RUST_LOG` | info,tower_http=debug | 日志 filter |
 
-### 持久化（对标 Neuron 配置与状态落盘，SQLite）
+### 持久化（SQLite）
 
 - **SQLite**：节点、组、标签、北向订阅写入 `data/data.db`；启动时加载，任意变更后自动保存。
 - **Schema**：`meta`（version）、`nodes`、`groups`、`tags`、`subscriptions` 表；版本号便于后续迁移。
@@ -195,7 +195,7 @@ cd web && npm install && npm run build   # 产出 web/dist
 
 ---
 
-## 八、.so 插件（对标 Neuron）
+## 八、.so 插件
 
 1. **构建 .so**：  
    `cargo build -p plugin-sim -p plugin-mqtt --features ffi`  
@@ -207,4 +207,4 @@ cd web && npm install && npm run build   # 产出 web/dist
 
 1. **MQTT 北向**：在 `plugin-mqtt` 中接入 `rumqttc`，按 topic 发布 GroupData。
 2. **更多南向**：Modbus、OPC UA 等，按 `SouthPlugin` 实现即可；可同时提供 .so（`--features ffi`）与静态链接。
-3. **JWT / 认证**：API 鉴权，对齐 Neuron 的认证能力。
+3. **JWT / 认证**：API 鉴权扩展。

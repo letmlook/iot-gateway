@@ -1,12 +1,15 @@
 //! REST API handlers。
 
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::body::Bytes;
+use axum::extract::{Multipart, Path, State};
+use axum::http::{header, StatusCode};
+use axum::response::IntoResponse;
 use axum::Json;
 use gateway_sdk::{Group, GroupSubscription, NodeId, NodeKind, PluginConfig, PluginInfo, Tag};
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::backup;
 use crate::state::AppState;
 
 fn parse_node_id(s: &str) -> Result<NodeId, (StatusCode, &'static str)> {
@@ -22,7 +25,7 @@ fn parse_tag_id(s: &str) -> Result<gateway_sdk::TagId, (StatusCode, &'static str
 }
 
 // ---------- Version ----------
-/// 版本信息。对标 Neuron /api/version。
+/// 版本信息。
 pub async fn version() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
@@ -53,10 +56,82 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     }))
 }
 
-/// 导出当前快照为 JSON（用于备份或迁移）
-pub async fn export_snapshot(State(state): State<AppState>) -> Json<gateway_core::Snapshot> {
+/// 默认备份/恢复密码（未填写时使用，保证文件仍为加密不可直接查看）
+const DEFAULT_BACKUP_SECRET: &str = "gateway-backup";
+
+#[derive(Deserialize, Default)]
+pub struct BackupReq {
+    pub password: Option<String>,
+}
+
+/// 备份：返回压缩加密的二进制，不展示内容；POST body 可选 { "password": "xxx" }
+pub async fn backup(
+    State(state): State<AppState>,
+    Json(body): Json<BackupReq>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let secret = body
+        .password
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_BACKUP_SECRET.to_string());
     let snap = state.manager.build_snapshot().await;
-    Json(snap)
+    let data = backup::encrypt_backup(&snap, &secret).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let filename = format!(
+        "gateway-backup-{}.bin",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    );
+    let mut res = (StatusCode::OK, data).into_response();
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/octet-stream"),
+    );
+    res.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        header::HeaderValue::try_from(format!("attachment; filename=\"{}\"", filename))
+            .unwrap_or(header::HeaderValue::from_static("attachment")),
+    );
+    Ok(res)
+}
+
+/// 恢复：仅接受加密备份文件 + 可选密码，不展示内容
+pub async fn restore(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let mut file_data: Option<Bytes> = None;
+    let mut password: Option<String> = None;
+    while let Some(field) = multipart.next_field().await.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))? {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "file" {
+            let bytes = field.bytes().await.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+            if !bytes.is_empty() {
+                file_data = Some(bytes);
+            }
+        } else if name == "password" {
+            let s = field.text().await.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+            password = Some(s);
+        }
+    }
+    let data = file_data.ok_or((StatusCode::BAD_REQUEST, "missing backup file".to_string()))?;
+    let secret = password
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_BACKUP_SECRET.to_string());
+    let snap = backup::decrypt_backup(&data, &secret).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if snap.version != gateway_core::SNAPSHOT_VERSION {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "unsupported snapshot version: {}, expected {}",
+                snap.version,
+                gateway_core::SNAPSHOT_VERSION
+            ),
+        ));
+    }
+    state.manager.apply_snapshot(&snap).await;
+    state.persist().await;
+    Ok(Json(serde_json::json!({ "ok": true, "message": "restored" })))
 }
 
 /// Prometheus 格式指标（节点数、运行数、插件数等）
@@ -188,7 +263,7 @@ pub async fn update_node(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// 获取节点插件配置（仅 config）。对标 Neuron GET setting。
+/// 获取节点插件配置（仅 config）。
 pub async fn get_node_setting(
     State(state): State<AppState>,
     Path(id): Path<String>,
