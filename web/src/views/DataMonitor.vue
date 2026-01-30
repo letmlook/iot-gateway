@@ -2,6 +2,7 @@
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
+import { getErrorMessage } from '../i18n'
 import { ElMessage } from 'element-plus'
 import { VideoPlay, VideoPause, Refresh, EditPen } from '@element-plus/icons-vue'
 import { api } from '../api.js'
@@ -41,7 +42,7 @@ async function loadNodes() {
       await loadTags()
     }
   } catch (e) {
-    error.value = t('south.loadFailed') + e.message
+    error.value = t('south.loadFailed') + getErrorMessage(t, e)
   }
 }
 
@@ -79,7 +80,7 @@ async function loadTags() {
     }
     if (tags.value.length) await readValues()
   } catch (e) {
-    error.value = t('south.loadFailed') + e.message
+    error.value = t('south.loadFailed') + getErrorMessage(t, e)
   } finally {
     loading.value = false
   }
@@ -217,7 +218,7 @@ async function writeTag(tag) {
     writeInputs.value[tag.id] = ''
     await readValues()
   } catch (e) {
-    ElMessage.error(t('monitor.writeFailed') + e.message)
+    ElMessage.error(t('monitor.writeFailed') + getErrorMessage(t, e))
   } finally {
     writingTagId.value = null
   }
@@ -226,8 +227,12 @@ async function writeTag(tag) {
 function initWriteInput(tag) {
   if (writeInputs.value[tag.id] === undefined) {
     const v = tagValues.value[tag.id]
-    if (v !== undefined && v !== null) writeInputs.value[tag.id] = String(v)
-    else writeInputs.value[tag.id] = ''
+    if (v !== undefined && v !== null) {
+      // 使用 formatValue 避免对象被转成 "[object Object]"
+      writeInputs.value[tag.id] = formatValue(v)
+    } else {
+      writeInputs.value[tag.id] = ''
+    }
   }
 }
 
@@ -291,27 +296,27 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 
     <el-card v-if="tags.length" shadow="never" class="monitor-table-card">
       <el-table :data="tags" size="small" stripe>
-        <el-table-column prop="name" :label="t('common.name')" min-width="120" />
-        <el-table-column prop="address" :label="t('monitor.address')" width="140">
+        <el-table-column prop="name" :label="t('common.name')" min-width="100" />
+        <el-table-column prop="address" :label="t('monitor.address')" min-width="100">
           <template #default="{ row }"><span class="font-mono">{{ row.address || '-' }}</span></template>
         </el-table-column>
-        <el-table-column prop="data_type" :label="t('monitor.type')" width="90">
+        <el-table-column prop="data_type" :label="t('monitor.type')" width="80">
           <template #default="{ row }"><el-tag size="small" type="info">{{ row.data_type || '-' }}</el-tag></template>
         </el-table-column>
-        <el-table-column :label="t('monitor.multiplier')" width="80">
+        <el-table-column :label="t('monitor.multiplier')" width="70">
           <template #default>-</template>
         </el-table-column>
-        <el-table-column :label="t('monitor.value')" min-width="160">
+        <el-table-column :label="t('monitor.value')" min-width="120">
           <template #default="{ row }">
             <span :class="{ 'value-error': isValueError(tagValues[row.id]) }">
               {{ formatValue(tagValues[row.id]) }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column prop="description" :label="t('common.description')" width="100" show-overflow-tooltip>
+        <el-table-column prop="description" :label="t('common.description')" min-width="80" show-overflow-tooltip>
           <template #default="{ row }">{{ row.description || '-' }}</template>
         </el-table-column>
-        <el-table-column :label="t('common.operation')" width="200" align="right" fixed="right">
+        <el-table-column :label="t('common.operation')" width="180" align="right" fixed="right">
           <template #default="{ row }">
             <div class="write-cell">
               <el-input

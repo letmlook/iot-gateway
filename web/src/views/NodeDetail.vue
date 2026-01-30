@@ -2,11 +2,10 @@
 import { ref, onMounted, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
+import { getErrorMessage } from '../i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Back, Setting, VideoPlay, VideoPause, Plus, Edit, Delete, RefreshRight, EditPen } from '@element-plus/icons-vue'
 import { api } from '../api.js'
-import NodeConfigForm from '../components/NodeConfigForm.vue'
-
 const route = useRoute()
 const router = useRouter()
 const { t } = useI18n()
@@ -27,7 +26,6 @@ const activeTab = ref('groups')
 const showGroupModal = ref(false)
 const showTagModal = ref(false)
 const showSubModal = ref(false)
-const showSettingModal = ref(false)
 const showNameModal = ref(false)
 const editingGroup = ref(null)
 const editingTag = ref(null)
@@ -44,11 +42,6 @@ const attrOptions = [
 const showBatchTagModal = ref(false)
 const batchTagGroupId = ref('')
 const batchTagRows = ref([{ name: '', data_type: 'Float64', address: '', attr: 'read', description: '' }])
-const settingForm = ref('')
-/** 节点配置弹窗：表单模式下的配置对象（由 NodeConfigForm 填充） */
-const settingConfigFromForm = ref({})
-/** 节点配置弹窗：表单 / JSON 模式 */
-const settingEditMode = ref('json') // 'form' | 'json'
 const subForm = ref({ south_node_id: '', group_id: '' })
 const southGroups = ref([])
 const groupsBySouth = ref({})
@@ -67,7 +60,7 @@ async function loadNode() {
       await loadSouthNodes()
     }
   } catch (e) {
-    error.value = '加载节点信息失败: ' + e.message
+    error.value = '加载节点信息失败: ' + getErrorMessage(t, e)
   } finally {
     loading.value = false
   }
@@ -154,7 +147,7 @@ async function saveGroup() {
     await loadGroups()
     ElMessage.success('保存成功')
   } catch (e) {
-    error.value = '保存组失败: ' + e.message
+    error.value = '保存组失败: ' + getErrorMessage(t, e)
   }
 }
 
@@ -166,7 +159,7 @@ async function deleteGroup(gid) {
     await loadTags()
     ElMessage.success('已删除')
   } catch (e) {
-    if (e !== 'cancel') error.value = '删除组失败: ' + e.message
+    if (e !== 'cancel') error.value = '删除组失败: ' + getErrorMessage(t, e)
   }
 }
 
@@ -207,7 +200,7 @@ async function saveTag() {
     await loadTags()
     ElMessage.success('保存成功')
   } catch (e) {
-    error.value = '保存标签失败: ' + e.message
+    error.value = '保存标签失败: ' + getErrorMessage(t, e)
   }
 }
 
@@ -218,7 +211,7 @@ async function deleteTag(tid) {
     await loadTags()
     ElMessage.success('已删除')
   } catch (e) {
-    if (e !== 'cancel') error.value = '删除标签失败: ' + e.message
+    if (e !== 'cancel') error.value = '删除标签失败: ' + getErrorMessage(t, e)
   }
 }
 
@@ -237,7 +230,7 @@ async function readAllTags() {
       tagValues.value[tid] = val
     })
   } catch (e) {
-    error.value = '读取标签失败: ' + e.message
+    error.value = '读取标签失败: ' + getErrorMessage(t, e)
   } finally {
     readingTags.value = false
   }
@@ -266,7 +259,7 @@ async function addSubscription() {
     await loadSubscriptions()
     ElMessage.success('订阅已添加')
   } catch (e) {
-    error.value = '添加订阅失败: ' + e.message
+    error.value = '添加订阅失败: ' + getErrorMessage(t, e)
   }
 }
 
@@ -278,58 +271,7 @@ async function removeSub(index) {
     await loadSubscriptions()
     ElMessage.success('已取消订阅')
   } catch (e) {
-    if (e !== 'cancel') error.value = '取消订阅失败: ' + e.message
-  }
-}
-
-// 节点配置
-async function openSettingModal() {
-  if (!node.value) return
-  try {
-    const setting = await api.nodeSetting(nodeId.value)
-    const configObj = setting?.config || {}
-    settingForm.value = JSON.stringify(setting, null, 2)
-    settingConfigFromForm.value = { ...configObj }
-    const pluginName = node.value.plugin_name
-    const kind = isNorth.value ? 'north' : 'south'
-    try {
-      const schema = kind === 'south'
-        ? await api.pluginSouthSchema(pluginName)
-        : await api.pluginNorthSchema(pluginName)
-      settingEditMode.value = (schema && schema.params && schema.params.length > 0) ? 'form' : 'json'
-    } catch {
-      settingEditMode.value = 'json'
-    }
-    showSettingModal.value = true
-  } catch (e) {
-    error.value = t('nodeDetail.loadConfigFailed') + e.message
-  }
-}
-
-watch(settingEditMode, (mode) => {
-  if (mode === 'json' && Object.keys(settingConfigFromForm.value).length > 0) {
-    settingForm.value = JSON.stringify({ config: settingConfigFromForm.value }, null, 2)
-  }
-})
-
-function onSettingConfigFromForm(v) {
-  settingConfigFromForm.value = v
-}
-
-async function saveSetting() {
-  try {
-    let body
-    if (settingEditMode.value === 'form') {
-      body = { config: { ...settingConfigFromForm.value } }
-    } else {
-      body = JSON.parse(settingForm.value)
-    }
-    await api.updateNodeSetting(nodeId.value, body)
-    showSettingModal.value = false
-    await loadNode()
-    ElMessage.success(t('nodeDetail.saveSuccess'))
-  } catch (e) {
-    error.value = t('nodeDetail.saveFailed') + e.message
+    if (e !== 'cancel') error.value = '取消订阅失败: ' + getErrorMessage(t, e)
   }
 }
 
@@ -344,7 +286,7 @@ async function toggleNode() {
     }
     await loadNode()
   } catch (e) {
-    error.value = '操作失败: ' + e.message
+    error.value = '操作失败: ' + getErrorMessage(t, e)
   }
 }
 
@@ -366,7 +308,7 @@ async function saveNodeName() {
     await loadNode()
     ElMessage.success('名称已更新')
   } catch (e) {
-    error.value = '更新名称失败: ' + e.message
+    error.value = '更新名称失败: ' + getErrorMessage(t, e)
   }
 }
 
@@ -418,7 +360,7 @@ async function saveBatchTags() {
     await loadTags()
     ElMessage.success(`已创建 ${payload.length} 个点位`)
   } catch (e) {
-    error.value = '批量创建失败: ' + e.message
+    error.value = '批量创建失败: ' + getErrorMessage(t, e)
   }
 }
 
@@ -451,7 +393,7 @@ watch(nodeId, loadNode)
         </div>
       </div>
       <div class="header-right">
-        <el-button :icon="Setting" @click="openSettingModal">{{ t('nodeDetail.config') }}</el-button>
+        <el-button :icon="Setting" @click="router.push(isNorth ? `/north/${nodeId}/config` : `/south/${nodeId}/config`)">{{ t('nodeDetail.config') }}</el-button>
         <el-button
           :type="node.state === 'running' ? 'warning' : 'success'"
           :icon="node.state === 'running' ? VideoPause : VideoPlay"
@@ -474,17 +416,17 @@ watch(nodeId, loadNode)
           <el-button type="primary" size="small" :icon="Plus" @click="openGroupModal()">添加组</el-button>
         </div>
         <el-table v-if="groups.length" :data="groups" size="small" stripe>
-          <el-table-column prop="name" label="组名称" min-width="120" />
-          <el-table-column label="点位数量" width="100">
+          <el-table-column prop="name" label="组名称" min-width="100" />
+          <el-table-column label="点位数量" width="80">
             <template #default="{ row }">{{ tags.filter(t => t.group_id === row.id).length }}</template>
           </el-table-column>
-          <el-table-column label="间隔(ms)" width="100">
+          <el-table-column label="间隔(ms)" width="80">
             <template #default="{ row }">{{ row.interval_ms || 1000 }}</template>
           </el-table-column>
-          <el-table-column prop="description" label="描述" show-overflow-tooltip>
+          <el-table-column prop="description" label="描述" min-width="100" show-overflow-tooltip>
             <template #default="{ row }">{{ row.description || '-' }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="160" fixed="right">
+          <el-table-column label="操作" width="180" fixed="right">
             <template #default="{ row }">
               <el-button type="primary" link size="small" :icon="Edit" @click="openGroupModal(row)">编辑</el-button>
               <el-button type="primary" link size="small" @click="goToGroupTags(row)">点位列表</el-button>
@@ -506,35 +448,35 @@ watch(nodeId, loadNode)
         </div>
         <el-alert v-if="!groups.length" type="warning" title="请先创建点位组，再添加标签。" show-icon class="mb-2" />
         <el-table v-else-if="tags.length" :data="tags" size="small" stripe>
-          <el-table-column prop="name" label="名称" min-width="100" />
-          <el-table-column prop="address" label="地址" width="120">
+          <el-table-column prop="name" label="名称" min-width="80" />
+          <el-table-column prop="address" label="地址" min-width="80">
             <template #default="{ row }"><span class="font-mono">{{ row.address || '-' }}</span></template>
           </el-table-column>
-          <el-table-column label="类型" width="90">
+          <el-table-column label="类型" width="70">
             <template #default="{ row }"><el-tag size="small" type="info">{{ row.data_type || '-' }}</el-tag></template>
           </el-table-column>
-          <el-table-column label="属性" width="80">
-            <template #default="{ row }">{{ row.attr === 'write' ? 'Write' : row.attr === 'readwrite' ? 'ReadWrite' : 'Read' }}</template>
+          <el-table-column label="属性" width="70">
+            <template #default="{ row }">{{ row.attr === 'write' ? 'Write' : row.attr === 'readwrite' ? 'RW' : 'Read' }}</template>
           </el-table-column>
-          <el-table-column label="乘系数" width="80">
+          <el-table-column label="系数" width="50">
             <template #default>-</template>
           </el-table-column>
-          <el-table-column label="偏移量" width="80">
+          <el-table-column label="偏移" width="50">
             <template #default>-</template>
           </el-table-column>
-          <el-table-column label="精度" width="70">
+          <el-table-column label="精度" width="50">
             <template #default>-</template>
           </el-table-column>
-          <el-table-column label="当前值" min-width="100">
+          <el-table-column label="当前值" min-width="80">
             <template #default="{ row }">
               <span v-if="tagValues[row.id] !== undefined">{{ typeof tagValues[row.id] === 'object' ? JSON.stringify(tagValues[row.id]) : tagValues[row.id] }}</span>
               <span v-else class="text-muted">-</span>
             </template>
           </el-table-column>
-          <el-table-column prop="description" label="描述" min-width="80" show-overflow-tooltip>
+          <el-table-column prop="description" label="描述" min-width="60" show-overflow-tooltip>
             <template #default="{ row }">{{ row.description || '-' }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="120" fixed="right">
+          <el-table-column label="操作" width="100" fixed="right">
             <template #default="{ row }">
               <el-button type="primary" link size="small" :icon="Edit" @click="openTagModal(row)">编辑</el-button>
               <el-button type="danger" link size="small" :icon="Delete" @click="deleteTag(row.id)">删除</el-button>
@@ -551,13 +493,13 @@ watch(nodeId, loadNode)
         </div>
         <el-alert v-if="!southNodes.length" type="warning" title="暂无可订阅的南向设备，请先创建南向设备。" show-icon class="mb-2" />
         <el-table v-else-if="subscriptions.length" :data="subscriptions" size="small" stripe>
-          <el-table-column label="南向设备" min-width="120">
+          <el-table-column label="南向设备" min-width="100">
             <template #default="{ row }">{{ getSouthNodeName(row.south_node_id) }}</template>
           </el-table-column>
-          <el-table-column label="订阅组" min-width="120">
+          <el-table-column label="订阅组" min-width="100">
             <template #default="{ row }">{{ getSouthGroupName(row.south_node_id, row.group_id) }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="100" fixed="right">
+          <el-table-column label="操作" width="90" fixed="right">
             <template #default="scope">
               <el-button type="danger" link size="small" :icon="Delete" @click="removeSub(scope.$index)">取消订阅</el-button>
             </template>
@@ -626,36 +568,36 @@ watch(nodeId, loadNode)
           </el-select>
         </el-form-item>
         <el-table :data="batchTagRows" size="small" border>
-          <el-table-column label="*名称" width="120">
+          <el-table-column label="*名称" min-width="100">
             <template #default="{ row, $index }">
               <el-input v-model="row.name" placeholder="名称" size="small" />
             </template>
           </el-table-column>
-          <el-table-column label="*类型" width="100">
+          <el-table-column label="*类型" width="90">
             <template #default="{ row }">
               <el-select v-model="row.data_type" placeholder="类型" size="small" style="width: 100%">
                 <el-option v-for="dt in dataTypes" :key="dt" :label="dt" :value="dt" />
               </el-select>
             </template>
           </el-table-column>
-          <el-table-column label="*地址" width="120">
+          <el-table-column label="*地址" min-width="100">
             <template #default="{ row }">
               <el-input v-model="row.address" placeholder="地址" size="small" class="font-mono" />
             </template>
           </el-table-column>
-          <el-table-column label="*属性" width="100">
+          <el-table-column label="*属性" width="90">
             <template #default="{ row }">
               <el-select v-model="row.attr" size="small" style="width: 100%">
                 <el-option v-for="a in attrOptions" :key="a.value" :label="a.label" :value="a.value" />
               </el-select>
             </template>
           </el-table-column>
-          <el-table-column label="描述" min-width="100">
+          <el-table-column label="描述" min-width="80">
             <template #default="{ row }">
               <el-input v-model="row.description" :placeholder="t('nodeDetail.optional')" size="small" />
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="90" fixed="right">
+          <el-table-column label="操作" width="70" fixed="right">
             <template #default="{ $index }">
               <el-button type="danger" link size="small" :disabled="batchTagRows.length <= 1" @click="removeBatchTagRow($index)">删除</el-button>
             </template>
@@ -689,32 +631,6 @@ watch(nodeId, loadNode)
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showSettingModal" :title="t('nodeDetail.nodeConfig')" width="600px" destroy-on-close>
-      <el-radio-group v-model="settingEditMode" size="small" class="setting-mode-group">
-        <el-radio-button value="form">{{ t('schema.form') }}</el-radio-button>
-        <el-radio-button value="json">JSON</el-radio-button>
-      </el-radio-group>
-      <template v-if="settingEditMode === 'form' && node">
-        <NodeConfigForm
-          :plugin-name="node.plugin_name"
-          :kind="isNorth ? 'north' : 'south'"
-          :model-value="settingConfigFromForm"
-          @update:model-value="onSettingConfigFromForm"
-        />
-      </template>
-      <el-input
-        v-else
-        v-model="settingForm"
-        type="textarea"
-        :rows="14"
-        class="font-mono setting-json-input"
-      />
-      <template #footer>
-        <el-button @click="showSettingModal = false">{{ t('common.cancel') }}</el-button>
-        <el-button type="primary" @click="saveSetting">{{ t('nodeDetail.saveConfig') }}</el-button>
-      </template>
-    </el-dialog>
-
     <el-dialog v-model="showNameModal" :title="t('nodeDetail.editName')" width="400px" destroy-on-close>
       <el-form label-position="top">
         <el-form-item label="名称">
@@ -743,6 +659,4 @@ watch(nodeId, loadNode)
 .font-mono { font-family: var(--font-mono); }
 .text-muted { color: var(--text-muted); }
 .detail-tabs { margin-top: 0.5rem; }
-.setting-mode-group { margin-bottom: 1rem; }
-.setting-json-input { margin-top: 0.5rem; }
 </style>

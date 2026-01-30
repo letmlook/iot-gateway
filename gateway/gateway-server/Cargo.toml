@@ -31,3 +31,14 @@ aes-gcm = "0.10"
 sha2 = "0.10"
 flate2 = "1.0"
 rand = "0.8"
+# 离线授权：机器码、RSA 验签
+machineid-rs = "1.2"
+mac_address = "1.1"
+rsa = { version = "0.9", features = ["sha2"] }
+pkcs8 = "0.10"
+spki = "0.7"
+base64 = "0.21"
+hex = "0.4"
+# 用户管理：SQLite 存储、密码哈希
+rusqlite = { version = "0.31", features = ["bundled"] }
+argon2 = "0.5"

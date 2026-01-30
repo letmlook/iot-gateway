@@ -11,4 +11,11 @@ const app = createApp(App)
 app.use(i18n)
 app.use(router)
 app.use(ElementPlus, { locale: zhCn })
-app.mount('#app')
+
+// 等路由完成首次导航再挂载，避免白屏/转圈（redirect + beforeEach 已就绪）
+router.isReady().then(() => {
+  app.mount('#app')
+}).catch((err) => {
+  console.error('[router.isReady]', err)
+  app.mount('#app')
+})

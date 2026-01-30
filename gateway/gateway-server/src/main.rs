@@ -1,10 +1,12 @@
-//! 网关服务入口：插件注册（.so 动态加载 + 可选内置）、REST API、前端静态资源。
+//! 网关服务入口：插件注册（.so 动态加载 + 可选内置）、REST API、前端静态资源、离线授权、用户管理。
 
 mod api;
 mod backup;
 mod config;
+mod license;
 mod logging;
 mod state;
+mod users;
 
 use axum::Router;
 use gateway_core::{persist_load, persist_load_json, persist_save, PluginLoader, Manager};
@@ -14,6 +16,7 @@ use tower_http::trace::TraceLayer;
 
 use config::Config;
 use state::AppState;
+use users::UserStore;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -76,7 +79,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     let _ = crate::config::STATIC_DIR.set(config.static_dir.clone());
-    let state = AppState::new(mgr, config.clone(), loader_opt);
+
+    // 离线授权：启动时读取 license.dat，验签并校验机器码与到期时间
+    let feature_manager = match license::load_and_verify_license(&config.license_path()) {
+        Ok(payload) => {
+            tracing::info!(
+                expiry = %payload.expiry_date,
+                features = ?payload.features,
+                "license loaded and verified"
+            );
+            license::FeatureManager::with_license(payload)
+        }
+        Err(e) => {
+            tracing::warn!("license not loaded (free mode): {}", e);
+            license::FeatureManager::without_license()
+        }
+    };
+
+    let user_store = match UserStore::open(&db_path) {
+        Ok(s) => Arc::new(s),
+        Err(e) => {
+            tracing::warn!("user store open failed: {}, user management disabled", e);
+            Arc::new(UserStore::empty())
+        }
+    };
+
+    let state = AppState::new(mgr, config.clone(), loader_opt, feature_manager, user_store);
 
     let app = Router::new()
         .nest("/api", api::router(state.clone()))

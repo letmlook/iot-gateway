@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { getErrorMessage } from '../i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Close, Setting, VideoPlay, VideoPause, Plus, Edit, Delete, RefreshRight, EditPen } from '@element-plus/icons-vue'
 import { api } from '../api.js'
@@ -64,7 +65,7 @@ async function loadNode() {
       await loadSouthNodes()
     }
   } catch (e) {
-    error.value = '加载节点信息失败: ' + e.message
+    error.value = '加载节点信息失败: ' + getErrorMessage(t, e)
   } finally {
     loading.value = false
   }
@@ -149,7 +150,7 @@ async function saveGroup() {
     await loadGroups()
     ElMessage.success('保存成功')
   } catch (e) {
-    error.value = '保存组失败: ' + e.message
+    error.value = '保存组失败: ' + getErrorMessage(t, e)
   }
 }
 
@@ -161,7 +162,7 @@ async function deleteGroup(gid) {
     await loadTags()
     ElMessage.success('已删除')
   } catch (e) {
-    if (e !== 'cancel') error.value = '删除组失败: ' + e.message
+    if (e !== 'cancel') error.value = '删除组失败: ' + getErrorMessage(t, e)
   }
 }
 
@@ -190,7 +191,7 @@ async function saveTag() {
     await loadTags()
     ElMessage.success('保存成功')
   } catch (e) {
-    error.value = '保存标签失败: ' + e.message
+    error.value = '保存标签失败: ' + getErrorMessage(t, e)
   }
 }
 
@@ -201,7 +202,7 @@ async function deleteTag(tid) {
     await loadTags()
     ElMessage.success('已删除')
   } catch (e) {
-    if (e !== 'cancel') error.value = '删除标签失败: ' + e.message
+    if (e !== 'cancel') error.value = '删除标签失败: ' + getErrorMessage(t, e)
   }
 }
 
@@ -215,7 +216,7 @@ async function readAllTags() {
     tagValues.value = {}
     result.forEach(([tid, val]) => { tagValues.value[tid] = val })
   } catch (e) {
-    error.value = '读取标签失败: ' + e.message
+    error.value = '读取标签失败: ' + getErrorMessage(t, e)
   } finally {
     readingTags.value = false
   }
@@ -240,7 +241,7 @@ async function addSubscription() {
     await loadSubscriptions()
     ElMessage.success('订阅已添加')
   } catch (e) {
-    error.value = '添加订阅失败: ' + e.message
+    error.value = '添加订阅失败: ' + getErrorMessage(t, e)
   }
 }
 
@@ -252,7 +253,7 @@ async function removeSub(index) {
     await loadSubscriptions()
     ElMessage.success('已取消订阅')
   } catch (e) {
-    if (e !== 'cancel') error.value = '取消订阅失败: ' + e.message
+    if (e !== 'cancel') error.value = '取消订阅失败: ' + getErrorMessage(t, e)
   }
 }
 
@@ -271,7 +272,7 @@ async function openSettingPanel() {
     }
     showSettingPanel.value = true
   } catch (e) {
-    error.value = t('nodeDetail.loadConfigFailed') + e.message
+    error.value = t('nodeDetail.loadConfigFailed') + getErrorMessage(t, e)
   }
 }
 function onSettingConfigFromForm(v) {
@@ -286,7 +287,7 @@ async function saveSetting() {
     emit('refresh')
     ElMessage.success(t('nodeDetail.saveSuccess'))
   } catch (e) {
-    error.value = t('nodeDetail.saveFailed') + e.message
+    error.value = t('nodeDetail.saveFailed') + getErrorMessage(t, e)
   }
 }
 
@@ -302,7 +303,7 @@ async function toggleNode() {
     await loadNode()
     emit('refresh')
   } catch (e) {
-    error.value = '操作失败: ' + e.message
+    error.value = '操作失败: ' + getErrorMessage(t, e)
   }
 }
 
@@ -320,7 +321,7 @@ async function saveNodeName() {
     emit('refresh')
     ElMessage.success('名称已更新')
   } catch (e) {
-    error.value = '更新名称失败: ' + e.message
+    error.value = '更新名称失败: ' + getErrorMessage(t, e)
   }
 }
 
@@ -357,7 +358,7 @@ async function saveBatchTags() {
     await loadTags()
     ElMessage.success(`已创建 ${payload.length} 个点位`)
   } catch (e) {
-    error.value = '批量创建失败: ' + e.message
+    error.value = '批量创建失败: ' + getErrorMessage(t, e)
   }
 }
 
@@ -460,14 +461,14 @@ watch(() => props.nodeId, loadNode)
             </el-form>
           </div>
           <el-table v-if="groups.length" :data="groups" size="small" stripe max-height="240">
-            <el-table-column prop="name" label="组名称" min-width="100" />
-            <el-table-column label="点数" width="60">
+            <el-table-column prop="name" label="组名称" min-width="80" />
+            <el-table-column label="点数" width="50">
               <template #default="{ row }">{{ tags.filter(t => t.group_id === row.id).length }}</template>
             </el-table-column>
-            <el-table-column label="间隔" width="70">
+            <el-table-column label="间隔" width="60">
               <template #default="{ row }">{{ row.interval_ms || 1000 }}</template>
             </el-table-column>
-            <el-table-column label="操作" width="120" fixed="right">
+            <el-table-column label="操作" width="100" fixed="right">
               <template #default="{ row }">
                 <el-button type="primary" link size="small" :icon="Edit" @click="openGroupForm(row)">编辑</el-button>
                 <el-button type="danger" link size="small" :icon="Delete" @click="deleteGroup(row.id)">删除</el-button>
@@ -521,20 +522,20 @@ watch(() => props.nodeId, loadNode)
                 </el-select>
               </el-form-item>
               <el-table :data="batchTagRows" size="small" border max-height="160">
-                <el-table-column label="名称" width="90">
+                <el-table-column label="名称" min-width="80">
                   <template #default="{ row }"><el-input v-model="row.name" size="small" placeholder="名称" /></template>
                 </el-table-column>
-                <el-table-column label="类型" width="85">
+                <el-table-column label="类型" width="80">
                   <template #default="{ row }">
                     <el-select v-model="row.data_type" size="small" style="width: 100%">
                       <el-option v-for="dt in dataTypes" :key="dt" :label="dt" :value="dt" />
                     </el-select>
                   </template>
                 </el-table-column>
-                <el-table-column label="地址" width="90">
+                <el-table-column label="地址" min-width="80">
                   <template #default="{ row }"><el-input v-model="row.address" size="small" class="font-mono" /></template>
                 </el-table-column>
-                <el-table-column label="操作" width="60">
+                <el-table-column label="操作" width="50">
                   <template #default="{ $index }">
                     <el-button type="danger" link size="small" :disabled="batchTagRows.length <= 1" @click="removeBatchTagRow($index)">删</el-button>
                   </template>
@@ -549,20 +550,20 @@ watch(() => props.nodeId, loadNode)
           </div>
           <el-alert v-if="!groups.length" type="warning" title="请先创建组" show-icon class="mb-2" />
           <el-table v-else-if="tags.length" :data="tags" size="small" stripe max-height="220">
-            <el-table-column prop="name" label="名称" min-width="80" />
-            <el-table-column prop="address" label="地址" width="80" show-overflow-tooltip>
+            <el-table-column prop="name" label="名称" min-width="70" />
+            <el-table-column prop="address" label="地址" min-width="70" show-overflow-tooltip>
               <template #default="{ row }"><span class="font-mono">{{ row.address || '-' }}</span></template>
             </el-table-column>
-            <el-table-column label="类型" width="72">
+            <el-table-column label="类型" width="65">
               <template #default="{ row }"><el-tag size="small" type="info">{{ row.data_type || '-' }}</el-tag></template>
             </el-table-column>
-            <el-table-column label="值" width="70">
+            <el-table-column label="值" min-width="60">
               <template #default="{ row }">
                 <span v-if="tagValues[row.id] !== undefined">{{ typeof tagValues[row.id] === 'object' ? JSON.stringify(tagValues[row.id]) : tagValues[row.id] }}</span>
                 <span v-else class="text-muted">-</span>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="90" fixed="right">
+            <el-table-column label="操作" width="80" fixed="right">
               <template #default="{ row }">
                 <el-button type="primary" link size="small" :icon="Edit" @click="openTagForm(row)">编辑</el-button>
                 <el-button type="danger" link size="small" :icon="Delete" @click="deleteTag(row.id)">删</el-button>
@@ -597,13 +598,13 @@ watch(() => props.nodeId, loadNode)
           </div>
           <el-alert v-if="!southNodes.length" type="warning" title="暂无可订阅的南向设备" show-icon class="mb-2" />
           <el-table v-else-if="subscriptions.length" :data="subscriptions" size="small" stripe max-height="240">
-            <el-table-column label="南向设备" min-width="100">
+            <el-table-column label="南向设备" min-width="80">
               <template #default="{ row }">{{ getSouthNodeName(row.south_node_id) }}</template>
             </el-table-column>
-            <el-table-column label="组" min-width="80">
+            <el-table-column label="组" min-width="70">
               <template #default="{ row }">{{ getSouthGroupName(row.south_node_id, row.group_id) }}</template>
             </el-table-column>
-            <el-table-column label="操作" width="90" fixed="right">
+            <el-table-column label="操作" width="70" fixed="right">
               <template #default="scope">
                 <el-button type="danger" link size="small" :icon="Delete" @click="removeSub(scope.$index)">取消</el-button>
               </template>

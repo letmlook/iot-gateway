@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { getErrorMessage } from '../i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Download, Upload, Link } from '@element-plus/icons-vue'
 import { api } from '../api.js'
@@ -30,7 +31,7 @@ async function loadSystemInfo() {
     health.value = h
     metrics.value = m
   } catch (e) {
-    error.value = t('system.loadFailed') + e.message
+    error.value = t('system.loadFailed') + getErrorMessage(t, e)
   } finally {
     loading.value = false
   }
@@ -48,7 +49,7 @@ async function doBackup() {
     URL.revokeObjectURL(url)
     ElMessage.success(t('system.backupSuccess'))
   } catch (e) {
-    error.value = t('system.backupFailed') + e.message
+    error.value = t('system.backupFailed') + getErrorMessage(t, e)
   }
 }
 
@@ -87,7 +88,7 @@ async function doRestore() {
     showRestoreModal.value = false
     await loadSystemInfo()
   } catch (e) {
-    error.value = t('system.restoreFailed') + e.message
+    error.value = t('system.restoreFailed') + getErrorMessage(t, e)
   } finally {
     restoreLoading.value = false
   }

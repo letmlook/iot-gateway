@@ -226,4 +226,9 @@ impl Store {
             }
         }
     }
+
+    /// 获取所有点位总数
+    pub fn tags_total_count(&self) -> u64 {
+        self.tags.len() as u64
+    }
 }

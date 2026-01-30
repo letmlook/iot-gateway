@@ -1,9 +1,16 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { api } from './api.js'
 
 const routes = [
   {
     path: '/',
     redirect: '/dashboard'
+  },
+  {
+    path: '/login',
+    name: 'Login',
+    component: () => import('./views/Login.vue'),
+    meta: { title: '登录', public: true }
   },
   {
     path: '/dashboard',
@@ -30,6 +37,12 @@ const routes = [
     meta: { title: '设备详情', kind: 'south' }
   },
   {
+    path: '/south/:id/config',
+    name: 'SouthConfig',
+    component: () => import('./views/NodeConfig.vue'),
+    meta: { title: '设备配置', kind: 'south' }
+  },
+  {
     path: '/north',
     name: 'NorthApps',
     component: () => import('./views/NorthApps.vue'),
@@ -48,6 +61,12 @@ const routes = [
     meta: { title: '应用详情', kind: 'north' }
   },
   {
+    path: '/north/:id/config',
+    name: 'NorthConfig',
+    component: () => import('./views/NodeConfig.vue'),
+    meta: { title: '应用配置', kind: 'north' }
+  },
+  {
     path: '/monitor',
     name: 'DataMonitor',
     component: () => import('./views/DataMonitor.vue'),
@@ -59,17 +78,65 @@ const routes = [
     component: () => import('./views/Plugins.vue'),
     meta: { title: '插件管理' }
   },
+  // 设置模块
   {
-    path: '/system',
-    name: 'System',
-    component: () => import('./views/System.vue'),
-    meta: { title: '系统管理' }
+    path: '/settings/license',
+    name: 'License',
+    component: () => import('./views/License.vue'),
+    meta: { title: '许可证', settingsGroup: true }
+  },
+  {
+    path: '/settings/logs',
+    name: 'Logs',
+    component: () => import('./views/Logs.vue'),
+    meta: { title: '日志', settingsGroup: true }
+  },
+  {
+    path: '/settings/config',
+    name: 'SystemConfig',
+    component: () => import('./views/SystemConfig.vue'),
+    meta: { title: '系统配置', settingsGroup: true }
+  },
+  {
+    path: '/settings/info',
+    name: 'SystemInfo',
+    component: () => import('./views/SystemInfo.vue'),
+    meta: { title: '系统信息', settingsGroup: true }
+  },
+  {
+    path: '/settings/users',
+    name: 'Users',
+    component: () => import('./views/Users.vue'),
+    meta: { title: '用户', settingsGroup: true }
   }
 ]
 
 const router = createRouter({
   history: createWebHistory(),
   routes
+})
+
+router.beforeEach((to) => {
+  let authenticated = false
+  try {
+    authenticated = api.isAuthenticated()
+  } catch (_) {
+    authenticated = false
+  }
+  if (to.meta.public) {
+    if (authenticated && to.path === '/login') {
+      return '/dashboard'
+    }
+    return true
+  }
+  if (!authenticated) {
+    return { path: '/login', query: { redirect: to.fullPath } }
+  }
+  return true
+})
+
+router.onError((err) => {
+  console.error('[router]', err)
 })
 
 export default router

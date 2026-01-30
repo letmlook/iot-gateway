@@ -2,9 +2,7 @@
    IoT Gateway Dashboard - 浅色轻工业风格
    ============================================ */
 
-/* 圆润饱满字体：Mac 用系统 SF，其他用 Plus Jakarta Sans */
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0;400;500;600;700;1;400;500&display=swap');
-
+/* 使用系统字体，避免依赖外网 Google Fonts（易 400/网络问题） */
 /* ============================================
    CSS Variables - 浅色轻工业主题
    ============================================ */
@@ -42,8 +40,8 @@
   --state-stopped: #94a3b8;
   --state-error: #dc2626;
   
-  /* 字体：Mac 优先系统字体（SF Pro 圆润），否则 Plus Jakarta Sans */
-  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Plus Jakarta Sans', 'Helvetica Neue', Arial, sans-serif;
+  /* 字体：系统栈，无外网依赖 */
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
   --font-mono: ui-monospace, 'SF Mono', 'Cascadia Code', 'Source Code Pro', Menlo, Monaco, Consolas, monospace;
   
   /* 圆角 */
@@ -511,6 +509,12 @@ code {
   font-size: 0.75rem;
 }
 
+.dropdown-user-name {
+  color: var(--text-primary);
+  font-weight: 500;
+  cursor: default;
+}
+
 .stats-bar {
   display: flex;
   gap: 1.5rem;
@@ -540,14 +544,14 @@ code {
   letter-spacing: 0.05em;
 }
 
-/* Content Area：仅占主内容区 3/4 宽度，右侧留 1/4 空白；圆角背景与顶栏/侧栏一致，与导航栏和菜单栏留间隙 */
+/* Content Area：占满主内容区宽度，圆角背景与顶栏/侧栏一致，与导航栏和菜单栏留间隙 */
 .content-area {
   flex: 1;
   min-height: 0;
-  width: 75%;
-  max-width: 75%;
-  align-self: flex-start;
-  margin: 1rem 1rem 1rem 1.25rem; /* 与顶栏、侧栏、右侧、底部的间隙 */
+  width: auto;
+  max-width: none;
+  align-self: stretch;
+  margin: 1rem 1.25rem 1rem 1.25rem; /* 与顶栏、侧栏、右侧、底部的间隙 */
   padding: 1.5rem;
   overflow-y: auto;
   overflow-x: hidden;
@@ -1176,6 +1180,64 @@ select.form-input {
   border-radius: var(--radius-lg);
   overflow: hidden;
   border: 1px solid var(--border-subtle);
+}
+
+/* Element Plus 表格列宽自适应 */
+.el-table {
+  --el-table-border-color: var(--border-subtle);
+}
+
+/* 表格自适应布局：列宽根据内容自动调整 */
+.el-table .el-table__header-wrapper table,
+.el-table .el-table__body-wrapper table {
+  table-layout: fixed;
+}
+
+/* 表格整体占满可用宽度 */
+.el-table {
+  width: 100% !important;
+}
+
+/* 表格默认列最小宽度，防止内容被压缩 */
+.el-table .el-table__cell {
+  min-width: 0;
+}
+
+/* 表头单元格不换行 */
+.el-table .el-table__header .cell {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 表格内容单元格 - 保持紧凑但允许适当内容展示 */
+.el-table .el-table__body .cell {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* show-overflow-tooltip 列允许内容正常省略 */
+.el-table .el-table__body .cell.el-tooltip {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 固定列阴影优化 */
+.el-table .el-table-fixed-column--right {
+  box-shadow: -2px 0 8px rgba(0, 0, 0, 0.08);
+}
+
+.el-table .el-table-fixed-column--left {
+  box-shadow: 2px 0 8px rgba(0, 0, 0, 0.08);
+}
+
+/* 调整表格列宽分配 - 让内容列更紧凑 */
+.el-table-column--selection {
+  width: 48px !important;
+  min-width: 48px !important;
+  max-width: 48px !important;
 }
 
 .data-table th,

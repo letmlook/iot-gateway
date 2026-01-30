@@ -5,6 +5,7 @@
  */
 import { ref, watch, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { getErrorMessage } from '../i18n'
 import { api } from '../api.js'
 
 const { t, locale } = useI18n()
@@ -119,7 +120,7 @@ async function loadSchema() {
     initFormValues()
   } catch (e) {
     schema.value = null
-    schemaError.value = e.message || t('schema.loadFailed')
+    schemaError.value = getErrorMessage(t, e) || t('schema.loadFailed')
     formValues.value = {}
     emit('update:modelValue', {})
   } finally {

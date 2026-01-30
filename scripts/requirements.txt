@@ -1,0 +1,2 @@
+# 仅用于 scripts/gen_license.py 生成授权文件
+cryptography>=41.0.0

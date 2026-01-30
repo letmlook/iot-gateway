@@ -2,6 +2,7 @@
 import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
+import { getErrorMessage } from '../i18n'
 import { ElMessage } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import { api } from '../api.js'
@@ -57,7 +58,7 @@ async function loadData() {
     northPlugins.value = np
     nodes.value = nd
   } catch (e) {
-    error.value = '加载插件列表失败: ' + e.message
+    error.value = t('plugins.loadFailed') + getErrorMessage(t, e)
   } finally {
     loading.value = false
   }
@@ -104,28 +105,39 @@ onMounted(loadData)
           </template>
           <!-- 表格视图 -->
           <el-table :data="plugins" size="default" stripe class="plugins-table">
-            <el-table-column :label="t('common.name')" min-width="120">
+            <el-table-column :label="t('common.name')" min-width="100">
               <template #default="{ row }">{{ pluginDisplayName(row) || row.name }}</template>
             </el-table-column>
-            <el-table-column :label="t('plugins.pluginType')" width="120">
+            <el-table-column :label="t('plugins.pluginType')" width="90">
               <template #default="{ row }">
                 <el-tag size="small" :type="row.kind === 'south' ? 'success' : 'primary'">
                   {{ row.kind === 'south' ? t('plugins.southDevice') : t('plugins.northApp') }}
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column :label="t('plugins.pluginCategory')" width="100">
-              <template #default>System</template>
+            <el-table-column :label="t('plugins.licenseStatus')" width="90">
+              <template #default="{ row }">
+                <el-tag v-if="row.is_free" size="small" type="success">{{ t('plugins.free') }}</el-tag>
+                <el-tag v-else-if="row.licensed" size="small" type="success">{{ t('plugins.licensed') }}</el-tag>
+                <el-tag v-else size="small" type="danger">{{ t('plugins.unlicensed') }}</el-tag>
+              </template>
             </el-table-column>
-            <el-table-column prop="version" :label="t('plugins.version')" width="100">
+            <el-table-column prop="version" :label="t('plugins.version')" width="70">
               <template #default="{ row }">v{{ row.version || '-' }}</template>
             </el-table-column>
-            <el-table-column :label="t('common.description')" min-width="280" show-overflow-tooltip>
+            <el-table-column :label="t('common.description')" min-width="200" show-overflow-tooltip>
               <template #default="{ row }">{{ pluginDisplayDesc(row) || row.description || '-' }}</template>
             </el-table-column>
-            <el-table-column :label="t('common.operation')" width="140" fixed="right">
+            <el-table-column :label="t('common.operation')" width="100" fixed="right">
               <template #default="{ row }">
-                <el-button type="primary" link size="small" :icon="Plus" @click="goCreateNode(row)">
+                <el-button 
+                  type="primary" 
+                  link 
+                  size="small" 
+                  :icon="Plus" 
+                  :disabled="!row.licensed"
+                  @click="goCreateNode(row)"
+                >
                   {{ row.kind === 'south' ? t('plugins.createDevice') : t('plugins.createApp') }}
                 </el-button>
               </template>
@@ -181,26 +193,37 @@ onMounted(loadData)
             <span class="tab-label"><span class="dot north" /> {{ t('plugins.northPlugins') }} <el-tag size="small" type="info" class="ml-1">{{ northPlugins.length }}</el-tag></span>
           </template>
           <el-table :data="plugins" size="default" stripe class="plugins-table">
-            <el-table-column :label="t('common.name')" min-width="120">
+            <el-table-column :label="t('common.name')" min-width="100">
               <template #default="{ row }">{{ pluginDisplayName(row) || row.name }}</template>
             </el-table-column>
-            <el-table-column :label="t('plugins.pluginType')" width="120">
+            <el-table-column :label="t('plugins.pluginType')" width="90">
               <template #default="{ row }">
                 <el-tag size="small" type="primary">{{ t('plugins.northApp') }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column :label="t('plugins.pluginCategory')" width="100">
-              <template #default>System</template>
+            <el-table-column :label="t('plugins.licenseStatus')" width="90">
+              <template #default="{ row }">
+                <el-tag v-if="row.is_free" size="small" type="success">{{ t('plugins.free') }}</el-tag>
+                <el-tag v-else-if="row.licensed" size="small" type="success">{{ t('plugins.licensed') }}</el-tag>
+                <el-tag v-else size="small" type="danger">{{ t('plugins.unlicensed') }}</el-tag>
+              </template>
             </el-table-column>
-            <el-table-column prop="version" :label="t('plugins.version')" width="100">
+            <el-table-column prop="version" :label="t('plugins.version')" width="70">
               <template #default="{ row }">v{{ row.version || '-' }}</template>
             </el-table-column>
-            <el-table-column :label="t('common.description')" min-width="280" show-overflow-tooltip>
+            <el-table-column :label="t('common.description')" min-width="200" show-overflow-tooltip>
               <template #default="{ row }">{{ pluginDisplayDesc(row) || row.description || '-' }}</template>
             </el-table-column>
-            <el-table-column :label="t('common.operation')" width="120" fixed="right">
+            <el-table-column :label="t('common.operation')" width="100" fixed="right">
               <template #default="{ row }">
-                <el-button type="primary" link size="small" :icon="Plus" @click="goCreateNode(row)">{{ t('plugins.createApp') }}</el-button>
+                <el-button 
+                  type="primary" 
+                  link 
+                  size="small" 
+                  :icon="Plus" 
+                  :disabled="!row.licensed"
+                  @click="goCreateNode(row)"
+                >{{ t('plugins.createApp') }}</el-button>
               </template>
             </el-table-column>
           </el-table>

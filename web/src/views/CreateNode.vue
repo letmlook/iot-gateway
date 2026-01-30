@@ -2,6 +2,7 @@
 import { ref, inject, onMounted, computed, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
+import { getErrorMessage } from '../i18n'
 import { ElMessage } from 'element-plus'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { api } from '../api.js'
@@ -91,7 +92,7 @@ async function submit() {
     ElMessage.success(t('createNode.createSuccess'))
     router.push(kind.value === 'south' ? '/south' : '/north')
   } catch (e) {
-    error.value = t('createNode.createFailed') + e.message
+    error.value = t('createNode.createFailed') + getErrorMessage(t, e)
   } finally {
     loading.value = false
   }
@@ -110,13 +111,13 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="page-container create-page">
+  <div class="page-container create-page create-page-fill">
     <div class="page-header">
       <el-button :icon="ArrowLeft" @click="goBack">{{ t('createNode.back') }}</el-button>
       <h2 class="page-title">{{ kind === 'south' ? t('createNode.addSouth') : t('createNode.addNorth') }}</h2>
     </div>
     <el-alert v-if="error" type="error" :title="error" closable show-icon @close="error = ''" class="mb-2" />
-    <el-card class="form-card">
+    <el-card class="form-card create-form-card-fill">
       <el-form :model="createForm" label-width="100px" label-position="top">
         <el-form-item :label="t('createNode.nodeName')" required>
           <el-input v-model="createForm.name" :placeholder="kind === 'south' ? t('createNode.namePlaceholderSouth') : t('createNode.namePlaceholderNorth')" clearable />
@@ -126,12 +127,16 @@ onMounted(async () => {
             <el-option
               v-for="p in pluginOptions"
               :key="p.name"
-              :label="(pluginDisplayName(p) || p.name) + (p.version ? ` (v${p.version})` : '')"
+              :label="(pluginDisplayName(p) || p.name) + (p.version ? ` (v${p.version})` : '') + (p.is_free ? ` [${t('plugins.free')}]` : (!p.licensed ? ` [${t('plugins.unlicensed')}]` : ''))"
               :value="p.name"
+              :disabled="!p.licensed"
             />
           </el-select>
           <div v-if="pluginDisplayDesc(pluginOptions.find(pp => pp.name === createForm.plugin_name))" class="form-hint">
             {{ pluginDisplayDesc(pluginOptions.find(pp => pp.name === createForm.plugin_name)) }}
+          </div>
+          <div v-if="pluginOptions.find(pp => pp.name === createForm.plugin_name && !pp.licensed)" class="form-error">
+            {{ t('plugins.licenseRequired') }}
           </div>
         </el-form-item>
         <el-form-item :label="t('createNode.nodeConfig')">
@@ -176,12 +181,15 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.create-page { max-width: 640px; }
-.page-header { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; }
+.create-page-fill { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.page-header { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; flex-shrink: 0; }
 .page-title { margin: 0; font-size: 1.25rem; }
+.create-form-card-fill { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 1.5rem; }
+.create-form-card-fill :deep(.el-card__body) { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .form-card { padding: 1.5rem; }
 .mb-2 { margin-bottom: 1rem; }
 .form-hint { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.25rem; }
+.form-error { font-size: 0.8rem; color: var(--el-color-danger); margin-top: 0.25rem; }
 .config-fallback-hint { font-size: 0.8rem; color: var(--el-text-color-secondary); margin-bottom: 0.5rem; }
 .font-mono { font-family: var(--font-mono); }
 </style>

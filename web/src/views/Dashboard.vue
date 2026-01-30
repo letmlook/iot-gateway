@@ -2,6 +2,7 @@
 import { ref, inject, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
+import { getErrorMessage } from '../i18n'
 import { Connection, Upload, Cpu, Monitor, Setting, Document } from '@element-plus/icons-vue'
 import { api } from '../api.js'
 
@@ -23,7 +24,7 @@ const quickLinks = [
   { path: '/north', icon: Upload, labelKey: 'dashboard.northApps', descKey: 'menu.northAppsDesc', color: 'var(--el-color-primary)' },
   { path: '/monitor', icon: Monitor, labelKey: 'dashboard.dataMonitor', descKey: 'dashboard.dataMonitorDesc', color: 'var(--el-color-warning)' },
   { path: '/plugins', icon: Cpu, labelKey: 'dashboard.pluginManage', descKey: 'dashboard.pluginManageDesc', color: 'var(--el-color-info)' },
-  { path: '/system', icon: Setting, labelKey: 'dashboard.systemManage', descKey: 'dashboard.systemManageDesc', color: 'var(--el-color-info)' },
+  { path: '/settings/info', icon: Setting, labelKey: 'dashboard.systemManage', descKey: 'dashboard.systemManageDesc', color: 'var(--el-color-info)' },
 ]
 
 async function loadData() {
@@ -37,7 +38,7 @@ async function loadData() {
     health.value = h
     nodes.value = nd
   } catch (e) {
-    error.value = t('dashboard.loadOverviewFailed') + e.message
+    error.value = t('dashboard.loadOverviewFailed') + getErrorMessage(t, e)
   } finally {
     loading.value = false
   }

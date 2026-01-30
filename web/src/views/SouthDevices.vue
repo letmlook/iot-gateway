@@ -2,6 +2,7 @@
 import { ref, inject, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
+import { getErrorMessage } from '../i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, VideoPlay, VideoPause, Edit, Delete, MoreFilled, Upload, Download, Grid, List } from '@element-plus/icons-vue'
 import { api } from '../api.js'
@@ -42,7 +43,7 @@ async function loadNodes() {
     const all = await api.nodes()
     nodes.value = all.filter(n => n.kind === 'south')
   } catch (e) {
-    error.value = t('south.loadFailed') + e.message
+    error.value = t('south.loadFailed') + getErrorMessage(t, e)
   } finally {
     loading.value = false
   }
@@ -58,7 +59,7 @@ async function startNode(id) {
     await loadNodes()
     ElMessage.success(t('south.startSuccess'))
   } catch (e) {
-    ElMessage.error(t('south.startFailed') + e.message)
+    ElMessage.error(t('south.startFailed') + getErrorMessage(t, e))
   }
 }
 
@@ -68,7 +69,7 @@ async function stopNode(id) {
     await loadNodes()
     ElMessage.success(t('south.stopSuccess'))
   } catch (e) {
-    ElMessage.error(t('south.stopFailed') + e.message)
+    ElMessage.error(t('south.stopFailed') + getErrorMessage(t, e))
   }
 }
 
@@ -88,7 +89,7 @@ async function deleteNode(id) {
     await loadNodes()
     ElMessage.success(t('south.deleteSuccess'))
   } catch (e) {
-    if (e !== 'cancel') ElMessage.error(t('south.deleteFailed') + e.message)
+    if (e !== 'cancel') ElMessage.error(t('south.deleteFailed') + getErrorMessage(t, e))
   }
 }
 
@@ -157,34 +158,33 @@ onMounted(loadNodes)
         :data="filteredNodes"
         size="default"
         stripe
-        style="width: 100%"
         :header-cell-style="{ background: 'var(--el-fill-color-light)' }"
       >
         <el-table-column type="selection" width="48" />
-        <el-table-column prop="name" :label="t('common.name')" min-width="140">
+        <el-table-column prop="name" :label="t('common.name')" min-width="120">
           <template #default="{ row }">
             <el-link type="primary" @click="goToDetail(row)">{{ row.name }}</el-link>
           </template>
         </el-table-column>
-        <el-table-column :label="t('south.workState')" width="100">
+        <el-table-column :label="t('south.workState')" width="90">
           <template #default="{ row }">
             <el-tag :type="getStateType(row.state)" size="small" effect="light">
               {{ getStateText(row.state) }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column :label="t('south.connState')" width="100">
+        <el-table-column :label="t('south.connState')" width="90">
           <template #default="{ row }">
             <span :class="{ 'text-success': row.state === 'running' }">
               {{ row.state === 'running' ? t('south.connected') : t('south.disconnected') }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="Delay(ms)" width="110">
+        <el-table-column label="Delay(ms)" width="80">
           <template #default> - </template>
         </el-table-column>
-        <el-table-column prop="plugin_name" :label="t('south.pluginType')" width="120" />
-        <el-table-column :label="t('common.operation')" width="140" fixed="right">
+        <el-table-column prop="plugin_name" :label="t('south.pluginType')" min-width="100" />
+        <el-table-column :label="t('common.operation')" width="120" fixed="right">
           <template #default="{ row }">
             <el-switch
               :model-value="row.state === 'running'"

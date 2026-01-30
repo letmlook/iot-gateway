@@ -1,6 +1,9 @@
 //! REST API 与静态资源服务。
 
+mod error;
 mod handlers;
+
+pub use error::ApiError;
 
 use axum::extract::{Request, State};
 use axum::http::header;
@@ -26,28 +29,54 @@ async fn auth_middleware(
     request: Request,
     next: Next,
 ) -> Response {
-    if state.config.disable_auth || state.config.token.is_none() {
+    if state.config.disable_auth {
         return next.run(request).await;
     }
-    let path = request.uri().path().trim_start_matches("/api/").trim_end_matches('/');
-    if path == "health" || path == "metrics" || path == "version" {
+    // 嵌套路由中 URI 可能是 /auth/login 或 /api/auth/login，统一处理
+    let path = request.uri().path()
+        .trim_start_matches("/api/")
+        .trim_start_matches("/api")
+        .trim_start_matches('/')
+        .trim_end_matches('/');
+    if path == "health" || path == "metrics" || path == "version"
+        || path == "license/machine-id" || path == "license/status"
+        || path == "auth/login" || path == "login"
+    {
         return next.run(request).await;
     }
-    let token = state.config.token.as_ref().unwrap();
     let auth = request.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
-    let ok = auth.map(|s| s.strip_prefix("Bearer ").map(|t| t == token.as_str()).unwrap_or(false)).unwrap_or(false);
+    let bearer = auth.and_then(|s| s.strip_prefix("Bearer ").map(|t| t.to_string()));
+    let ok = match bearer {
+        Some(t) if !t.is_empty() => {
+            state.config.token.as_ref().map(|c| c.as_str() == t).unwrap_or(false)
+                || state.user_store.token_valid(&t)
+        }
+        _ => {
+            let has_users = state.user_store.has_any_user().await.ok() == Some(true);
+            state.config.token.is_none() && !has_users
+        }
+    };
     if ok {
         next.run(request).await
     } else {
-        (axum::http::StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
+        ApiError::unauthorized().into_response()
     }
 }
 
 pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
+        .route("/auth/login", post(handlers::login))
         .route("/health", get(handlers::health))
         .route("/metrics", get(handlers::metrics))
         .route("/version", get(handlers::version))
+        .route("/license/machine-id", get(handlers::license_machine_id))
+        .route("/license/status", get(handlers::license_status))
+        .route("/license/upload", post(handlers::upload_license))
+        .route("/license/reset", post(handlers::reset_license))
+        .route("/license/pro-tool", get(handlers::license_pro_tool))
+        .route("/users", get(handlers::list_users).post(handlers::create_user))
+        .route("/users/:id", get(handlers::get_user).put(handlers::update_user).delete(handlers::delete_user))
+        .route("/users/:id/password", put(handlers::change_password))
         .route("/backup", post(handlers::backup))
         .route("/restore", post(handlers::restore))
         .route("/plugins/south", get(handlers::list_south_plugins))
@@ -80,7 +109,8 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/nodes/:id/setting", get(handlers::get_node_setting).put(handlers::node_setting))
         .route("/nodes/:id/read_tags", post(handlers::read_tags))
         .route("/nodes/:id/write_tags", post(handlers::write_tags))
-        .route_layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
+        .with_state(state.clone())
+        .route_layer(middleware::from_fn_with_state(state, auth_middleware))
         .route_layer(middleware::from_fn(request_id_middleware))
 }
 

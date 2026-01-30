@@ -249,4 +249,9 @@ impl Config {
     pub fn data_file(&self) -> PathBuf {
         self.data_dir.join("data.json")
     }
+
+    /// 离线授权文件路径（license.dat，置于数据目录）
+    pub fn license_path(&self) -> PathBuf {
+        self.data_dir.join(crate::license::LICENSE_FILENAME)
+    }
 }
