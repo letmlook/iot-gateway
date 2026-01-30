@@ -4,8 +4,9 @@ import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { getErrorMessage } from '../i18n'
 import { ElMessage } from 'element-plus'
-import { VideoPlay, VideoPause, Refresh, EditPen } from '@element-plus/icons-vue'
+import { VideoPlay, VideoPause, Refresh, Search } from '@element-plus/icons-vue'
 import { api } from '../api.js'
+import StatusIndicator from '../components/StatusIndicator.vue'
 
 const route = useRoute()
 const { t, locale } = useI18n()
@@ -153,7 +154,6 @@ function formatValue(val) {
     if (val.error) return val.error
     if (val.Error) return val.Error
     if (val.message) return val.message
-    // DataValue 格式 { type, value }：直接显示 value
     if ('value' in val && (val.type || Object.keys(val).length <= 2)) {
       const v = val.value
       if (v === undefined || v === null) return '-'
@@ -168,14 +168,14 @@ function formatValue(val) {
   return String(val)
 }
 
-function getValueType(val) {
-  if (isValueError(val)) return 'danger'
-  if (val === undefined || val === null) return 'info'
-  if (typeof val === 'boolean') return val ? 'success' : 'danger'
-  return 'primary'
+function getValueClass(val) {
+  if (isValueError(val)) return 'value-error'
+  if (val === undefined || val === null) return 'value-empty'
+  const v = typeof val === 'object' && 'value' in val ? val.value : val
+  if (typeof v === 'boolean') return v ? 'value-true' : 'value-false'
+  return 'value-normal'
 }
 
-// 将用户输入按 data_type 转为 DataValue JSON
 function parseDataValue(dataType, raw) {
   if (raw === '' || raw === undefined || raw === null) return null
   const s = String(raw).trim()
@@ -228,7 +228,6 @@ function initWriteInput(tag) {
   if (writeInputs.value[tag.id] === undefined) {
     const v = tagValues.value[tag.id]
     if (v !== undefined && v !== null) {
-      // 使用 formatValue 避免对象被转成 "[object Object]"
       writeInputs.value[tag.id] = formatValue(v)
     } else {
       writeInputs.value[tag.id] = ''
@@ -243,30 +242,52 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 </script>
 
 <template>
-  <div class="page-container monitor-page">
-    <div class="monitor-page-header">
-      <h2 class="monitor-page-title">{{ t('monitor.title') }}</h2>
-      <span v-if="lastUpdateTime" class="monitor-update-time">{{ t('monitor.updateTime') }} {{ lastUpdateTime.toLocaleString() }}</span>
+  <div class="monitor-page">
+    <!-- 页面头部 -->
+    <div class="page-header">
+      <div class="header-content">
+        <h1 class="page-title">{{ t('monitor.title') }}</h1>
+        <span v-if="lastUpdateTime" class="update-time">
+          {{ t('monitor.updateTime') }} {{ lastUpdateTime.toLocaleTimeString() }}
+        </span>
+      </div>
     </div>
 
-    <el-alert v-if="error" type="error" :title="error" closable show-icon @close="error = ''" class="monitor-alert" />
+    <el-alert v-if="error" type="error" :title="error" closable show-icon @close="error = ''" class="mb-4" />
 
-    <el-card shadow="never" class="monitor-controls">
-      <div class="monitor-controls-inner">
-        <div class="monitor-filter-group">
-          <span class="monitor-filter-label">{{ t('monitor.filter') }}</span>
-          <el-select v-model="selectedNode" :placeholder="t('south.selectPlugin')" class="monitor-select" @change="onNodeChange">
+    <!-- 控制面板 -->
+    <div class="control-panel">
+      <div class="control-row">
+        <div class="control-group">
+          <label>{{ t('south.selectPlugin') }}</label>
+          <el-select v-model="selectedNode" class="control-select" @change="onNodeChange">
             <el-option v-for="n in nodes" :key="n.id" :label="n.name" :value="n.id" />
           </el-select>
-          <el-select v-model="selectedGroup" placeholder="Group" clearable class="monitor-select monitor-select-group" @change="applyFilters">
+        </div>
+        <div class="control-group">
+          <label>Group</label>
+          <el-select v-model="selectedGroup" placeholder="All" clearable class="control-select" @change="applyFilters">
             <el-option v-for="g in groups" :key="g.id" :label="g.name" :value="g.id" />
           </el-select>
-          <el-input v-model="keywordSearch" :placeholder="t('south.keywordSearch')" clearable class="monitor-search" />
-          <el-checkbox v-model="onlyShowErrors" class="monitor-checkbox">{{ t('monitor.onlyErrors') }}</el-checkbox>
         </div>
-        <div class="monitor-refresh-group">
-          <span class="monitor-filter-label">{{ t('monitor.refresh') }}</span>
-          <el-select v-model="refreshInterval" class="monitor-interval-select" :disabled="autoRefresh">
+        <div class="control-group">
+          <label>{{ t('common.search') }}</label>
+          <el-input
+            v-model="keywordSearch"
+            :placeholder="t('south.keywordSearch')"
+            :prefix-icon="Search"
+            clearable
+            class="control-input"
+          />
+        </div>
+        <div class="control-group checkbox-group">
+          <el-checkbox v-model="onlyShowErrors">{{ t('monitor.onlyErrors') }}</el-checkbox>
+        </div>
+      </div>
+      
+      <div class="control-row control-row-actions">
+        <div class="refresh-controls">
+          <el-select v-model="refreshInterval" class="interval-select" :disabled="autoRefresh">
             <el-option :value="1000" :label="locale === 'zh' ? '1 秒' : '1s'" />
             <el-option :value="2000" :label="locale === 'zh' ? '2 秒' : '2s'" />
             <el-option :value="5000" :label="locale === 'zh' ? '5 秒' : '5s'" />
@@ -276,47 +297,59 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
             :type="autoRefresh ? 'warning' : 'primary'"
             :icon="autoRefresh ? VideoPause : VideoPlay"
             :disabled="!tags.length"
-            size="default"
             @click="toggleAutoRefresh"
           >
             {{ autoRefresh ? t('monitor.stopRefresh') : t('monitor.autoRefresh') }}
           </el-button>
-          <el-button :icon="Refresh" :disabled="loading || !tags.length" @click="readValues">{{ t('monitor.manualRefresh') }}</el-button>
+          <el-button :icon="Refresh" :disabled="loading || !tags.length" @click="readValues">
+            {{ t('monitor.manualRefresh') }}
+          </el-button>
         </div>
       </div>
-    </el-card>
-
-    <div v-if="selectedNodeInfo" class="monitor-status-bar">
-      <el-tag :type="selectedNodeInfo.state === 'running' ? 'success' : selectedNodeInfo.state === 'error' ? 'danger' : 'info'" size="small">
-        {{ selectedNodeInfo.state === 'running' ? t('common.running') : selectedNodeInfo.state === 'error' ? t('common.error') : t('common.stopped') }}
-      </el-tag>
-      <span class="stat">{{ t('monitor.currentCount', { n: tags.length }) }}</span>
-      <el-tag v-if="autoRefresh" type="primary" size="small" effect="plain">{{ t('monitor.autoRefresh') }} {{ refreshInterval / 1000 }}s</el-tag>
     </div>
 
-    <el-card v-if="tags.length" shadow="never" class="monitor-table-card">
-      <el-table :data="tags" size="small" stripe>
-        <el-table-column prop="name" :label="t('common.name')" min-width="100" />
-        <el-table-column prop="address" :label="t('monitor.address')" min-width="100">
-          <template #default="{ row }"><span class="font-mono">{{ row.address || '-' }}</span></template>
-        </el-table-column>
-        <el-table-column prop="data_type" :label="t('monitor.type')" width="80">
-          <template #default="{ row }"><el-tag size="small" type="info">{{ row.data_type || '-' }}</el-tag></template>
-        </el-table-column>
-        <el-table-column :label="t('monitor.multiplier')" width="70">
-          <template #default>-</template>
-        </el-table-column>
-        <el-table-column :label="t('monitor.value')" min-width="120">
+    <!-- 状态栏 -->
+    <div v-if="selectedNodeInfo" class="status-bar">
+      <StatusIndicator :status="selectedNodeInfo.state" size="small" />
+      <span class="divider"></span>
+      <span class="stat-item">{{ t('monitor.currentCount', { n: tags.length }) }}</span>
+      <span v-if="autoRefresh" class="auto-badge">
+        <span class="pulse-dot"></span>
+        {{ t('monitor.autoRefresh') }} {{ refreshInterval / 1000 }}s
+      </span>
+    </div>
+
+    <!-- 数据表格 -->
+    <div v-if="tags.length" class="data-table-wrapper">
+      <el-table :data="tags" size="small" stripe :header-cell-style="{ background: 'var(--bg-elevated)' }">
+        <el-table-column prop="name" :label="t('common.name')" min-width="120">
           <template #default="{ row }">
-            <span :class="{ 'value-error': isValueError(tagValues[row.id]) }">
+            <span class="tag-name">{{ row.name }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="address" :label="t('monitor.address')" min-width="100">
+          <template #default="{ row }">
+            <span class="mono">{{ row.address || '-' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="data_type" :label="t('monitor.type')" width="90">
+          <template #default="{ row }">
+            <span class="type-badge">{{ row.data_type || '-' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column :label="t('monitor.value')" min-width="140">
+          <template #default="{ row }">
+            <span :class="['value-cell', getValueClass(tagValues[row.id])]">
               {{ formatValue(tagValues[row.id]) }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column prop="description" :label="t('common.description')" min-width="80" show-overflow-tooltip>
-          <template #default="{ row }">{{ row.description || '-' }}</template>
+        <el-table-column prop="description" :label="t('common.description')" min-width="100" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="desc-text">{{ row.description || '-' }}</span>
+          </template>
         </el-table-column>
-        <el-table-column :label="t('common.operation')" width="180" align="right" fixed="right">
+        <el-table-column :label="t('common.operation')" width="180" fixed="right">
           <template #default="{ row }">
             <div class="write-cell">
               <el-input
@@ -339,11 +372,11 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
           </template>
         </el-table-column>
       </el-table>
-    </el-card>
+    </div>
 
     <el-skeleton v-else-if="loading" :rows="5" animated />
 
-    <el-empty v-else :description="t('monitor.noData')" class="empty-block">
+    <el-empty v-else :description="t('monitor.noData')" class="empty-state">
       <template #description>
         <p v-if="!nodes.length">{{ t('monitor.createSouthFirst') }}</p>
         <p v-else>{{ t('monitor.addTagsFirst') }}</p>
@@ -353,62 +386,244 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 </template>
 
 <style scoped>
-.monitor-page { padding-bottom: 1.5rem; }
+.monitor-page {
+  max-width: 1400px;
+}
 
-.monitor-page-header {
+.mb-4 { margin-bottom: 1.5rem; }
+
+/* 页面头部 */
+.page-header {
   display: flex;
-  align-items: center;
   justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.25rem;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.header-content {
+  display: flex;
+  align-items: center;
   gap: 1rem;
-  margin-bottom: 1rem;
   flex-wrap: wrap;
 }
-.monitor-page-title { margin: 0; font-size: 1.25rem; font-weight: 600; color: var(--text-primary); }
-.monitor-update-time { font-size: 0.8125rem; color: var(--text-muted); }
 
-.monitor-alert { margin-bottom: 1rem; }
+.page-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+}
 
-.monitor-controls :deep(.el-card__body) { padding: 1rem 1.25rem; }
-.monitor-controls-inner {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 1rem 1.5rem;
-  row-gap: 0.75rem;
-}
-.monitor-filter-group,
-.monitor-refresh-group {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem 0.75rem;
-  flex-wrap: wrap;
-}
-.monitor-filter-label {
-  font-size: 0.8125rem;
+.update-time {
+  font-size: 0.8rem;
   color: var(--text-muted);
-  margin-right: 0.25rem;
-  flex-shrink: 0;
+  background: var(--bg-inset);
+  padding: 0.25rem 0.6rem;
+  border-radius: 100px;
 }
-.monitor-select { width: 140px; }
-.monitor-select-group { width: 120px; }
-.monitor-search { width: 160px; }
-.monitor-checkbox { margin-left: 0.25rem; }
-.monitor-interval-select { width: 90px; }
 
-.monitor-status-bar {
+/* 控制面板 */
+.control-panel {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+}
+
+.control-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 1rem;
+}
+
+.control-row + .control-row {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.control-row-actions {
+  justify-content: flex-end;
+}
+
+.control-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.control-group label {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.control-select {
+  width: 160px;
+}
+
+.control-input {
+  width: 180px;
+}
+
+.checkbox-group {
+  justify-content: flex-end;
+  padding-bottom: 0.35rem;
+}
+
+.refresh-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.interval-select {
+  width: 90px;
+}
+
+/* 状态栏 */
+.status-bar {
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  margin: 0.75rem 0 0.5rem;
-  font-size: 0.875rem;
+  padding: 0.6rem 1rem;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  margin-bottom: 1rem;
+  font-size: 0.85rem;
 }
-.monitor-status-bar .stat { color: var(--text-secondary); }
-.monitor-table-card { margin-top: 0; }
-.monitor-table-card :deep(.el-card__body) { padding: 0.75rem 1rem; }
 
-.font-mono { font-family: var(--font-mono); }
-.value-error { color: var(--el-color-danger); }
-.empty-block { padding: 3rem; margin-top: 0.5rem; }
-.write-cell { display: flex; align-items: center; gap: 0.5rem; justify-content: flex-end; }
-.write-input { width: 100px; min-width: 80px; }
+.divider {
+  width: 1px;
+  height: 16px;
+  background: var(--border-default);
+}
+
+.stat-item {
+  color: var(--text-secondary);
+}
+
+.auto-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.5rem;
+  background: var(--accent-glow);
+  color: var(--accent-dim);
+  border-radius: 100px;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.pulse-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(1.2); }
+}
+
+/* 数据表格 */
+.data-table-wrapper {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.tag-name {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.type-badge {
+  display: inline-block;
+  padding: 0.15rem 0.45rem;
+  background: var(--bg-inset);
+  border-radius: var(--radius-xs);
+  font-size: 0.75rem;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+}
+
+.value-cell {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.value-cell.value-normal {
+  color: var(--success);
+}
+
+.value-cell.value-error {
+  color: var(--danger);
+}
+
+.value-cell.value-empty {
+  color: var(--text-muted);
+}
+
+.value-cell.value-true {
+  color: var(--success);
+}
+
+.value-cell.value-false {
+  color: var(--danger);
+}
+
+.desc-text {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.write-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+
+.write-input {
+  width: 100px;
+}
+
+/* 空状态 */
+.empty-state {
+  padding: 3rem;
+}
+
+@media (max-width: 768px) {
+  .control-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  
+  .control-select,
+  .control-input {
+    width: 100%;
+  }
+  
+  .refresh-controls {
+    flex-wrap: wrap;
+  }
+}
 </style>

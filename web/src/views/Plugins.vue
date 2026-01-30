@@ -278,16 +278,75 @@ onMounted(loadData)
 </template>
 
 <style scoped>
+.page-container {
+  max-width: 1400px;
+}
+
 .mb-2 { margin-bottom: 1rem; }
 .ml-1 { margin-left: 0.25rem; }
-.mr-1 { margin-right: 0.25rem; }
-.tab-label { display: inline-flex; align-items: center; gap: 0.35rem; }
-.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-.dot.south { background: var(--el-color-success); }
-.dot.north { background: var(--el-color-primary); }
-.plugins-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1rem; margin-top: 1rem; }
-.plugin-card.south { border-left: 3px solid var(--el-color-success); }
-.plugin-card.north { border-left: 3px solid var(--el-color-primary); }
+.mr-1 { margin-right: 0.5rem; }
+
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.25rem;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.page-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.header-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.tab-label { 
+  display: inline-flex; 
+  align-items: center; 
+  gap: 0.35rem; 
+}
+
+.dot { 
+  width: 8px; 
+  height: 8px; 
+  border-radius: 50%; 
+  display: inline-block; 
+}
+
+.dot.south { background: var(--success); }
+.dot.north { background: var(--accent-purple); }
+
+.plugins-tabs {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: 1rem;
+}
+
+.plugins-table {
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.plugins-grid { 
+  display: grid; 
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); 
+  gap: 1rem; 
+  margin-top: 1rem; 
+}
+
+.plugin-card.south { border-left: 3px solid var(--success); }
+.plugin-card.north { border-left: 3px solid var(--accent-purple); }
+
 .plugin-header { display: flex; justify-content: space-between; }
 .plugin-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 0.35rem; }
 .plugin-name { font-weight: 600; font-size: 1rem; }

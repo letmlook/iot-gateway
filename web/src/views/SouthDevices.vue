@@ -4,8 +4,10 @@ import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { getErrorMessage } from '../i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, VideoPlay, VideoPause, Edit, Delete, MoreFilled, Upload, Download, Grid, List } from '@element-plus/icons-vue'
+import { Plus, Grid, List, Search, Refresh } from '@element-plus/icons-vue'
 import { api } from '../api.js'
+import StatusIndicator from '../components/StatusIndicator.vue'
+import DeviceCard from '../components/DeviceCard.vue'
 
 const router = useRouter()
 const { t } = useI18n()
@@ -16,9 +18,8 @@ const loading = ref(false)
 const error = ref('')
 const pluginFilter = ref('')
 const keywordSearch = ref('')
-const viewMode = ref('list') // list | grid
+const viewMode = ref('grid') // list | grid
 
-// API 返回 { name, name_zh?, name_en?, description?, description_zh?, description_en?, version }
 const pluginOptions = computed(() => southPlugins.value || [])
 
 const filteredNodes = computed(() => {
@@ -35,6 +36,10 @@ const filteredNodes = computed(() => {
   }
   return list
 })
+
+// 统计
+const runningCount = computed(() => nodes.value.filter(n => n.state === 'running').length)
+const errorCount = computed(() => nodes.value.filter(n => n.state === 'error').length)
 
 async function loadNodes() {
   loading.value = true
@@ -101,193 +106,354 @@ function goToMonitor(node) {
   router.push({ path: '/monitor', query: { nodeId: node.id } })
 }
 
-function getStateType(state) {
-  if (state === 'running') return 'success'
-  if (state === 'error') return 'danger'
-  return 'info'
-}
-
-function getStateText(state) {
-  if (state === 'running') return t('common.running')
-  if (state === 'error') return t('common.error')
-  return t('common.stopped')
-}
-
-function handleExport() {
-  ElMessage.info('备份功能：请使用系统管理中的「备份」')
-}
-
-function handleImport() {
-  ElMessage.info('导入功能：请使用系统管理中的「导入配置」')
-}
-
 function copyNode(node) {
   router.push({ path: '/south/new', query: { copyFrom: node.id } })
+}
+
+function handleCardAction(action, node) {
+  switch (action) {
+    case 'edit':
+      goToDetail(node)
+      break
+    case 'monitor':
+      goToMonitor(node)
+      break
+    case 'copy':
+      copyNode(node)
+      break
+    case 'delete':
+      deleteNode(node.id)
+      break
+  }
 }
 
 onMounted(loadNodes)
 </script>
 
 <template>
-  <div class="page-container">
-    <div class="page-header south-header">
-      <h2 class="page-title">{{ t('south.title') }}</h2>
-      <div class="header-toolbar">
-        <el-select v-model="pluginFilter" :placeholder="t('south.selectPlugin')" clearable style="width: 160px" class="mr-1">
-          <el-option v-for="p in pluginOptions" :key="p.name" :label="p.name" :value="p.name" />
-        </el-select>
-        <el-input v-model="keywordSearch" :placeholder="t('south.keywordSearch')" clearable style="width: 180px" class="mr-1" />
-        <div class="toolbar-btns">
-          <el-button :icon="Upload" text :title="t('south.import')" @click="handleImport" />
-          <el-button :icon="Download" text :title="t('south.export')" @click="handleExport" />
-          <el-button :icon="Grid" text :type="viewMode === 'grid' ? 'primary' : ''" :title="t('south.gridView')" @click="viewMode = 'grid'" />
-          <el-button :icon="List" text :type="viewMode === 'list' ? 'primary' : ''" :title="t('south.listView')" @click="viewMode = 'list'" />
+  <div class="south-page">
+    <!-- 页面头部 -->
+    <div class="page-header">
+      <div class="header-content">
+        <h1 class="page-title">{{ t('south.title') }}</h1>
+        <div class="header-stats">
+          <span class="stat-chip">
+            <span class="stat-dot running"></span>
+            {{ runningCount }} {{ t('common.running') }}
+          </span>
+          <span v-if="errorCount > 0" class="stat-chip error">
+            <span class="stat-dot error"></span>
+            {{ errorCount }} {{ t('common.error') }}
+          </span>
         </div>
-        <el-button type="primary" :icon="Plus" @click="goToCreate">{{ t('south.addDevice') }}</el-button>
+      </div>
+      <div class="header-actions">
+        <el-button type="primary" :icon="Plus" @click="goToCreate">
+          {{ t('south.addDevice') }}
+        </el-button>
       </div>
     </div>
 
-    <el-alert v-if="error" type="error" :title="error" closable show-icon @close="error = ''" class="mb-2" />
+    <!-- 工具栏 -->
+    <div class="toolbar">
+      <div class="toolbar-left">
+        <el-input
+          v-model="keywordSearch"
+          :placeholder="t('south.keywordSearch')"
+          :prefix-icon="Search"
+          clearable
+          class="search-input"
+        />
+        <el-select
+          v-model="pluginFilter"
+          :placeholder="t('south.selectPlugin')"
+          clearable
+          class="filter-select"
+        >
+          <el-option v-for="p in pluginOptions" :key="p.name" :label="p.name" :value="p.name" />
+        </el-select>
+      </div>
+      <div class="toolbar-right">
+        <el-button-group class="view-toggle">
+          <el-button
+            :type="viewMode === 'grid' ? 'primary' : ''"
+            :icon="Grid"
+            @click="viewMode = 'grid'"
+          />
+          <el-button
+            :type="viewMode === 'list' ? 'primary' : ''"
+            :icon="List"
+            @click="viewMode = 'list'"
+          />
+        </el-button-group>
+        <el-button :icon="Refresh" @click="loadNodes" :loading="loading">
+          {{ t('common.refresh') }}
+        </el-button>
+      </div>
+    </div>
+
+    <el-alert v-if="error" type="error" :title="error" closable show-icon @close="error = ''" class="mb-4" />
 
     <el-skeleton v-if="loading" :rows="6" animated />
 
     <template v-else>
-      <!-- 列表视图 -->
-      <el-table
-        v-if="viewMode === 'list'"
-        :data="filteredNodes"
-        size="default"
-        stripe
-        :header-cell-style="{ background: 'var(--el-fill-color-light)' }"
-      >
-        <el-table-column type="selection" width="48" />
-        <el-table-column prop="name" :label="t('common.name')" min-width="120">
-          <template #default="{ row }">
-            <el-link type="primary" @click="goToDetail(row)">{{ row.name }}</el-link>
-          </template>
-        </el-table-column>
-        <el-table-column :label="t('south.workState')" width="90">
-          <template #default="{ row }">
-            <el-tag :type="getStateType(row.state)" size="small" effect="light">
-              {{ getStateText(row.state) }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column :label="t('south.connState')" width="90">
-          <template #default="{ row }">
-            <span :class="{ 'text-success': row.state === 'running' }">
-              {{ row.state === 'running' ? t('south.connected') : t('south.disconnected') }}
-            </span>
-          </template>
-        </el-table-column>
-        <el-table-column label="Delay(ms)" width="80">
-          <template #default> - </template>
-        </el-table-column>
-        <el-table-column prop="plugin_name" :label="t('south.pluginType')" min-width="100" />
-        <el-table-column :label="t('common.operation')" width="120" fixed="right">
-          <template #default="{ row }">
-            <el-switch
-              :model-value="row.state === 'running'"
-              @change="toggleNode(row)"
-            />
-            <el-dropdown trigger="click" @command="(cmd) => { if (cmd === 'edit') goToDetail(row); else if (cmd === 'stats') goToMonitor(row); else if (cmd === 'setting') goToDetail(row); else if (cmd === 'copy') copyNode(row); else if (cmd === 'delete') deleteNode(row.id) }">
-              <el-button type="primary" link :icon="MoreFilled" class="ml-1" />
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item command="edit">
-                    <el-icon><Edit /></el-icon>
-                    {{ t('south.editDevice') }}
-                  </el-dropdown-item>
-                  <el-dropdown-item command="stats">{{ t('south.dataMonitor') }}</el-dropdown-item>
-                  <el-dropdown-item command="setting">{{ t('south.deviceConfig') }}</el-dropdown-item>
-                  <el-dropdown-item command="copy">{{ t('common.copy') }}</el-dropdown-item>
-                  <el-dropdown-item command="delete" divided>
-                    <span style="color: var(--el-color-danger)">{{ t('common.delete') }}</span>
-                  </el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
-          </template>
-        </el-table-column>
-      </el-table>
-
-      <!-- 网格视图（保留原卡片） -->
-      <div v-else class="device-grid">
-        <el-card
+      <!-- 卡片视图 -->
+      <div v-if="viewMode === 'grid'" class="devices-grid">
+        <DeviceCard
           v-for="node in filteredNodes"
           :key="node.id"
-          class="device-card"
-          :class="'state-' + (node.state || 'stopped')"
-          shadow="hover"
+          :device="node"
+          type="south"
+          @click="goToDetail(node)"
+          @toggle="toggleNode(node)"
+          @edit="goToDetail(node)"
+          @monitor="goToMonitor(node)"
+          @copy="copyNode(node)"
+          @delete="deleteNode(node.id)"
+        />
+      </div>
+
+      <!-- 列表视图 -->
+      <div v-else class="devices-table">
+        <el-table
+          :data="filteredNodes"
+          size="default"
+          stripe
+          :header-cell-style="{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)' }"
         >
-          <template #header>
-            <div class="card-header">
-              <div class="device-info">
-                <span class="device-name" @click="goToDetail(node)" style="cursor: pointer">{{ node.name }}</span>
-                <el-tag size="small" type="info" class="ml-1">{{ node.plugin_name }}</el-tag>
+          <el-table-column prop="name" :label="t('common.name')" min-width="150">
+            <template #default="{ row }">
+              <div class="name-cell">
+                <el-link type="primary" @click="goToDetail(row)">{{ row.name }}</el-link>
               </div>
-              <el-tag :type="getStateType(node.state)" size="small" effect="light">
-                {{ getStateText(node.state) }}
-              </el-tag>
-            </div>
-          </template>
-          <div class="card-body">
-            <div class="info-row">
-              <span class="info-label">{{ t('south.connState') }}</span>
-              <span class="info-value">{{ node.state === 'running' ? t('south.connected') : t('south.disconnected') }}</span>
-            </div>
-          </div>
-          <template #footer>
-            <div class="card-actions">
-              <el-switch
-                :model-value="node.state === 'running'"
-                @change="toggleNode(node)"
-              />
-              <el-button type="primary" size="small" :icon="Edit" @click="goToDetail(node)">{{ t('nodeDetail.config') }}</el-button>
-              <el-button type="danger" size="small" :icon="Delete" @click="deleteNode(node.id)">{{ t('common.delete') }}</el-button>
-            </div>
-          </template>
-        </el-card>
+            </template>
+          </el-table-column>
+          <el-table-column :label="t('south.workState')" width="120">
+            <template #default="{ row }">
+              <StatusIndicator :status="row.state" size="small" />
+            </template>
+          </el-table-column>
+          <el-table-column :label="t('south.connState')" width="100">
+            <template #default="{ row }">
+              <span :class="['conn-status', row.state === 'running' ? 'online' : 'offline']">
+                {{ row.state === 'running' ? t('south.connected') : t('south.disconnected') }}
+              </span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="plugin_name" :label="t('south.pluginType')" min-width="120">
+            <template #default="{ row }">
+              <span class="plugin-tag">{{ row.plugin_name }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column :label="t('common.operation')" width="160" fixed="right">
+            <template #default="{ row }">
+              <div class="table-actions">
+                <el-switch
+                  :model-value="row.state === 'running'"
+                  size="small"
+                  @change="toggleNode(row)"
+                />
+                <el-button type="primary" link size="small" @click="goToDetail(row)">
+                  {{ t('nodeDetail.config') }}
+                </el-button>
+                <el-button type="danger" link size="small" @click="deleteNode(row.id)">
+                  {{ t('common.delete') }}
+                </el-button>
+              </div>
+            </template>
+          </el-table-column>
+        </el-table>
       </div>
 
-      <div v-if="viewMode === 'list'" class="pagination-wrap">
-        <span class="total-hint">共 {{ filteredNodes.length }} 条</span>
-      </div>
-
-      <el-empty v-if="!filteredNodes.length" :description="t('south.noNodes')" class="empty-block">
-        <template #description>
-          <p v-if="nodes.length">{{ t('south.noMatch') }}</p>
-          <p v-else>{{ t('south.createFirst') }}</p>
-        </template>
+      <!-- 空状态 -->
+      <el-empty v-if="!filteredNodes.length" :description="nodes.length ? t('south.noMatch') : t('south.noNodes')" class="empty-state">
+        <el-button v-if="!nodes.length" type="primary" @click="goToCreate">
+          {{ t('south.addDevice') }}
+        </el-button>
       </el-empty>
+
+      <!-- 分页/统计 -->
+      <div v-if="filteredNodes.length" class="footer-info">
+        <span>{{ t('common.items').replace('{n}', filteredNodes.length) }} {{ filteredNodes.length }} {{ t('common.items') }}</span>
+      </div>
     </template>
   </div>
 </template>
 
 <style scoped>
-.mb-2 { margin-bottom: 1rem; }
-.ml-1 { margin-left: 0.25rem; }
-.mr-1 { margin-right: 0.5rem; }
-.page-title { margin: 0 0 1rem; font-size: 1.25rem; }
-.south-header { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; }
-.header-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-left: auto; }
-.toolbar-btns { display: inline-flex; align-items: center; }
-.device-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; }
-.device-card.state-running { border-left: 3px solid var(--el-color-success); }
-.device-card.state-stopped { border-left: 3px solid var(--el-color-info); }
-.device-card.state-error { border-left: 3px solid var(--el-color-danger); }
-.card-header { display: flex; justify-content: space-between; align-items: flex-start; }
-.device-info { display: flex; align-items: center; flex-wrap: wrap; gap: 0.25rem; }
-.device-name { font-weight: 600; font-size: 1rem; }
-.card-body { padding: 0.5rem 0; }
-.info-row { display: flex; justify-content: space-between; font-size: 0.85rem; }
-.info-label { color: var(--text-muted); }
-.card-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
-.form-hint { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.25rem; }
-.config-fallback-hint { font-size: 0.8rem; color: var(--el-text-color-secondary); margin-bottom: 0.5rem; }
-.mt-1 { margin-top: 0.5rem; }
-.font-mono { font-family: var(--font-mono); }
-.empty-block { padding: 3rem; }
-.pagination-wrap { margin-top: 1rem; font-size: 0.9rem; color: var(--text-muted); }
-.text-success { color: var(--el-color-success); }
+.south-page {
+  max-width: 1400px;
+}
+
+.mb-4 { margin-bottom: 1.5rem; }
+
+/* 页面头部 */
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 1.25rem;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.header-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.page-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.header-stats {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.stat-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem 0.6rem;
+  background: var(--bg-inset);
+  border-radius: 100px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.stat-chip.error {
+  background: rgba(229, 62, 62, 0.1);
+  color: var(--danger);
+}
+
+.stat-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.stat-dot.running {
+  background: var(--success);
+}
+
+.stat-dot.error {
+  background: var(--danger);
+}
+
+/* 工具栏 */
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+.toolbar-left {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.search-input {
+  width: 220px;
+}
+
+.filter-select {
+  width: 160px;
+}
+
+.toolbar-right {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.view-toggle {
+  margin-right: 0.5rem;
+}
+
+/* 卡片网格 */
+.devices-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 1rem;
+}
+
+/* 表格 */
+.devices-table {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.name-cell {
+  font-weight: 500;
+}
+
+.conn-status {
+  font-size: 0.85rem;
+}
+
+.conn-status.online {
+  color: var(--success);
+}
+
+.conn-status.offline {
+  color: var(--text-muted);
+}
+
+.plugin-tag {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  background: var(--bg-inset);
+  padding: 0.15rem 0.5rem;
+  border-radius: var(--radius-xs);
+  color: var(--text-secondary);
+}
+
+.table-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* 空状态 */
+.empty-state {
+  padding: 3rem;
+}
+
+/* 底部信息 */
+.footer-info {
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+@media (max-width: 768px) {
+  .toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  
+  .toolbar-left,
+  .toolbar-right {
+    width: 100%;
+  }
+  
+  .search-input,
+  .filter-select {
+    width: 100%;
+  }
+}
 </style>
