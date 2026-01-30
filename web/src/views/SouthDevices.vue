@@ -17,13 +17,8 @@ const pluginFilter = ref('')
 const keywordSearch = ref('')
 const viewMode = ref('list') // list | grid
 
-const pluginOptions = computed(() => {
-  return southPlugins.value.map(p => ({
-    name: p[0],
-    description: p[1],
-    version: p[2]
-  }))
-})
+// API 返回 { name, name_zh?, name_en?, description?, description_zh?, description_en?, version }
+const pluginOptions = computed(() => southPlugins.value || [])
 
 const filteredNodes = computed(() => {
   let list = nodes.value

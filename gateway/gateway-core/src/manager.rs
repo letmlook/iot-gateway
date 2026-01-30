@@ -5,7 +5,7 @@ use crate::node::Node;
 use crate::store::Store;
 use gateway_sdk::{
     Group, GroupData, GroupSubscription, NorthPlugin, SouthPlugin, PluginConfig,
-    NodeId, NodeKind, NodeState, Tag,
+    NodeId, NodeKind, NodeState, PluginInfo, Tag,
 };
 use gateway_sdk::types::{DataValue, TagId};
 use std::collections::HashMap;
@@ -64,33 +64,19 @@ impl Manager {
         self.north_plugins.get(name).cloned()
     }
 
-    /// 南向插件列表：(name, description, version)
-    pub fn south_plugins(&self) -> Vec<(String, String, String)> {
+    /// 南向插件列表（含中英文名称与描述）
+    pub fn south_plugins(&self) -> Vec<PluginInfo> {
         self.south_plugins
             .iter()
-            .map(|(k, v)| {
-                let m = v.meta();
-                (
-                    k.clone(),
-                    m.description.unwrap_or("").to_string(),
-                    m.version.to_string(),
-                )
-            })
+            .map(|(k, v)| PluginInfo::from_meta(k, &v.meta()))
             .collect()
     }
 
-    /// 北向插件列表：(name, description, version)
-    pub fn north_plugins(&self) -> Vec<(String, String, String)> {
+    /// 北向插件列表（含中英文名称与描述）
+    pub fn north_plugins(&self) -> Vec<PluginInfo> {
         self.north_plugins
             .iter()
-            .map(|(k, v)| {
-                let m = v.meta();
-                (
-                    k.clone(),
-                    m.description.unwrap_or("").to_string(),
-                    m.version.to_string(),
-                )
-            })
+            .map(|(k, v)| PluginInfo::from_meta(k, &v.meta()))
             .collect()
     }
 

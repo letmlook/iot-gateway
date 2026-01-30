@@ -175,6 +175,12 @@ impl ConfigSchema {
 pub struct TagSchema {
     /// 支持的数据类型
     pub data_types: Option<Vec<String>>,
-    /// 地址格式说明
+    /// 地址格式说明（通用，无语言时使用）
     pub address_format: Option<String>,
+    /// 地址格式说明（中文）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address_format_zh: Option<String>,
+    /// 地址格式说明（英文）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address_format_en: Option<String>,
 }

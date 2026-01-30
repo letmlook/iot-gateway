@@ -105,6 +105,10 @@ impl SouthPlugin for OpcuaPlugin {
             kind: PluginKind::South,
             description: Some("OPC UA 南向驱动，连接 OPC UA 服务器采集与写点位，对标 NeuronEX OPC UA"),
             version: "0.1.0",
+            name_zh: Some("OPC UA"),
+            name_en: Some("OPC UA"),
+            description_zh: Some("OPC UA 南向驱动，连接 OPC UA 服务器采集与写点位"),
+            description_en: Some("OPC UA south driver, connect to OPC UA server for read/write tags"),
         }
     }
 
@@ -241,6 +245,8 @@ impl SouthPlugin for OpcuaPlugin {
                 "string".to_string(),
             ]),
             address_format: Some("NS!NODEID，NS 为命名空间索引，NODEID 为数字或字符串，如 0!2258、2!Device1.Module1.Tag1".to_string()),
+            address_format_zh: Some("NS!NODEID，NS 为命名空间索引，NODEID 为数字或字符串，如 0!2258、2!Device1.Module1.Tag1".to_string()),
+            address_format_en: Some("NS!NODEID, NS=namespace index, NODEID=numeric or string, e.g. 0!2258, 2!Device1.Module1.Tag1".to_string()),
         })
     }
 

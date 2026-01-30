@@ -101,6 +101,22 @@ impl SouthPlugin for SouthSoAdapter {
                     b as &str
                 }),
                 version: Box::leak(f.version.into_boxed_str()),
+                name_zh: f.name_zh.map(|x| {
+                    let b = Box::leak(x.into_boxed_str());
+                    b as &str
+                }),
+                name_en: f.name_en.map(|x| {
+                    let b = Box::leak(x.into_boxed_str());
+                    b as &str
+                }),
+                description_zh: f.description_zh.map(|x| {
+                    let b = Box::leak(x.into_boxed_str());
+                    b as &str
+                }),
+                description_en: f.description_en.map(|x| {
+                    let b = Box::leak(x.into_boxed_str());
+                    b as &str
+                }),
             }
         }).clone()
     }
@@ -369,6 +385,22 @@ impl NorthPlugin for NorthSoAdapter {
                     b as &str
                 }),
                 version: Box::leak(f.version.into_boxed_str()),
+                name_zh: f.name_zh.map(|x| {
+                    let b = Box::leak(x.into_boxed_str());
+                    b as &str
+                }),
+                name_en: f.name_en.map(|x| {
+                    let b = Box::leak(x.into_boxed_str());
+                    b as &str
+                }),
+                description_zh: f.description_zh.map(|x| {
+                    let b = Box::leak(x.into_boxed_str());
+                    b as &str
+                }),
+                description_en: f.description_en.map(|x| {
+                    let b = Box::leak(x.into_boxed_str());
+                    b as &str
+                }),
             }
         }).clone()
     }

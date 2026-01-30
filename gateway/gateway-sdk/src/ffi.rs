@@ -33,11 +33,32 @@ pub struct FfiPluginMeta {
     pub kind: String, // "south" | "north"
     pub description: Option<String>,
     pub version: String,
+    /// 中文名称
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_zh: Option<String>,
+    /// 英文名称
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_en: Option<String>,
+    /// 中文描述
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description_zh: Option<String>,
+    /// 英文描述
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description_en: Option<String>,
 }
 
 impl Default for FfiPluginMeta {
     fn default() -> Self {
-        Self { name: "?".to_string(), kind: "south".to_string(), description: None, version: "0.0.0".to_string() }
+        Self {
+            name: "?".to_string(),
+            kind: "south".to_string(),
+            description: None,
+            version: "0.0.0".to_string(),
+            name_zh: None,
+            name_en: None,
+            description_zh: None,
+            description_en: None,
+        }
     }
 }
 
@@ -89,6 +110,10 @@ pub fn meta_to_ffi(m: &crate::plugin::PluginMeta) -> FfiPluginMeta {
         },
         description: m.description.map(|s| s.to_string()),
         version: m.version.to_string(),
+        name_zh: m.name_zh.map(|s| s.to_string()),
+        name_en: m.name_en.map(|s| s.to_string()),
+        description_zh: m.description_zh.map(|s| s.to_string()),
+        description_en: m.description_en.map(|s| s.to_string()),
     }
 }
 

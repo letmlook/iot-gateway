@@ -16,9 +16,17 @@ const southPlugins = inject('southPlugins', ref([]))
 const northPlugins = inject('northPlugins', ref([]))
 
 const pluginList = computed(() => kind.value === 'south' ? southPlugins.value : northPlugins.value)
-const pluginOptions = computed(() =>
-  pluginList.value.map(p => ({ name: p[0], description: p[1], version: p[2] }))
-)
+// API 返回 { name, name_zh?, name_en?, description?, description_zh?, description_en?, version }
+const pluginOptions = computed(() => pluginList.value || [])
+const { locale } = useI18n()
+function pluginDisplayName(p) {
+  if (!p) return ''
+  return (locale.value === 'zh' ? p.name_zh : p.name_en) || p.name || ''
+}
+function pluginDisplayDesc(p) {
+  if (!p) return ''
+  return (locale.value === 'zh' ? p.description_zh : p.description_en) || p.description || ''
+}
 
 const createForm = ref({ name: '', plugin_name: '', config: '{}' })
 const configFromSchema = ref({})
@@ -118,12 +126,12 @@ onMounted(async () => {
             <el-option
               v-for="p in pluginOptions"
               :key="p.name"
-              :label="p.name + (p.version ? ` (v${p.version})` : '')"
+              :label="(pluginDisplayName(p) || p.name) + (p.version ? ` (v${p.version})` : '')"
               :value="p.name"
             />
           </el-select>
-          <div v-if="pluginOptions.find(pp => pp.name === createForm.plugin_name)?.description" class="form-hint">
-            {{ pluginOptions.find(pp => pp.name === createForm.plugin_name)?.description }}
+          <div v-if="pluginDisplayDesc(pluginOptions.find(pp => pp.name === createForm.plugin_name))" class="form-hint">
+            {{ pluginDisplayDesc(pluginOptions.find(pp => pp.name === createForm.plugin_name)) }}
           </div>
         </el-form-item>
         <el-form-item :label="t('createNode.nodeConfig')">

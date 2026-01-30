@@ -17,13 +17,8 @@ const pluginFilter = ref('')
 const keywordSearch = ref('')
 const viewMode = ref('list')
 
-const pluginOptions = computed(() => {
-  return northPlugins.value.map(p => ({
-    name: p[0],
-    description: p[1],
-    version: p[2]
-  }))
-})
+// API 返回 { name, name_zh?, name_en?, description?, description_zh?, description_en?, version }
+const pluginOptions = computed(() => northPlugins.value || [])
 
 const filteredNodes = computed(() => {
   let list = nodes.value

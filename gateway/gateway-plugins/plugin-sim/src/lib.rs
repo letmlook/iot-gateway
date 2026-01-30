@@ -83,6 +83,10 @@ impl SouthPlugin for SimPlugin {
             kind: PluginKind::South,
             description: Some("模拟设备，用于测试与演示"),
             version: "0.1.0",
+            name_zh: Some("模拟设备"),
+            name_en: Some("Simulator"),
+            description_zh: Some("模拟设备，用于测试与演示"),
+            description_en: Some("Simulated device for testing and demo"),
         }
     }
 
@@ -114,6 +118,8 @@ impl SouthPlugin for SimPlugin {
         Some(TagSchema {
             data_types: Some(vec!["float64".to_string()]),
             address_format: Some("0=temperature, 1=humidity".to_string()),
+            address_format_zh: Some("0=温度, 1=湿度".to_string()),
+            address_format_en: Some("0=temperature, 1=humidity".to_string()),
         })
     }
 

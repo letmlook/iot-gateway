@@ -13,7 +13,7 @@ pub mod types;
 pub use error::{PluginError, PluginErrorCode, PluginResult};
 pub use ffi::{parse_result, ptr_to_string, FfiPluginMeta, FfiResult};
 pub use messages::{GroupData, GroupSubscription, TagRead, TagWrite};
-pub use plugin::{NorthPlugin, PluginMeta, SouthPlugin};
+pub use plugin::{NorthPlugin, PluginInfo, PluginMeta, SouthPlugin};
 pub use schema::{ConfigSchema, ParamAttribute, ParamSchema, ParamType, ParamValid, TagRegexEntry, TagSchema};
 pub use types::{
     DataType, DataValue, Group, GroupId, NodeId, NodeKind, NodeState, PluginConfig, PluginKind,

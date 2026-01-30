@@ -6,15 +6,56 @@ use crate::schema::{ConfigSchema, TagSchema};
 use crate::types::{Group, GroupId, NodeId, Tag, TagId};
 use crate::types::PluginConfig;
 use async_trait::async_trait;
+use serde::Serialize;
 use std::sync::Arc;
 
 /// 插件元信息（对标 neu_plugin_module_t：version、module_name、module_descr、kind）
+/// 支持中英文名称与描述，前端按语言选用。
 #[derive(Debug, Clone)]
 pub struct PluginMeta {
     pub name: &'static str,
     pub kind: crate::types::PluginKind,
     pub description: Option<&'static str>,
     pub version: &'static str,
+    /// 中文名称（前端 zh 时显示）
+    pub name_zh: Option<&'static str>,
+    /// 英文名称（前端 en 时显示）
+    pub name_en: Option<&'static str>,
+    /// 中文描述（前端 zh 时显示）
+    pub description_zh: Option<&'static str>,
+    /// 英文描述（前端 en 时显示）
+    pub description_en: Option<&'static str>,
+}
+
+/// 插件列表项（API 返回用），含中英文名称与描述。
+#[derive(Debug, Clone, Serialize)]
+pub struct PluginInfo {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_zh: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_en: Option<String>,
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description_zh: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description_en: Option<String>,
+    pub version: String,
+}
+
+impl PluginInfo {
+    /// 从插件键名与 PluginMeta 构建 API 用 PluginInfo。
+    pub fn from_meta(name: &str, m: &PluginMeta) -> Self {
+        Self {
+            name: name.to_string(),
+            name_zh: m.name_zh.map(String::from),
+            name_en: m.name_en.map(String::from),
+            description: m.description.map(String::from),
+            description_zh: m.description_zh.map(String::from),
+            description_en: m.description_en.map(String::from),
+            version: m.version.to_string(),
+        }
+    }
 }
 
 /// 南向插件：连接设备、按 Group 轮询、读写、校验。对标 Neuron 南向驱动。

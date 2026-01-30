@@ -3,7 +3,7 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
-use gateway_sdk::{Group, GroupSubscription, NodeId, NodeKind, PluginConfig, Tag};
+use gateway_sdk::{Group, GroupSubscription, NodeId, NodeKind, PluginConfig, PluginInfo, Tag};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -91,12 +91,12 @@ pub async fn metrics(State(state): State<AppState>) -> (axum::http::StatusCode, 
 }
 
 // ---------- Plugins ----------
-/// 插件条目：name, description, version
-pub async fn list_south_plugins(State(state): State<AppState>) -> Json<Vec<(String, String, String)>> {
+/// 插件列表（含 name, name_zh, name_en, description, description_zh, description_en, version）
+pub async fn list_south_plugins(State(state): State<AppState>) -> Json<Vec<PluginInfo>> {
     Json(state.manager.south_plugins())
 }
 
-pub async fn list_north_plugins(State(state): State<AppState>) -> Json<Vec<(String, String, String)>> {
+pub async fn list_north_plugins(State(state): State<AppState>) -> Json<Vec<PluginInfo>> {
     Json(state.manager.north_plugins())
 }
 

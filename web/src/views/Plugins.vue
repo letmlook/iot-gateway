@@ -19,13 +19,25 @@ const activeTab = ref('south')
 
 const pluginSearch = ref('')
 
+const { locale } = useI18n()
+// API 返回 { name, name_zh?, name_en?, description?, description_zh?, description_en?, version }
+function pluginDisplayName(p) {
+  if (!p) return ''
+  return (locale.value === 'zh' ? p.name_zh : p.name_en) || p.name || ''
+}
+function pluginDisplayDesc(p) {
+  if (!p) return ''
+  return (locale.value === 'zh' ? p.description_zh : p.description_en) || p.description || ''
+}
 const plugins = computed(() => {
-  const list = activeTab.value === 'south'
-    ? southPlugins.value.map(([name, desc, ver]) => ({ name, description: desc, version: ver, kind: 'south' }))
-    : northPlugins.value.map(([name, desc, ver]) => ({ name, description: desc, version: ver, kind: 'north' }))
+  const list = (activeTab.value === 'south' ? southPlugins.value : northPlugins.value).map(p => ({
+    ...p,
+    kind: activeTab.value === 'south' ? 'south' : 'north'
+  }))
   if (!pluginSearch.value.trim()) return list
   const k = pluginSearch.value.trim().toLowerCase()
-  return list.filter(p => (p.name && p.name.toLowerCase().includes(k)) || (p.description && p.description.toLowerCase().includes(k)))
+  const nameOrDesc = (p) => (pluginDisplayName(p) || p.name || '') + ' ' + (pluginDisplayDesc(p) || p.description || '')
+  return list.filter(p => nameOrDesc(p).toLowerCase().includes(k))
 })
 
 function nodesUsingPlugin(pluginName, kind) {
@@ -92,7 +104,9 @@ onMounted(loadData)
           </template>
           <!-- 表格视图（对标 Neuron） -->
           <el-table :data="plugins" size="default" stripe class="plugins-table">
-            <el-table-column prop="name" :label="t('common.name')" min-width="120" />
+            <el-table-column :label="t('common.name')" min-width="120">
+              <template #default="{ row }">{{ pluginDisplayName(row) || row.name }}</template>
+            </el-table-column>
             <el-table-column :label="t('plugins.pluginType')" width="120">
               <template #default="{ row }">
                 <el-tag size="small" :type="row.kind === 'south' ? 'success' : 'primary'">
@@ -106,7 +120,9 @@ onMounted(loadData)
             <el-table-column prop="version" :label="t('plugins.version')" width="100">
               <template #default="{ row }">v{{ row.version || '-' }}</template>
             </el-table-column>
-            <el-table-column prop="description" :label="t('common.description')" min-width="280" show-overflow-tooltip />
+            <el-table-column :label="t('common.description')" min-width="280" show-overflow-tooltip>
+              <template #default="{ row }">{{ pluginDisplayDesc(row) || row.description || '-' }}</template>
+            </el-table-column>
             <el-table-column :label="t('common.operation')" width="140" fixed="right">
               <template #default="{ row }">
                 <el-button type="primary" link size="small" :icon="Plus" @click="goCreateNode(row)">
@@ -121,7 +137,7 @@ onMounted(loadData)
               <template #header>
                 <div class="plugin-header">
                   <div class="plugin-meta">
-                    <span class="plugin-name">{{ p.name }}</span>
+                    <span class="plugin-name">{{ pluginDisplayName(p) || p.name }}</span>
                     <el-tag v-if="p.version" size="small" type="info">v{{ p.version }}</el-tag>
                     <el-tag :type="p.kind === 'south' ? 'success' : ''" size="small" effect="plain">
                       {{ p.kind === 'south' ? '南向' : '北向' }}
@@ -129,7 +145,7 @@ onMounted(loadData)
                   </div>
                 </div>
               </template>
-              <p v-if="p.description" class="plugin-desc">{{ p.description }}</p>
+              <p v-if="pluginDisplayDesc(p) || p.description" class="plugin-desc">{{ pluginDisplayDesc(p) || p.description }}</p>
               <div v-if="nodesUsingPlugin(p.name, p.kind).length" class="plugin-usage">
                 <span class="usage-label">使用该插件的节点：</span>
                 <div class="usage-nodes">
@@ -165,7 +181,9 @@ onMounted(loadData)
             <span class="tab-label"><span class="dot north" /> {{ t('plugins.northPlugins') }} <el-tag size="small" type="info" class="ml-1">{{ northPlugins.length }}</el-tag></span>
           </template>
           <el-table :data="plugins" size="default" stripe class="plugins-table">
-            <el-table-column prop="name" :label="t('common.name')" min-width="120" />
+            <el-table-column :label="t('common.name')" min-width="120">
+              <template #default="{ row }">{{ pluginDisplayName(row) || row.name }}</template>
+            </el-table-column>
             <el-table-column :label="t('plugins.pluginType')" width="120">
               <template #default="{ row }">
                 <el-tag size="small" type="primary">{{ t('plugins.northApp') }}</el-tag>
@@ -177,7 +195,9 @@ onMounted(loadData)
             <el-table-column prop="version" :label="t('plugins.version')" width="100">
               <template #default="{ row }">v{{ row.version || '-' }}</template>
             </el-table-column>
-            <el-table-column prop="description" :label="t('common.description')" min-width="280" show-overflow-tooltip />
+            <el-table-column :label="t('common.description')" min-width="280" show-overflow-tooltip>
+              <template #default="{ row }">{{ pluginDisplayDesc(row) || row.description || '-' }}</template>
+            </el-table-column>
             <el-table-column :label="t('common.operation')" width="120" fixed="right">
               <template #default="{ row }">
                 <el-button type="primary" link size="small" :icon="Plus" @click="goCreateNode(row)">{{ t('plugins.createApp') }}</el-button>
@@ -190,7 +210,7 @@ onMounted(loadData)
               <template #header>
                 <div class="plugin-header">
                   <div class="plugin-meta">
-                    <span class="plugin-name">{{ p.name }}</span>
+                    <span class="plugin-name">{{ pluginDisplayName(p) || p.name }}</span>
                     <el-tag v-if="p.version" size="small" type="info">v{{ p.version }}</el-tag>
                     <el-tag :type="p.kind === 'south' ? 'success' : ''" size="small" effect="plain">
                       {{ p.kind === 'south' ? '南向' : '北向' }}
@@ -198,7 +218,7 @@ onMounted(loadData)
                   </div>
                 </div>
               </template>
-              <p v-if="p.description" class="plugin-desc">{{ p.description }}</p>
+              <p v-if="pluginDisplayDesc(p) || p.description" class="plugin-desc">{{ pluginDisplayDesc(p) || p.description }}</p>
               <div v-if="nodesUsingPlugin(p.name, p.kind).length" class="plugin-usage">
                 <span class="usage-label">使用该插件的节点：</span>
                 <div class="usage-nodes">
