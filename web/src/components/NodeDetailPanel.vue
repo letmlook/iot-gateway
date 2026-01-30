@@ -23,7 +23,12 @@ const subscriptions = ref([])
 const southNodes = ref([])
 const loading = ref(false)
 const error = ref('')
-const activeTab = ref('groups')
+const activeTab = ref(props.kind === 'north' ? 'subs' : 'groups')
+// 北向主题（来自节点配置 topic_template）
+const DEFAULT_TOPIC_TEMPLATE = 'gateway/data/${node_id}/${group_id}'
+const nodeSettingRef = ref(null)
+const topicTemplate = ref('')
+const topicSaving = ref(false)
 
 const showGroupForm = ref(false)
 const showTagForm = ref(false)
@@ -58,16 +63,48 @@ async function loadNode() {
   error.value = ''
   try {
     node.value = await api.node(props.nodeId)
-    await loadGroups()
-    await loadTags()
     if (isNorth.value) {
+      activeTab.value = 'subs'
       await loadSubscriptions()
       await loadSouthNodes()
+      await loadTopicFromSetting()
+    } else {
+      await loadGroups()
+      await loadTags()
     }
   } catch (e) {
     error.value = t('nodeDetail.loadNodeFailed') + getErrorMessage(t, e)
   } finally {
     loading.value = false
+  }
+}
+
+async function loadTopicFromSetting() {
+  try {
+    const setting = await api.nodeSetting(props.nodeId)
+    nodeSettingRef.value = setting
+    const cfg = setting?.config || {}
+    topicTemplate.value = (cfg.topic_template && typeof cfg.topic_template === 'string')
+      ? cfg.topic_template
+      : DEFAULT_TOPIC_TEMPLATE
+  } catch {
+    topicTemplate.value = DEFAULT_TOPIC_TEMPLATE
+  }
+}
+
+async function saveTopic() {
+  const v = (topicTemplate.value || '').trim() || DEFAULT_TOPIC_TEMPLATE
+  topicSaving.value = true
+  try {
+    const cfg = { ...(nodeSettingRef.value?.config || {}), topic_template: v }
+    await api.updateNodeSetting(props.nodeId, { config: cfg })
+    nodeSettingRef.value = nodeSettingRef.value ? { ...nodeSettingRef.value, config: cfg } : { config: cfg }
+    topicTemplate.value = v
+    ElMessage.success(t('nodeDetail.topicSaved'))
+  } catch (e) {
+    error.value = t('nodeDetail.topicSaveFailed') + getErrorMessage(t, e)
+  } finally {
+    topicSaving.value = false
   }
 }
 
@@ -438,7 +475,7 @@ watch(() => props.nodeId, loadNode)
       </div>
 
       <el-tabs v-else v-model="activeTab" class="detail-tabs">
-        <el-tab-pane name="groups">
+        <el-tab-pane v-if="!isNorth" name="groups">
           <template #label>{{ t('nodeDetail.groups') }} <el-tag size="small" type="info">{{ groups.length }}</el-tag></template>
           <div class="tab-toolbar">
             <el-button type="primary" size="small" :icon="Plus" @click="openGroupForm()">{{ t('nodeDetail.addGroup') }}</el-button>
@@ -478,7 +515,7 @@ watch(() => props.nodeId, loadNode)
           <el-empty v-else :description="t('nodeDetail.noGroups')" :image-size="48" />
         </el-tab-pane>
 
-        <el-tab-pane name="tags">
+        <el-tab-pane v-if="!isNorth" name="tags">
           <template #label>{{ t('nodeDetail.tags') }} <el-tag size="small" type="info">{{ tags.length }}</el-tag></template>
           <div class="tab-toolbar">
             <el-button size="small" :icon="RefreshRight" :loading="readingTags" :disabled="!tags.length" @click="readAllTags">{{ t('nodeDetail.read') }}</el-button>
@@ -574,7 +611,21 @@ watch(() => props.nodeId, loadNode)
         </el-tab-pane>
 
         <el-tab-pane v-if="isNorth" name="subs">
-          <template #label>{{ t('nodeDetail.subscribe') }} <el-tag size="small" type="info">{{ subscriptions.length }}</el-tag></template>
+          <template #label>{{ t('nodeDetail.subManage') }} <el-tag size="small" type="info">{{ subscriptions.length }}</el-tag></template>
+          <div v-if="isNorth" class="topic-section">
+            <label class="topic-label">{{ t('nodeDetail.topicTemplate') }}</label>
+            <div class="topic-row">
+              <el-input
+                v-model="topicTemplate"
+                :placeholder="t('nodeDetail.topicPlaceholder')"
+                size="small"
+                class="topic-input font-mono"
+                clearable
+              />
+              <el-button type="primary" size="small" :loading="topicSaving" @click="saveTopic">{{ t('nodeDetail.saveTopic') }}</el-button>
+            </div>
+            <div class="topic-hint">{{ t('nodeDetail.topicHint') }}</div>
+          </div>
           <div class="tab-toolbar">
             <el-button type="primary" size="small" :icon="Plus" :disabled="!southNodes.length" @click="openSubForm">{{ t('nodeDetail.addSub') }}</el-button>
           </div>
@@ -634,4 +685,9 @@ watch(() => props.nodeId, loadNode)
 .detail-tabs :deep(.el-tabs__item) { font-size: 0.85rem; }
 .font-mono { font-family: var(--font-mono); }
 .text-muted { color: var(--text-muted); }
+.topic-section { padding: 0.5rem 0; margin-bottom: 0.5rem; border-bottom: 1px solid var(--el-border-color-lighter); }
+.topic-label { display: block; font-weight: 500; margin-bottom: 0.25rem; font-size: 0.85rem; }
+.topic-row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.topic-input { flex: 1; min-width: 160px; }
+.topic-hint { font-size: 0.75rem; color: var(--text-muted); margin-top: 0.2rem; }
 </style>

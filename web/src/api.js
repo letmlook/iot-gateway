@@ -164,6 +164,21 @@ export const api = {
   subscriptions: (nodeId) => req('GET', `/nodes/${nodeId}/subscriptions`),
   setSubscriptions: (nodeId, subs) => req('PUT', `/nodes/${nodeId}/subscriptions`, { subscriptions: subs }),
 
+  // 节点配置用文件上传：保存到 data/uploads，返回 { path } 供配置存储
+  uploadConfigFile: (file) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    const token = getStoredToken()
+    const headers = {}
+    if (token) headers['Authorization'] = `Bearer ${token}`
+    return fetch(`${BASE}/upload`, { method: 'POST', headers, body: formData }).then(async (r) => {
+      const text = await r.text()
+      if (!r.ok) throw await parseErrorResponse(r, text)
+      const data = text ? JSON.parse(text) : null
+      return data && data.path != null ? data.path : ''
+    })
+  },
+
   // 离线授权（完全离线，无网络请求）
   licenseMachineId: () => req('GET', '/license/machine-id'),
   licenseStatus: () => req('GET', '/license/status'),

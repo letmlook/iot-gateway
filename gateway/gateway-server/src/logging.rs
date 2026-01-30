@@ -1,9 +1,10 @@
 //! 日志初始化：主程序级别、文件输出、按节点分文件。
+//! 节点日志文件名按节点名称生成（通过 node_log_names 映射），未命中时回退为 node_id。
 
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 use tracing::Event;
 use tracing_subscriber::field::Visit;
 use tracing_subscriber::layer::Context;
@@ -48,19 +49,51 @@ impl Visit for NodeIdVisitor {
     }
 }
 
-/// 按 node_id 将事件写入对应节点日志文件的 Layer
+/// 将节点名或 id 转为安全日志文件名（替换非法字符为 _）
+fn sanitize_log_filename(name: &str) -> String {
+    let s = name.trim();
+    if s.is_empty() {
+        return "_".to_string();
+    }
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// 节点 ID -> 日志文件名（节点名称）的共享映射
+pub type NodeLogNameMap = Arc<RwLock<HashMap<String, String>>>;
+
+/// 按 node_id 将事件写入对应节点日志文件的 Layer；文件名优先用 node_log_names 中的节点名
 struct NodeFileLayer {
     dir: PathBuf,
     writers: Mutex<HashMap<String, std::fs::File>>,
+    node_log_names: Option<NodeLogNameMap>,
 }
 
 impl NodeFileLayer {
-    fn new(dir: PathBuf) -> Self {
+    fn new(dir: PathBuf, node_log_names: Option<NodeLogNameMap>) -> Self {
         let _ = std::fs::create_dir_all(&dir);
         Self {
             dir,
             writers: Mutex::new(HashMap::new()),
+            node_log_names,
         }
+    }
+
+    fn filename_base_for(&self, node_id: &str) -> String {
+        let name = self
+            .node_log_names
+            .as_ref()
+            .and_then(|m| m.read().ok())
+            .and_then(|m| m.get(node_id).cloned())
+            .unwrap_or_else(|| node_id.to_string());
+        sanitize_log_filename(&name)
     }
 
     fn writer_for(&self, node_id: &str) -> std::io::Result<std::fs::File> {
@@ -68,7 +101,8 @@ impl NodeFileLayer {
         if let Some(f) = map.get_mut(node_id) {
             return f.try_clone();
         }
-        let path = self.dir.join(format!("{}.log", node_id));
+        let base = self.filename_base_for(node_id);
+        let path = self.dir.join(format!("{}.log", base));
         let f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -109,8 +143,9 @@ where
     }
 }
 
-/// 初始化全局日志：控制台 + 可选主日志文件 + 可选按节点分文件
-pub fn init_logging(config: &crate::config::Config) {
+/// 初始化全局日志：控制台 + 可选主日志文件 + 可选按节点分文件（文件名按 node_log_names 中的节点名）
+/// 若传入 node_log_names，调用方需在加载/变更节点后调用 sync 以更新映射。
+pub fn init_logging(config: &crate::config::Config, node_log_names: Option<NodeLogNameMap>) {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_appender::rolling::{RollingFileAppender, Rotation};
@@ -157,15 +192,15 @@ pub fn init_logging(config: &crate::config::Config) {
     }
 
     macro_rules! add_node_layer {
-        ($reg:expr, $dir:expr) => {
-            $reg.with(NodeFileLayer::new($dir.clone()))
+        ($reg:expr, $dir:expr, $names:expr) => {
+            $reg.with(NodeFileLayer::new($dir.clone(), $names))
         };
     }
 
     match (file_path.as_ref(), nodes_dir.as_ref()) {
-        (Some(path), Some(dir)) => add_node_layer!(add_file_layer!(reg, path), dir).init(),
+        (Some(path), Some(dir)) => add_node_layer!(add_file_layer!(reg, path), dir, node_log_names.clone()).init(),
         (Some(path), None) => add_file_layer!(reg, path).init(),
-        (None, Some(dir)) => add_node_layer!(reg, dir).init(),
+        (None, Some(dir)) => add_node_layer!(reg, dir, node_log_names).init(),
         (None, None) => reg.init(),
     }
 }

@@ -419,6 +419,12 @@ export default {
     pointCount: 'Tags',
     intervalMs: 'Interval(ms)',
     subGroup: 'Sub Group',
+    topicTemplate: 'Topic Template',
+    topicPlaceholder: 'e.g. gateway/data/${node_id}/${group_id}',
+    topicHint: 'Variables: ${node_id}, ${group_id}, ${timestamp}',
+    saveTopic: 'Save Topic',
+    topicSaved: 'Topic saved',
+    topicSaveFailed: 'Save topic failed: ',
   },
   schema: {
     loadFailed: 'Load config schema failed',
@@ -430,6 +436,7 @@ export default {
     typeInt: 'Integer',
     typeString: 'String',
     typeBool: 'Boolean',
+    uploadFile: 'Upload File',
   },
   logs: {
     title: 'Logs',

@@ -419,6 +419,12 @@ export default {
     pointCount: '点位数量',
     intervalMs: '间隔(ms)',
     subGroup: '订阅组',
+    topicTemplate: '主题模板',
+    topicPlaceholder: '如 gateway/data/${node_id}/${group_id}',
+    topicHint: '支持变量：${node_id}、${group_id}、${timestamp}',
+    saveTopic: '保存主题',
+    topicSaved: '主题已保存',
+    topicSaveFailed: '保存主题失败：',
   },
   schema: {
     loadFailed: '加载配置 Schema 失败',
@@ -430,6 +436,7 @@ export default {
     typeInt: '整数',
     typeString: '字符串',
     typeBool: '布尔',
+    uploadFile: '上传文件',
   },
   logs: {
     title: '日志',

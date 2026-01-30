@@ -255,37 +255,36 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 
     <el-alert v-if="error" type="error" :title="error" closable show-icon @close="error = ''" class="mb-4" />
 
-    <!-- 控制面板 -->
+    <!-- 控制面板：参数与刷新同一行，刷新右对齐 -->
     <div class="control-panel">
-      <div class="control-row">
-        <div class="control-group">
-          <label>{{ t('monitor.selectDevice') }}</label>
-          <el-select v-model="selectedNode" class="control-select" @change="onNodeChange">
-            <el-option v-for="n in nodes" :key="n.id" :label="n.name" :value="n.id" />
-          </el-select>
+      <div class="control-row control-row-single">
+        <div class="control-group-left">
+          <div class="control-group">
+            <label>{{ t('monitor.selectDevice') }}</label>
+            <el-select v-model="selectedNode" class="control-select" @change="onNodeChange">
+              <el-option v-for="n in nodes" :key="n.id" :label="n.name" :value="n.id" />
+            </el-select>
+          </div>
+          <div class="control-group">
+            <label>{{ t('monitor.group') }}</label>
+            <el-select v-model="selectedGroup" :placeholder="t('monitor.all')" clearable class="control-select" @change="applyFilters">
+              <el-option v-for="g in groups" :key="g.id" :label="g.name" :value="g.id" />
+            </el-select>
+          </div>
+          <div class="control-group">
+            <label>{{ t('common.search') }}</label>
+            <el-input
+              v-model="keywordSearch"
+              :placeholder="t('south.keywordSearch')"
+              :prefix-icon="Search"
+              clearable
+              class="control-input"
+            />
+          </div>
+          <div class="control-group checkbox-group">
+            <el-checkbox v-model="onlyShowErrors">{{ t('monitor.onlyErrors') }}</el-checkbox>
+          </div>
         </div>
-        <div class="control-group">
-          <label>{{ t('monitor.group') }}</label>
-          <el-select v-model="selectedGroup" :placeholder="t('monitor.all')" clearable class="control-select" @change="applyFilters">
-            <el-option v-for="g in groups" :key="g.id" :label="g.name" :value="g.id" />
-          </el-select>
-        </div>
-        <div class="control-group">
-          <label>{{ t('common.search') }}</label>
-          <el-input
-            v-model="keywordSearch"
-            :placeholder="t('south.keywordSearch')"
-            :prefix-icon="Search"
-            clearable
-            class="control-input"
-          />
-        </div>
-        <div class="control-group checkbox-group">
-          <el-checkbox v-model="onlyShowErrors">{{ t('monitor.onlyErrors') }}</el-checkbox>
-        </div>
-      </div>
-      
-      <div class="control-row control-row-actions">
         <div class="refresh-controls">
           <el-select v-model="refreshInterval" class="interval-select" :disabled="autoRefresh">
             <el-option :value="1000" :label="t('monitor.intervalSeconds', { n: 1 })" />
@@ -440,14 +439,16 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
   gap: 1rem;
 }
 
-.control-row + .control-row {
-  margin-top: 0.75rem;
-  padding-top: 0.75rem;
-  border-top: 1px solid var(--border-subtle);
+.control-row-single {
+  justify-content: space-between;
+  align-items: flex-end;
 }
 
-.control-row-actions {
-  justify-content: flex-end;
+.control-group-left {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 1rem;
 }
 
 .control-group {
@@ -481,6 +482,8 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 .interval-select {
@@ -612,18 +615,24 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 }
 
 @media (max-width: 768px) {
-  .control-row {
+  .control-row-single {
     flex-direction: column;
     align-items: stretch;
   }
-  
+
+  .control-group-left {
+    width: 100%;
+  }
+
+  .refresh-controls {
+    margin-left: 0;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+
   .control-select,
   .control-input {
     width: 100%;
-  }
-  
-  .refresh-controls {
-    flex-wrap: wrap;
   }
 }
 </style>

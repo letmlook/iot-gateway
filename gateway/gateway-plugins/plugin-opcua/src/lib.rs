@@ -5,8 +5,8 @@
 mod ffi;
 
 use gateway_sdk::{
-    ConfigSchema, Group, GroupId, NodeId, ParamAttribute, ParamSchema, ParamType, PluginMeta,
-    SouthPlugin, Tag, TagId, TagRegexEntry, TagSchema,
+    ConfigSchema, Group, GroupId, NodeId, ParamAttribute, ParamOption, ParamSchema, ParamType,
+    ParamValid, PluginMeta, SouthPlugin, Tag, TagId, TagRegexEntry, TagSchema,
 };
 use gateway_sdk::types::{DataValue, PluginKind};
 use gateway_sdk::{PluginConfig, PluginError, PluginResult};
@@ -117,63 +117,101 @@ impl SouthPlugin for OpcuaPlugin {
             ConfigSchema::new()
                 .param(ParamSchema {
                     name: "endpoint_url".to_string(),
-                    description: Some("OPC UA Server endpoint URL".to_string()),
                     name_zh: Some("端点 URL".to_string()),
                     name_en: Some("Endpoint URL".to_string()),
-                    description_zh: Some("目标 OPC UA 服务器 URL，默认 opc.tcp://127.0.0.1:4840/".to_string()),
-                    description_en: Some("Target OPC UA server URL".to_string()),
-                    attribute: ParamAttribute::Optional,
+                    description: Some("OPCUA server endpoint url".to_string()),
+                    description_zh: Some("OPCUA 服务器端点 URL".to_string()),
+                    description_en: Some("OPCUA server endpoint url".to_string()),
+                    attribute: ParamAttribute::Required,
                     ty: ParamType::String,
                     default: Some(serde_json::json!(DEFAULT_ENDPOINT)),
-                    valid: None,
+                    valid: Some(ParamValid {
+                        min: None,
+                        max: None,
+                        regex: Some(r"^opc\.tcp:\/\/\S+:\d+(\/[\w\-._~:/?#\[\]@!$&'()*+,;=]*)?$".to_string()),
+                        length: Some(256),
+                    }),
+                    ..Default::default()
                 })
                 .param(ParamSchema {
                     name: "username".to_string(),
-                    description: Some("Username for OPC UA Server".to_string()),
                     name_zh: Some("用户名".to_string()),
                     name_en: Some("Username".to_string()),
-                    description_zh: Some("连接 OPC UA 服务器使用的用户名".to_string()),
-                    description_en: Some("Username for OPC UA server".to_string()),
                     attribute: ParamAttribute::Optional,
                     ty: ParamType::String,
-                    default: None,
-                    valid: None,
+                    default: Some(serde_json::json!("")),
+                    valid: Some(ParamValid { min: None, max: None, regex: None, length: Some(30) }),
+                    ..Default::default()
                 })
                 .param(ParamSchema {
                     name: "password".to_string(),
-                    description: Some("Password for OPC UA Server".to_string()),
                     name_zh: Some("密码".to_string()),
                     name_en: Some("Password".to_string()),
-                    description_zh: Some("连接 OPC UA 服务器使用的密码".to_string()),
-                    description_en: Some("Password for OPC UA server".to_string()),
                     attribute: ParamAttribute::Optional,
                     ty: ParamType::String,
-                    default: None,
-                    valid: None,
+                    default: Some(serde_json::json!("")),
+                    valid: Some(ParamValid { min: None, max: None, regex: None, length: Some(30) }),
+                    ..Default::default()
                 })
                 .param(ParamSchema {
                     name: "certificate".to_string(),
-                    description: Some("DER format client certificate".to_string()),
-                    name_zh: Some("证书".to_string()),
-                    name_en: Some("Certificate".to_string()),
-                    description_zh: Some("DER 格式的客户端证书".to_string()),
-                    description_en: Some("DER format client certificate".to_string()),
+                    name_zh: Some("证书文件".to_string()),
+                    name_en: Some("Certificate file".to_string()),
                     attribute: ParamAttribute::Optional,
-                    ty: ParamType::String,
+                    ty: ParamType::File,
                     default: None,
-                    valid: None,
+                    valid: Some(ParamValid { min: None, max: None, regex: None, length: Some(81960) }),
+                    ..Default::default()
                 })
                 .param(ParamSchema {
                     name: "key".to_string(),
-                    description: Some("DER format client key".to_string()),
-                    name_zh: Some("密钥".to_string()),
-                    name_en: Some("Key".to_string()),
-                    description_zh: Some("DER 格式的客户端密钥".to_string()),
-                    description_en: Some("DER format client key".to_string()),
+                    name_zh: Some("密钥文件".to_string()),
+                    name_en: Some("Key file".to_string()),
                     attribute: ParamAttribute::Optional,
-                    ty: ParamType::String,
+                    ty: ParamType::File,
                     default: None,
+                    valid: Some(ParamValid { min: None, max: None, regex: None, length: Some(81960) }),
+                    ..Default::default()
+                })
+                .param(ParamSchema {
+                    name: "security_mode".to_string(),
+                    name_zh: Some("安全策略".to_string()),
+                    name_en: Some("Security Mode".to_string()),
+                    attribute: ParamAttribute::Optional,
+                    ty: ParamType::Select,
+                    default: Some(serde_json::json!(1)),
                     valid: None,
+                    options: Some(vec![
+                        ParamOption { value: serde_json::json!(1), label: Some("None".to_string()), label_zh: Some("无".to_string()), label_en: Some("None".to_string()) },
+                        ParamOption { value: serde_json::json!(2), label: Some("Sign".to_string()), label_zh: Some("签名".to_string()), label_en: Some("Sign".to_string()) },
+                        ParamOption { value: serde_json::json!(3), label: Some("Sign & Encrypt".to_string()), label_zh: Some("签名与加密".to_string()), label_en: Some("Sign & Encrypt".to_string()) },
+                    ]),
+                    ..Default::default()
+                })
+                .param(ParamSchema {
+                    name: "update_mode".to_string(),
+                    name_zh: Some("更新模式".to_string()),
+                    name_en: Some("Update Mode".to_string()),
+                    attribute: ParamAttribute::Optional,
+                    ty: ParamType::Select,
+                    default: Some(serde_json::json!(1)),
+                    valid: None,
+                    options: Some(vec![
+                        ParamOption { value: serde_json::json!(1), label: Some("Read".to_string()), label_zh: Some("读取".to_string()), label_en: Some("Read".to_string()) },
+                        ParamOption { value: serde_json::json!(2), label: Some("Subscribe".to_string()), label_zh: Some("订阅".to_string()), label_en: Some("Subscribe".to_string()) },
+                        ParamOption { value: serde_json::json!(3), label: Some("Read & Subscribe".to_string()), label_zh: Some("读取与订阅".to_string()), label_en: Some("Read & Subscribe".to_string()) },
+                    ]),
+                    ..Default::default()
+                })
+                .param(ParamSchema {
+                    name: "publish_interval".to_string(),
+                    name_zh: Some("发布间隔 (ms)".to_string()),
+                    name_en: Some("Publish Interval (ms)".to_string()),
+                    attribute: ParamAttribute::Optional,
+                    ty: ParamType::Int,
+                    default: Some(serde_json::json!(500)),
+                    valid: Some(ParamValid { min: Some(100), max: Some(65535), regex: None, length: None }),
+                    ..Default::default()
                 })
                 .tag_regex(vec![
                     TagRegexEntry {

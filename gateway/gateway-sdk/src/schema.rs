@@ -13,12 +13,29 @@ pub enum ParamAttribute {
 }
 
 /// 参数类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ParamType {
+    #[default]
     Int,
     String,
     Bool,
+    /// 文件：前端用上传控件，配置存文件路径（字符串）
+    File,
+    /// 下拉选项：options 列表，值为 options[].value
+    Select,
+}
+
+/// 下拉选项单项：value 为实际存储值，label 为展示（可选多语言）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamOption {
+    pub value: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_zh: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_en: Option<String>,
 }
 
 /// 参数校验（范围、正则、长度等）
@@ -33,7 +50,7 @@ pub struct ParamValid {
 /// 单个配置参数 Schema
 /// - `name` 为配置键，必填，校验与存储使用
 /// - `name_zh` / `name_en`、`description_zh` / `description_en` 为展示用中英文，前端按当前语言选用
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ParamSchema {
     pub name: String,
     pub description: Option<String>,
@@ -55,6 +72,18 @@ pub struct ParamSchema {
     pub ty: ParamType,
     pub default: Option<serde_json::Value>,
     pub valid: Option<ParamValid>,
+    /// 下拉选项（type=select 时必填）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<ParamOption>>,
+    /// 依赖字段名：仅当依赖字段等于 depends_value（或在 depends_values 中）时本字段显示/生效
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depends_on: Option<String>,
+    /// 依赖字段等于该值时显示（与 depends_values 二选一）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depends_value: Option<serde_json::Value>,
+    /// 依赖字段在该列表中时显示
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depends_values: Option<Vec<serde_json::Value>>,
 }
 
 /// 点位地址正则：按数据类型配置地址格式
@@ -90,6 +119,24 @@ impl ConfigSchema {
         self
     }
 
+    /// 依赖是否满足：无 depends_on 则 true；有则检查 config[depends_on] 是否等于 depends_value 或在 depends_values 中。
+    pub fn param_visible(&self, param: &ParamSchema, config: &PluginConfig) -> bool {
+        let Some(ref key) = param.depends_on else {
+            return true;
+        };
+        let dep_val = match config.get(key) {
+            Some(v) => v.clone(),
+            None => return false,
+        };
+        if let Some(ref expect) = param.depends_value {
+            return dep_val == *expect;
+        }
+        if let Some(ref list) = param.depends_values {
+            return list.iter().any(|v| *v == dep_val);
+        }
+        false
+    }
+
     /// 按数据类型校验地址是否匹配 tag_regex。无 regex 时返回 true。
     pub fn validate_address(&self, data_type: &str, address: &str) -> bool {
         use regex::Regex;
@@ -107,13 +154,16 @@ impl ConfigSchema {
         true
     }
 
-    /// 按 Schema 校验插件配置。创建/修改节点时调用。
+    /// 按 Schema 校验插件配置。创建/修改节点时调用。依赖未满足的字段不参与校验。
     pub fn validate_config(
         &self,
         config: &PluginConfig,
     ) -> Result<(), String> {
         use regex::Regex;
         for param in &self.params {
+            if !self.param_visible(param, config) {
+                continue;
+            }
             let val = config.get(&param.name);
             if val.is_none() {
                 if param.attribute == ParamAttribute::Required {
@@ -162,6 +212,36 @@ impl ConfigSchema {
                 ParamType::Bool => {
                     if !v.is_boolean() {
                         return Err(format!("config {} must be boolean", param.name));
+                    }
+                }
+                ParamType::File => {
+                    // 存文件路径字符串，校验同 String
+                    let s = v.as_str().ok_or_else(|| {
+                        format!("config {} must be string (file path)", param.name)
+                    })?;
+                    if let Some(ref valid) = param.valid {
+                        if let Some(ref re) = valid.regex {
+                            let regex = Regex::new(re)
+                                .map_err(|e| format!("config {} regex invalid: {}", param.name, e))?;
+                            if !regex.is_match(s) {
+                                return Err(format!("config {} does not match pattern", param.name));
+                            }
+                        }
+                        if let Some(len) = valid.length {
+                            if s.len() > len {
+                                return Err(format!("config {} length exceeds {}", param.name, len));
+                            }
+                        }
+                    }
+                }
+                ParamType::Select => {
+                    let opts = param.options.as_deref().unwrap_or(&[]);
+                    let ok = opts.iter().any(|o| o.value == *v);
+                    if !ok {
+                        return Err(format!(
+                            "config {} must be one of options",
+                            param.name
+                        ));
                     }
                 }
             }

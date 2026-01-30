@@ -13,6 +13,10 @@ cargo build --release
 # 可选：环境变量
 # GATEWAY_PORT=8080  GATEWAY_DATA_DIR=./data  RUST_LOG=info
 
+# 编译并自动生成 license（与当前机器一致的机器码，输出到 data/license.dat）
+# Windows: .\scripts\build_with_license.ps1 [--release]
+# Linux/mac: ./scripts/build_with_license.sh [--release]
+
 # 前端（构建后由网关服务 web/dist）
 cd web && npm install && npm run build
 ```

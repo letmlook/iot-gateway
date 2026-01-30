@@ -16,11 +16,6 @@ const { t } = useI18n()
 const stateClass = computed(() => props.device.state || 'stopped')
 const isRunning = computed(() => props.device.state === 'running')
 
-function formatId(id) {
-  if (!id) return '-'
-  return id.length > 12 ? `${id.slice(0, 8)}...` : id
-}
-
 function formatTime(timestamp) {
   if (!timestamp) return '-'
   const date = new Date(timestamp)
@@ -96,10 +91,6 @@ function formatTime(timestamp) {
       </div>
     </div>
 
-    <!-- 底部信息 -->
-    <div class="card-footer">
-      <span class="device-id" :title="device.id">ID: {{ formatId(device.id) }}</span>
-    </div>
   </div>
 </template>
 
@@ -257,20 +248,6 @@ function formatTime(timestamp) {
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
-}
-
-/* 底部信息 */
-.card-footer {
-  display: flex;
-  justify-content: space-between;
-  padding: 0.5rem 0.85rem;
-  font-size: 0.7rem;
-  color: var(--text-muted);
-  border-top: 1px solid var(--border-subtle);
-}
-
-.device-id {
-  font-family: var(--font-mono);
 }
 
 .text-danger {

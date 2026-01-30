@@ -104,6 +104,7 @@ impl SouthPlugin for SimPlugin {
                     ty: ParamType::Int,
                     default: Some(serde_json::json!(1000)),
                     valid: None,
+                    ..Default::default()
                 })
                 .tag_regex(vec![
                     TagRegexEntry {

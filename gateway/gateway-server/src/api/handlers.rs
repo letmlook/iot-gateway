@@ -29,6 +29,30 @@ fn parse_tag_id(s: &str) -> Result<gateway_sdk::TagId, ApiError> {
         .map_err(|_| ApiError::bad_request("invalid tag id"))
 }
 
+/// 北向节点无组/标签：仅南向节点允许组、标签、读 Tag、写 Tag。
+fn ensure_node_south(state: &AppState, nid: NodeId) -> Result<(), ApiError> {
+    let node = state
+        .manager
+        .node_get(nid)
+        .ok_or_else(|| ApiError::not_found("node not found"))?;
+    if node.kind() == NodeKind::North {
+        return Err(ApiError::not_found("north node has no groups or tags"));
+    }
+    Ok(())
+}
+
+/// 南向节点无订阅：仅北向节点允许订阅管理。
+fn ensure_node_north(state: &AppState, nid: NodeId) -> Result<(), ApiError> {
+    let node = state
+        .manager
+        .node_get(nid)
+        .ok_or_else(|| ApiError::not_found("node not found"))?;
+    if node.kind() == NodeKind::South {
+        return Err(ApiError::not_found("south node has no subscriptions"));
+    }
+    Ok(())
+}
+
 // ---------- Auth ----------
 #[derive(serde::Deserialize)]
 pub struct LoginRequest {
@@ -366,6 +390,45 @@ pub async fn upload_license(
     }
 }
 
+/// 上传节点配置用文件（如证书）：保存到 data/uploads，返回绝对路径供配置存储。
+pub async fn upload_config_file(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut file_data: Option<Bytes> = None;
+    let mut original_name: Option<String> = None;
+    while let Some(field) = multipart.next_field().await.map_err(|e| ApiError::bad_request(e.to_string()))? {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "file" {
+            original_name = field.file_name().map(|s| s.to_string());
+            let bytes = field.bytes().await.map_err(|e| ApiError::bad_request(e.to_string()))?;
+            if !bytes.is_empty() {
+                file_data = Some(bytes);
+            }
+        }
+    }
+    let data = file_data.ok_or_else(|| ApiError::bad_request("missing file"))?;
+
+    let uploads_dir = state.config.data_dir.join("uploads");
+    std::fs::create_dir_all(&uploads_dir).map_err(|e| ApiError::internal(format!("create uploads dir failed: {}", e)))?;
+
+    let ext = original_name
+        .as_deref()
+        .and_then(|n| std::path::Path::new(n).extension())
+        .and_then(|e| e.to_str())
+        .unwrap_or("bin");
+    let save_name = format!("{}.{}", uuid::Uuid::new_v4(), ext);
+    let save_path = uploads_dir.join(&save_name);
+    std::fs::write(&save_path, &data).map_err(|e| ApiError::internal(format!("write file failed: {}", e)))?;
+
+    let path_str = save_path
+        .canonicalize()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| save_path.to_string_lossy().into_owned());
+
+    Ok(Json(serde_json::json!({ "path": path_str })))
+}
+
 /// 重置授权：删除授权文件并清除内存中的授权状态，此操作不可逆。
 pub async fn reset_license(
     State(state): State<AppState>,
@@ -630,6 +693,7 @@ pub async fn create_node(
         .node_create(req.name, req.kind, req.plugin_name, req.config)
         .await
         .map_err(ApiError::bad_request)?;
+    state.sync_node_log_names();
     state.persist().await;
     Ok(Json(node))
 }
@@ -655,6 +719,7 @@ pub async fn update_node(
 ) -> Result<StatusCode, ApiError> {
     let nid = parse_node_id(&id)?;
     state.manager.node_update(nid, req.name).map_err(ApiError::bad_request)?;
+    state.sync_node_log_names();
     state.persist().await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -675,6 +740,7 @@ pub async fn delete_node(
 ) -> Result<StatusCode, ApiError> {
     let nid = parse_node_id(&id)?;
     state.manager.node_remove(nid).await;
+    state.sync_node_log_names();
     state.persist().await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -705,6 +771,7 @@ pub async fn list_groups(
     Path(id): Path<String>,
 ) -> Result<Json<Vec<Group>>, ApiError> {
     let nid = parse_node_id(&id)?;
+    ensure_node_south(&state, nid)?;
     Ok(Json(state.manager.groups_by_node(nid)))
 }
 
@@ -713,6 +780,7 @@ pub async fn get_group(
     Path((id, gid)): Path<(String, String)>,
 ) -> Result<Json<Group>, ApiError> {
     let nid = parse_node_id(&id)?;
+    ensure_node_south(&state, nid)?;
     let g = parse_group_id(&gid)?;
     let group = state.manager.group_get(nid, g).ok_or_else(|| ApiError::not_found("group not found"))?;
     Ok(Json(group))
@@ -731,6 +799,7 @@ pub async fn add_group(
     Json(req): Json<AddGroupReq>,
 ) -> Result<Json<Group>, ApiError> {
     let nid = parse_node_id(&id)?;
+    ensure_node_south(&state, nid)?;
     let mut g = Group::new(req.name, req.interval_ms);
     g.description = req.description;
     state.manager.group_add(nid, g.clone()).map_err(ApiError::bad_request)?;
@@ -751,6 +820,7 @@ pub async fn update_group(
     Json(req): Json<UpdateGroupReq>,
 ) -> Result<StatusCode, ApiError> {
     let nid = parse_node_id(&id)?;
+    ensure_node_south(&state, nid)?;
     let g = parse_group_id(&gid)?;
     state
         .manager
@@ -765,6 +835,7 @@ pub async fn remove_group(
     Path((id, gid)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     let nid = parse_node_id(&id)?;
+    ensure_node_south(&state, nid)?;
     let g = parse_group_id(&gid)?;
     state.manager.group_remove(nid, g).ok_or_else(|| ApiError::not_found("group not found"))?;
     state.persist().await;
@@ -777,6 +848,7 @@ pub async fn list_tags(
     Path(id): Path<String>,
 ) -> Result<Json<Vec<Tag>>, ApiError> {
     let nid = parse_node_id(&id)?;
+    ensure_node_south(&state, nid)?;
     let tags = state.manager.groups_by_node(nid)
         .into_iter()
         .flat_map(|g| state.manager.tags_by_group(nid, g.id))
@@ -805,6 +877,7 @@ pub async fn add_tag(
         .map_err(ApiError::forbidden)?;
 
     let nid = parse_node_id(&id)?;
+    ensure_node_south(&state, nid)?;
     let mut t = Tag::new(req.name, req.address, req.group_id);
     t.attr = req.attr.unwrap_or(gateway_sdk::TagAttr::Read);
     t.data_type = req.data_type;
@@ -835,6 +908,7 @@ pub async fn batch_add_tags(
         .map_err(ApiError::forbidden)?;
 
     let nid = parse_node_id(&id)?;
+    ensure_node_south(&state, nid)?;
     let mut created = Vec::with_capacity(req.tags.len());
     for r in req.tags {
         let mut t = Tag::new(r.name, r.address, r.group_id);
@@ -857,6 +931,7 @@ pub async fn get_tag(
     Path((id, tid)): Path<(String, String)>,
 ) -> Result<Json<Tag>, ApiError> {
     let nid = parse_node_id(&id)?;
+    ensure_node_south(&state, nid)?;
     let tag_id = parse_tag_id(&tid)?;
     let tag = state
         .manager
@@ -880,6 +955,7 @@ pub async fn update_tag(
     Json(req): Json<UpdateTagReq>,
 ) -> Result<StatusCode, ApiError> {
     let nid = parse_node_id(&id)?;
+    ensure_node_south(&state, nid)?;
     let tag_id = parse_tag_id(&tid)?;
     state
         .manager
@@ -900,8 +976,10 @@ pub async fn update_tag(
 
 pub async fn remove_tag(
     State(state): State<AppState>,
-    Path((_id, tid)): Path<(String, String)>,
+    Path((id, tid)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
+    let nid = parse_node_id(&id)?;
+    ensure_node_south(&state, nid)?;
     let tag_id = parse_tag_id(&tid)?;
     state.manager.tag_remove(tag_id).ok_or_else(|| ApiError::not_found("tag not found"))?;
     state.persist().await;
@@ -914,6 +992,7 @@ pub async fn get_subscriptions(
     Path(id): Path<String>,
 ) -> Result<Json<Vec<GroupSubscription>>, ApiError> {
     let nid = parse_node_id(&id)?;
+    ensure_node_north(&state, nid)?;
     let subs = state.manager.get_north_subscriptions(nid).await;
     Ok(Json(subs))
 }
@@ -929,6 +1008,7 @@ pub async fn set_subscriptions(
     Json(req): Json<SetSubscriptionsReq>,
 ) -> Result<StatusCode, ApiError> {
     let nid = parse_node_id(&id)?;
+    ensure_node_north(&state, nid)?;
     state.manager.set_north_subscriptions(nid, req.subscriptions).await;
     state.persist().await;
     Ok(StatusCode::NO_CONTENT)
@@ -966,6 +1046,7 @@ pub async fn read_tags(
     Json(req): Json<ReadTagsReq>,
 ) -> Result<Json<Vec<(gateway_sdk::TagId, gateway_sdk::types::DataValue)>>, ApiError> {
     let nid = parse_node_id(&id)?;
+    ensure_node_south(&state, nid)?;
     let values = state
         .manager
         .read_tags(nid, &req.tag_ids)
@@ -985,6 +1066,7 @@ pub async fn write_tags(
     Json(req): Json<WriteTagsReq>,
 ) -> Result<StatusCode, ApiError> {
     let nid = parse_node_id(&id)?;
+    ensure_node_south(&state, nid)?;
     state
         .manager
         .write_tags(nid, &req.values)

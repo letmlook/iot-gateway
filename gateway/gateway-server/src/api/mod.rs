@@ -109,6 +109,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/nodes/:id/setting", get(handlers::get_node_setting).put(handlers::node_setting))
         .route("/nodes/:id/read_tags", post(handlers::read_tags))
         .route("/nodes/:id/write_tags", post(handlers::write_tags))
+        .route("/upload", post(handlers::upload_config_file))
         .with_state(state.clone())
         .route_layer(middleware::from_fn_with_state(state, auth_middleware))
         .route_layer(middleware::from_fn(request_id_middleware))

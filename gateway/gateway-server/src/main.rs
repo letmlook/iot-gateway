@@ -21,7 +21,11 @@ use users::UserStore;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = Config::from_env();
-    logging::init_logging(&config);
+    let node_log_names = config
+        .log_dir_nodes
+        .as_ref()
+        .map(|_| std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())));
+    logging::init_logging(&config, node_log_names.clone());
 
     let mut mgr = Manager::new();
     let mut loader_opt: Option<PluginLoader> = None;
@@ -104,7 +108,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     };
 
-    let state = AppState::new(mgr, config.clone(), loader_opt, feature_manager, user_store);
+    let state = AppState::new(mgr, config.clone(), loader_opt, feature_manager, user_store, node_log_names);
+    state.sync_node_log_names();
 
     let app = Router::new()
         .nest("/api", api::router(state.clone()))

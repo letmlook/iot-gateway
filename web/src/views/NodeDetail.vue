@@ -20,7 +20,12 @@ const subscriptions = ref([])
 const southNodes = ref([])
 const loading = ref(false)
 const error = ref('')
-const activeTab = ref('groups')
+const activeTab = ref(route.path.startsWith('/north') ? 'subs' : 'groups')
+// 北向主题（来自节点配置 topic_template）
+const DEFAULT_TOPIC_TEMPLATE = 'gateway/data/${node_id}/${group_id}'
+const nodeSetting = ref(null)
+const topicTemplate = ref('')
+const topicSaving = ref(false)
 
 // 模态框状态
 const showGroupModal = ref(false)
@@ -53,16 +58,48 @@ async function loadNode() {
   error.value = ''
   try {
     node.value = await api.node(nodeId.value)
-    await loadGroups()
-    await loadTags()
     if (isNorth.value) {
+      activeTab.value = 'subs'
       await loadSubscriptions()
       await loadSouthNodes()
+      await loadTopicFromSetting()
+    } else {
+      await loadGroups()
+      await loadTags()
     }
   } catch (e) {
     error.value = t('nodeDetail.loadNodeFailed') + getErrorMessage(t, e)
   } finally {
     loading.value = false
+  }
+}
+
+async function loadTopicFromSetting() {
+  try {
+    const setting = await api.nodeSetting(nodeId.value)
+    nodeSetting.value = setting
+    const cfg = setting?.config || {}
+    topicTemplate.value = (cfg.topic_template && typeof cfg.topic_template === 'string')
+      ? cfg.topic_template
+      : DEFAULT_TOPIC_TEMPLATE
+  } catch {
+    topicTemplate.value = DEFAULT_TOPIC_TEMPLATE
+  }
+}
+
+async function saveTopic() {
+  const v = (topicTemplate.value || '').trim() || DEFAULT_TOPIC_TEMPLATE
+  topicSaving.value = true
+  try {
+    const cfg = { ...(nodeSetting.value?.config || {}), topic_template: v }
+    await api.updateNodeSetting(nodeId.value, { config: cfg })
+    nodeSetting.value = nodeSetting.value ? { ...nodeSetting.value, config: cfg } : { config: cfg }
+    topicTemplate.value = v
+    ElMessage.success(t('nodeDetail.topicSaved'))
+  } catch (e) {
+    error.value = t('nodeDetail.topicSaveFailed') + getErrorMessage(t, e)
+  } finally {
+    topicSaving.value = false
   }
 }
 
@@ -409,7 +446,7 @@ watch(nodeId, loadNode)
     <el-skeleton v-if="loading" :rows="6" animated />
 
     <el-tabs v-else-if="node" v-model="activeTab" class="detail-tabs">
-      <el-tab-pane name="groups">
+      <el-tab-pane v-if="!isNorth" name="groups">
         <template #label>{{ t('nodeDetail.groupList') }} <el-tag size="small" type="info">{{ groups.length }}</el-tag></template>
         <div class="tab-header">
           <h3>{{ t('nodeDetail.pointGroup') }}</h3>
@@ -436,7 +473,7 @@ watch(nodeId, loadNode)
         </el-table>
         <el-empty v-else :description="t('nodeDetail.noPointGroupHint')" />
       </el-tab-pane>
-      <el-tab-pane name="tags">
+      <el-tab-pane v-if="!isNorth" name="tags">
         <template #label>{{ t('nodeDetail.tagList') }} <el-tag size="small" type="info">{{ tags.length }}</el-tag></template>
         <div class="tab-header">
           <h3>{{ t('nodeDetail.dataTags') }}</h3>
@@ -487,6 +524,19 @@ watch(nodeId, loadNode)
       </el-tab-pane>
       <el-tab-pane v-if="isNorth" name="subs">
         <template #label>{{ t('nodeDetail.subManage') }} <el-tag size="small" type="info">{{ subscriptions.length }}</el-tag></template>
+        <div class="topic-section mb-2">
+          <label class="topic-label">{{ t('nodeDetail.topicTemplate') }}</label>
+          <div class="topic-row">
+            <el-input
+              v-model="topicTemplate"
+              :placeholder="t('nodeDetail.topicPlaceholder')"
+              class="topic-input font-mono"
+              clearable
+            />
+            <el-button type="primary" size="small" :loading="topicSaving" @click="saveTopic">{{ t('nodeDetail.saveTopic') }}</el-button>
+          </div>
+          <div class="topic-hint">{{ t('nodeDetail.topicHint') }}</div>
+        </div>
         <div class="tab-header">
           <h3>{{ t('nodeDetail.dataSubs') }}</h3>
           <el-button type="primary" size="small" :icon="Plus" :disabled="!southNodes.length" @click="openSubModal()">{{ t('nodeDetail.addSub') }}</el-button>
@@ -659,4 +709,9 @@ watch(nodeId, loadNode)
 .font-mono { font-family: var(--font-mono); }
 .text-muted { color: var(--text-muted); }
 .detail-tabs { margin-top: 0.5rem; }
+.topic-section { padding: 0.75rem 0; border-bottom: 1px solid var(--el-border-color-lighter); }
+.topic-label { display: block; font-weight: 500; margin-bottom: 0.35rem; font-size: 0.9rem; }
+.topic-row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.topic-input { flex: 1; min-width: 200px; }
+.topic-hint { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.25rem; }
 </style>

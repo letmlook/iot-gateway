@@ -5,8 +5,8 @@
 mod ffi;
 
 use gateway_sdk::{
-    ConfigSchema, Group, GroupId, NodeId, ParamSchema, ParamType, PluginMeta, SouthPlugin, Tag,
-    TagId, TagRegexEntry, TagSchema,
+    ConfigSchema, Group, GroupId, NodeId, ParamOption, ParamSchema, ParamType, ParamValid,
+    PluginMeta, SouthPlugin, Tag, TagId, TagRegexEntry, TagSchema,
 };
 use gateway_sdk::types::{DataValue, PluginKind};
 use gateway_sdk::{PluginConfig, PluginError, PluginResult};
@@ -212,29 +212,179 @@ impl SouthPlugin for ModbusTcpPlugin {
         use gateway_sdk::ParamAttribute;
         Some(
             ConfigSchema::new()
+                // connection_mode: Client=0, Server=1
+                .param(ParamSchema {
+                    name: "connection_mode".to_string(),
+                    name_zh: Some("连接模式".to_string()),
+                    name_en: Some("Connection Mode".to_string()),
+                    description: Some("Neuron as the client, or as the server".to_string()),
+                    description_zh: Some("Neuron 作为客户端或服务端".to_string()),
+                    description_en: Some("Neuron as the client, or as the server".to_string()),
+                    attribute: ParamAttribute::Required,
+                    ty: ParamType::Select,
+                    default: Some(serde_json::json!(0)),
+                    valid: None,
+                    options: Some(vec![
+                        ParamOption { value: serde_json::json!(0), label: Some("Client".to_string()), label_zh: Some("客户端".to_string()), label_en: Some("Client".to_string()) },
+                        ParamOption { value: serde_json::json!(1), label: Some("Server".to_string()), label_zh: Some("服务端".to_string()), label_en: Some("Server".to_string()) },
+                    ]),
+                    ..Default::default()
+                })
+                .param(ParamSchema {
+                    name: "check_header".to_string(),
+                    name_zh: Some("校验报文头".to_string()),
+                    name_en: Some("Check Header".to_string()),
+                    attribute: ParamAttribute::Required,
+                    ty: ParamType::Select,
+                    default: Some(serde_json::json!(0)),
+                    valid: None,
+                    options: Some(vec![
+                        ParamOption { value: serde_json::json!(0), label: Some("False".to_string()), label_zh: Some("否".to_string()), label_en: Some("False".to_string()) },
+                        ParamOption { value: serde_json::json!(1), label: Some("True".to_string()), label_zh: Some("是".to_string()), label_en: Some("True".to_string()) },
+                    ]),
+                    ..Default::default()
+                })
+                .param(ParamSchema {
+                    name: "device_degrade".to_string(),
+                    name_zh: Some("设备降级".to_string()),
+                    name_en: Some("Device Degradation".to_string()),
+                    description: Some("Enable or disable device degradation mechanism".to_string()),
+                    description_zh: Some("启用或禁用设备降级机制".to_string()),
+                    description_en: Some("Enable or disable device degradation mechanism".to_string()),
+                    attribute: ParamAttribute::Required,
+                    ty: ParamType::Select,
+                    default: Some(serde_json::json!(0)),
+                    valid: None,
+                    options: Some(vec![
+                        ParamOption { value: serde_json::json!(0), label: Some("False".to_string()), label_zh: Some("否".to_string()), label_en: Some("False".to_string()) },
+                        ParamOption { value: serde_json::json!(1), label: Some("True".to_string()), label_zh: Some("是".to_string()), label_en: Some("True".to_string()) },
+                    ]),
+                    ..Default::default()
+                })
+                .param(ParamSchema {
+                    name: "degrade_cycle".to_string(),
+                    name_zh: Some("降级失败阈值".to_string()),
+                    name_en: Some("Failure Threshold for Degradation".to_string()),
+                    description: Some("The number of consecutive failure cycles required to trigger device degradation".to_string()),
+                    description_zh: Some("触发设备降级所需的连续失败周期数".to_string()),
+                    description_en: Some("The number of consecutive failure cycles required to trigger device degradation".to_string()),
+                    attribute: ParamAttribute::Required,
+                    ty: ParamType::Int,
+                    default: Some(serde_json::json!(2)),
+                    valid: Some(ParamValid { min: Some(1), max: Some(65535), regex: None, length: None }),
+                    depends_on: Some("device_degrade".to_string()),
+                    depends_value: Some(serde_json::json!(1)),
+                    ..Default::default()
+                })
+                .param(ParamSchema {
+                    name: "degrade_time".to_string(),
+                    name_zh: Some("降级恢复时间".to_string()),
+                    name_en: Some("Recovery Time After Degradation".to_string()),
+                    description: Some("The time in seconds after which the device recovers from degradation".to_string()),
+                    description_zh: Some("设备从降级中恢复所需的时间（单位：秒）".to_string()),
+                    description_en: Some("The time in seconds after which the device recovers from degradation".to_string()),
+                    attribute: ParamAttribute::Required,
+                    ty: ParamType::Int,
+                    default: Some(serde_json::json!(600)),
+                    valid: Some(ParamValid { min: Some(1), max: Some(65535), regex: None, length: None }),
+                    depends_on: Some("device_degrade".to_string()),
+                    depends_value: Some(serde_json::json!(1)),
+                    ..Default::default()
+                })
+                .param(ParamSchema {
+                    name: "max_retry_times".to_string(),
+                    name_zh: Some("最大重试次数".to_string()),
+                    name_en: Some("Maximum Retry Times".to_string()),
+                    description: Some("The maximum number of retries after a failed attempt to send a read command".to_string()),
+                    description_zh: Some("发送读指令失败后最大重试次数".to_string()),
+                    description_en: Some("The maximum number of retries after a failed attempt to send a read command".to_string()),
+                    attribute: ParamAttribute::Required,
+                    ty: ParamType::Int,
+                    default: Some(serde_json::json!(0)),
+                    valid: Some(ParamValid { min: Some(0), max: Some(3), regex: None, length: None }),
+                    ..Default::default()
+                })
+                .param(ParamSchema {
+                    name: "retry_interval_ms".to_string(),
+                    name_zh: Some("指令重新发送间隔 (ms)".to_string()),
+                    name_en: Some("Retry Interval (ms)".to_string()),
+                    attribute: ParamAttribute::Required,
+                    ty: ParamType::Int,
+                    default: Some(serde_json::json!(0)),
+                    valid: Some(ParamValid { min: Some(0), max: Some(10000), regex: None, length: None }),
+                    ..Default::default()
+                })
+                .param(ParamSchema {
+                    name: "endianess".to_string(),
+                    name_zh: Some("字节序".to_string()),
+                    name_en: Some("Endianess".to_string()),
+                    description: Some("Tag byte order, ABCD corresponds to 1234".to_string()),
+                    description_zh: Some("点位字节序，ABCD 对应 1234".to_string()),
+                    description_en: Some("Tag byte order, ABCD corresponds to 1234".to_string()),
+                    attribute: ParamAttribute::Required,
+                    ty: ParamType::Select,
+                    default: Some(serde_json::json!(1)),
+                    valid: None,
+                    options: Some(vec![
+                        ParamOption { value: serde_json::json!(1), label: Some("ABCD".to_string()), label_zh: Some("ABCD".to_string()), label_en: Some("ABCD".to_string()) },
+                        ParamOption { value: serde_json::json!(2), label: Some("BADC".to_string()), label_zh: Some("BADC".to_string()), label_en: Some("BADC".to_string()) },
+                        ParamOption { value: serde_json::json!(3), label: Some("DCBA".to_string()), label_zh: Some("DCBA".to_string()), label_en: Some("DCBA".to_string()) },
+                        ParamOption { value: serde_json::json!(4), label: Some("CDAB".to_string()), label_zh: Some("CDAB".to_string()), label_en: Some("CDAB".to_string()) },
+                    ]),
+                    ..Default::default()
+                })
+                .param(ParamSchema {
+                    name: "start_address".to_string(),
+                    name_zh: Some("开始地址".to_string()),
+                    name_en: Some("Start Address".to_string()),
+                    description: Some("Address starts from 1 or 0".to_string()),
+                    description_zh: Some("地址从 1 开始或从 0 开始".to_string()),
+                    description_en: Some("Address starts from 1 or 0".to_string()),
+                    attribute: ParamAttribute::Required,
+                    ty: ParamType::Select,
+                    default: Some(serde_json::json!(1)),
+                    valid: None,
+                    options: Some(vec![
+                        ParamOption { value: serde_json::json!(0), label: Some("Protocol Addresses (Base 0)".to_string()), label_zh: Some("协议地址（从 0 开始）".to_string()), label_en: Some("Protocol Addresses (Base 0)".to_string()) },
+                        ParamOption { value: serde_json::json!(1), label: Some("PLC Addresses (Base 1)".to_string()), label_zh: Some("PLC 地址（从 1 开始）".to_string()), label_en: Some("PLC Addresses (Base 1)".to_string()) },
+                    ]),
+                    ..Default::default()
+                })
+                .param(ParamSchema {
+                    name: "send_interval_ms".to_string(),
+                    name_zh: Some("指令发送间隔 (ms)".to_string()),
+                    name_en: Some("Send Interval (ms)".to_string()),
+                    attribute: ParamAttribute::Required,
+                    ty: ParamType::Int,
+                    default: Some(serde_json::json!(20)),
+                    valid: Some(ParamValid { min: Some(0), max: Some(3000), regex: None, length: None }),
+                    ..Default::default()
+                })
                 .param(ParamSchema {
                     name: "host".to_string(),
-                    description: Some("Modbus TCP 服务器地址".to_string()),
-                    name_zh: Some("服务器地址".to_string()),
-                    name_en: Some("Host".to_string()),
-                    description_zh: Some("Modbus TCP 服务器 IP 或域名".to_string()),
-                    description_en: Some("Modbus TCP server IP or hostname".to_string()),
+                    name_zh: Some("IP地址".to_string()),
+                    name_en: Some("IP Address".to_string()),
+                    description: Some("Local IP in server mode, remote device IP in client mode".to_string()),
+                    description_zh: Some("服务端模式中填写本地 IP，客户端模式中填写目标设备 IP".to_string()),
+                    description_en: Some("Local IP in server mode, remote device IP in client mode".to_string()),
                     attribute: ParamAttribute::Required,
                     ty: ParamType::String,
                     default: Some(serde_json::json!("127.0.0.1")),
                     valid: None,
+                    ..Default::default()
                 })
                 .param(ParamSchema {
                     name: "port".to_string(),
-                    description: Some("Modbus TCP 端口".to_string()),
-                    name_zh: Some("端口".to_string()),
+                    name_zh: Some("端口号".to_string()),
                     name_en: Some("Port".to_string()),
-                    description_zh: Some("Modbus TCP 端口，默认 502".to_string()),
-                    description_en: Some("Modbus TCP port, default 502".to_string()),
-                    attribute: ParamAttribute::Optional,
+                    description: Some("Local port in server mode, remote device port in client mode".to_string()),
+                    description_zh: Some("服务端模式中填写本地端口号，客户端模式中填写远程设备端口号".to_string()),
+                    description_en: Some("Local port in server mode, remote device port in client mode".to_string()),
+                    attribute: ParamAttribute::Required,
                     ty: ParamType::Int,
                     default: Some(serde_json::json!(502)),
-                    valid: None,
+                    valid: Some(ParamValid { min: Some(1), max: Some(65535), regex: None, length: None }),
+                    ..Default::default()
                 })
                 .param(ParamSchema {
                     name: "slave_id".to_string(),
@@ -247,66 +397,41 @@ impl SouthPlugin for ModbusTcpPlugin {
                     ty: ParamType::Int,
                     default: Some(serde_json::json!(1)),
                     valid: None,
+                    ..Default::default()
                 })
                 .param(ParamSchema {
                     name: "connection_timeout_ms".to_string(),
-                    description: Some("连接/响应超时(ms)".to_string()),
-                    name_zh: Some("连接超时(ms)".to_string()),
-                    name_en: Some("Connection timeout (ms)".to_string()),
-                    description_zh: Some("连接与响应超时时间，单位毫秒".to_string()),
-                    description_en: Some("Connection and response timeout in milliseconds".to_string()),
-                    attribute: ParamAttribute::Optional,
+                    name_zh: Some("连接超时时间 (ms)".to_string()),
+                    name_en: Some("Connection Timeout (ms)".to_string()),
+                    attribute: ParamAttribute::Required,
                     ty: ParamType::Int,
                     default: Some(serde_json::json!(3000)),
-                    valid: None,
+                    valid: Some(ParamValid { min: Some(1000), max: Some(65535), regex: None, length: None }),
+                    ..Default::default()
                 })
                 .param(ParamSchema {
-                    name: "send_interval_ms".to_string(),
-                    description: Some("相邻读/写命令间隔(ms)".to_string()),
-                    name_zh: Some("发送间隔(ms)".to_string()),
-                    name_en: Some("Send interval (ms)".to_string()),
-                    description_zh: Some("相邻读/写命令之间的间隔，单位毫秒".to_string()),
-                    description_en: Some("Interval between read/write commands in milliseconds".to_string()),
+                    name: "backup_host".to_string(),
+                    name_zh: Some("备用 IP 地址".to_string()),
+                    name_en: Some("Backup IP Address".to_string()),
                     attribute: ParamAttribute::Optional,
-                    ty: ParamType::Int,
-                    default: Some(serde_json::json!(20)),
+                    ty: ParamType::String,
+                    default: None,
                     valid: None,
+                    depends_on: Some("connection_mode".to_string()),
+                    depends_value: Some(serde_json::json!(0)),
+                    ..Default::default()
                 })
                 .param(ParamSchema {
-                    name: "max_retry_times".to_string(),
-                    description: Some("读失败最大重试次数".to_string()),
-                    name_zh: Some("最大重试次数".to_string()),
-                    name_en: Some("Max retry times".to_string()),
-                    description_zh: Some("读失败时的最大重试次数".to_string()),
-                    description_en: Some("Maximum retry count on read failure".to_string()),
+                    name: "backup_port".to_string(),
+                    name_zh: Some("备用端口号".to_string()),
+                    name_en: Some("Backup Port".to_string()),
                     attribute: ParamAttribute::Optional,
                     ty: ParamType::Int,
-                    default: Some(serde_json::json!(3)),
-                    valid: None,
-                })
-                .param(ParamSchema {
-                    name: "retry_interval_ms".to_string(),
-                    description: Some("重试间隔(ms)".to_string()),
-                    name_zh: Some("重试间隔(ms)".to_string()),
-                    name_en: Some("Retry interval (ms)".to_string()),
-                    description_zh: Some("重试之间的间隔时间，单位毫秒".to_string()),
-                    description_en: Some("Interval between retries in milliseconds".to_string()),
-                    attribute: ParamAttribute::Optional,
-                    ty: ParamType::Int,
-                    default: Some(serde_json::json!(100)),
-                    valid: None,
-                })
-                .param(ParamSchema {
-                    name: "start_address".to_string(),
-                    description: Some("地址起始：0 或 1（400001 表示第 1 个保持寄存器时填 1）".to_string()),
-                    name_zh: Some("地址起始".to_string()),
-                    name_en: Some("Start address".to_string()),
-                    description_zh: Some("地址起始：0 或 1，400001 表示第 1 个保持寄存器时填 1".to_string()),
-                    description_en: Some("Start address 0 or 1; use 1 when 400001 denotes first holding register".to_string()),
-                    attribute: ParamAttribute::Optional,
-                    ty: ParamType::Int,
-                    default: Some(serde_json::json!(1)),
-                    valid: None,
+                    default: Some(serde_json::json!(502)),
+                    valid: Some(ParamValid { min: Some(1), max: Some(65535), regex: None, length: None }),
+                    depends_on: Some("connection_mode".to_string()),
+                    depends_value: Some(serde_json::json!(0)),
+                    ..Default::default()
                 })
                 .tag_regex(vec![
                     TagRegexEntry {
@@ -372,8 +497,8 @@ impl SouthPlugin for ModbusTcpPlugin {
         let slave_id = config.get("slave_id").and_then(|v| v.as_u64()).map(|n| n as u8).unwrap_or(1);
         let connection_timeout_ms = config.get("connection_timeout_ms").and_then(|v| v.as_u64()).unwrap_or(3000);
         let send_interval_ms = config.get("send_interval_ms").and_then(|v| v.as_u64()).unwrap_or(20);
-        let max_retry_times = config.get("max_retry_times").and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(3);
-        let retry_interval_ms = config.get("retry_interval_ms").and_then(|v| v.as_u64()).unwrap_or(100);
+        let max_retry_times = config.get("max_retry_times").and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(0);
+        let retry_interval_ms = config.get("retry_interval_ms").and_then(|v| v.as_u64()).unwrap_or(0);
         let start_address = config.get("start_address").and_then(|v| v.as_u64()).map(|n| n as u8).unwrap_or(1).min(1);
         let groups = Self::default_groups();
         let tags = groups

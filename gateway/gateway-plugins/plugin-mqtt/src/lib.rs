@@ -6,7 +6,7 @@
 #[cfg(feature = "ffi")]
 mod ffi;
 
-use gateway_sdk::schema::{ConfigSchema, ParamAttribute, ParamSchema, ParamType, ParamValid};
+use gateway_sdk::schema::{ConfigSchema, ParamAttribute, ParamOption, ParamSchema, ParamType, ParamValid};
 use gateway_sdk::{
     GroupData, GroupId, GroupSubscription, NodeId, NorthPlugin, PluginConfig, PluginMeta,
 };
@@ -18,7 +18,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::warn;
 
-const DEFAULT_HOST: &str = "localhost";
+const DEFAULT_HOST: &str = "broker.emqx.io";
 const DEFAULT_PORT: u16 = 1883;
 const DEFAULT_TOPIC_TEMPLATE: &str = "gateway/data/${node_id}/${group_id}";
 const DEFAULT_CACHE_MEMORY_SIZE: usize = 1000;
@@ -179,200 +179,251 @@ impl NorthPlugin for MqttPlugin {
             ConfigSchema::new()
                 .param(ParamSchema {
                     name: "host".to_string(),
-                    description: Some("Broker 地址".to_string()),
-                    name_zh: Some("Broker 地址".to_string()),
-                    name_en: Some("Host".to_string()),
+                    name_zh: Some("服务器地址".to_string()),
+                    name_en: Some("Broker Host".to_string()),
+                    description: Some("MQTT Broker IP or hostname".to_string()),
                     description_zh: Some("MQTT Broker IP 或域名".to_string()),
                     description_en: Some("MQTT Broker IP or hostname".to_string()),
                     attribute: ParamAttribute::Optional,
                     ty: ParamType::String,
                     default: Some(serde_json::json!(DEFAULT_HOST)),
-                    valid: None,
+                    valid: Some(ParamValid { min: None, max: None, regex: None, length: Some(255) }),
+                    ..Default::default()
                 })
                 .param(ParamSchema {
                     name: "port".to_string(),
-                    description: Some("Broker 端口（TLS 通常 8883）".to_string()),
-                    name_zh: Some("端口".to_string()),
-                    name_en: Some("Port".to_string()),
+                    name_zh: Some("服务器端口".to_string()),
+                    name_en: Some("Broker Port".to_string()),
+                    description: Some("Broker port, typically 1883 or 8883 for TLS".to_string()),
                     description_zh: Some("Broker 端口，TLS 通常为 8883".to_string()),
-                    description_en: Some("Broker port, typically 8883 for TLS".to_string()),
+                    description_en: Some("Broker port, typically 1883 or 8883 for TLS".to_string()),
                     attribute: ParamAttribute::Optional,
                     ty: ParamType::Int,
                     default: Some(serde_json::json!(DEFAULT_PORT)),
-                    valid: None,
+                    valid: Some(ParamValid { min: Some(1), max: Some(65535), regex: None, length: None }),
+                    ..Default::default()
                 })
                 .param(ParamSchema {
                     name: "client_id".to_string(),
-                    description: Some("MQTT 客户端 ID，不填则自动生成".to_string()),
                     name_zh: Some("客户端 ID".to_string()),
                     name_en: Some("Client ID".to_string()),
+                    description: Some("MQTT client ID, auto-generated if empty".to_string()),
                     description_zh: Some("MQTT 客户端 ID，不填则自动生成".to_string()),
                     description_en: Some("MQTT client ID, auto-generated if empty".to_string()),
                     attribute: ParamAttribute::Optional,
                     ty: ParamType::String,
                     default: None,
-                    valid: None,
+                    valid: Some(ParamValid { min: None, max: None, regex: None, length: Some(255) }),
+                    ..Default::default()
                 })
                 .param(ParamSchema {
                     name: "topic_template".to_string(),
-                    description: Some("发布主题模板，支持变量：${node_id} ${group_id} ${timestamp}".to_string()),
                     name_zh: Some("主题模板".to_string()),
                     name_en: Some("Topic template".to_string()),
+                    description: Some("Publish topic template, variables: ${node_id} ${group_id} ${timestamp}".to_string()),
                     description_zh: Some("发布主题模板，支持变量：${node_id} ${group_id} ${timestamp}".to_string()),
                     description_en: Some("Publish topic template, variables: ${node_id} ${group_id} ${timestamp}".to_string()),
                     attribute: ParamAttribute::Optional,
                     ty: ParamType::String,
                     default: Some(serde_json::json!(DEFAULT_TOPIC_TEMPLATE)),
-                    valid: None,
+                    valid: Some(ParamValid { min: None, max: None, regex: None, length: Some(255) }),
+                    ..Default::default()
                 })
                 .param(ParamSchema {
                     name: "qos".to_string(),
-                    description: Some("QoS 等级 0/1/2".to_string()),
-                    name_zh: Some("QoS".to_string()),
-                    name_en: Some("QoS".to_string()),
-                    description_zh: Some("QoS 等级：0 至多一次、1 至少一次、2 恰好一次".to_string()),
-                    description_en: Some("QoS level: 0 at most once, 1 at least once, 2 exactly once".to_string()),
+                    name_zh: Some("QoS 等级".to_string()),
+                    name_en: Some("QoS Level".to_string()),
+                    description: Some("MQTT QoS level for message delivery".to_string()),
+                    description_zh: Some("MQTT 消息传输使用的服务质量等级".to_string()),
+                    description_en: Some("MQTT QoS level for message delivery".to_string()),
                     attribute: ParamAttribute::Optional,
-                    ty: ParamType::Int,
+                    ty: ParamType::Select,
                     default: Some(serde_json::json!(DEFAULT_QOS)),
-                    valid: Some(ParamValid {
-                        min: Some(0),
-                        max: Some(2),
-                        regex: None,
-                        length: None,
-                    }),
+                    valid: None,
+                    options: Some(vec![
+                        ParamOption {
+                            value: serde_json::json!(0),
+                            label: Some("QoS 0".to_string()),
+                            label_zh: Some("QoS 0".to_string()),
+                            label_en: Some("QoS 0".to_string()),
+                        },
+                        ParamOption {
+                            value: serde_json::json!(1),
+                            label: Some("QoS 1".to_string()),
+                            label_zh: Some("QoS 1".to_string()),
+                            label_en: Some("QoS 1".to_string()),
+                        },
+                        ParamOption {
+                            value: serde_json::json!(2),
+                            label: Some("QoS 2".to_string()),
+                            label_zh: Some("QoS 2".to_string()),
+                            label_en: Some("QoS 2".to_string()),
+                        },
+                    ]),
+                    ..Default::default()
                 })
                 .param(ParamSchema {
                     name: "retain".to_string(),
-                    description: Some("是否保留消息（retain）".to_string()),
                     name_zh: Some("保留消息".to_string()),
                     name_en: Some("Retain".to_string()),
+                    description: Some("Whether to set message as retained".to_string()),
                     description_zh: Some("是否将消息设为保留（retain）".to_string()),
                     description_en: Some("Whether to set message as retained".to_string()),
                     attribute: ParamAttribute::Optional,
                     ty: ParamType::Bool,
                     default: Some(serde_json::json!(false)),
                     valid: None,
+                    ..Default::default()
                 })
                 .param(ParamSchema {
                     name: "upload_format".to_string(),
-                    description: Some("上传格式：group_data（完整 GroupData）/ tags_format（tags 数组）".to_string()),
-                    name_zh: Some("上传格式".to_string()),
-                    name_en: Some("Upload format".to_string()),
-                    description_zh: Some("上传格式：group_data 完整 GroupData，tags_format 为 tags 数组".to_string()),
-                    description_en: Some("Upload format: group_data for full GroupData, tags_format for tags array".to_string()),
+                    name_zh: Some("上报数据格式".to_string()),
+                    name_en: Some("Upload Format".to_string()),
+                    description: Some("JSON format of the data reported. In GroupData format, full group data is sent. In Tags-format, tag data are in a single array.".to_string()),
+                    description_zh: Some("上报数据的 JSON 格式。GroupData 格式发送完整组数据；Tags-format 下数据放在一个数组中。".to_string()),
+                    description_en: Some("JSON format of the data reported. In GroupData format, full group data is sent. In Tags-format, tag data are in a single array.".to_string()),
                     attribute: ParamAttribute::Optional,
-                    ty: ParamType::String,
+                    ty: ParamType::Select,
                     default: Some(serde_json::json!(UPLOAD_FORMAT_GROUP_DATA)),
                     valid: None,
+                    options: Some(vec![
+                        ParamOption {
+                            value: serde_json::json!(UPLOAD_FORMAT_GROUP_DATA),
+                            label: Some("GroupData".to_string()),
+                            label_zh: Some("完整 GroupData".to_string()),
+                            label_en: Some("Full GroupData".to_string()),
+                        },
+                        ParamOption {
+                            value: serde_json::json!(UPLOAD_FORMAT_TAGS_FORMAT),
+                            label: Some("Tags Format".to_string()),
+                            label_zh: Some("Tags 数组".to_string()),
+                            label_en: Some("Tags array".to_string()),
+                        },
+                    ]),
+                    ..Default::default()
                 })
                 .param(ParamSchema {
                     name: "keep_alive_secs".to_string(),
-                    description: Some("Keep Alive 秒数".to_string()),
                     name_zh: Some("保活时间(秒)".to_string()),
                     name_en: Some("Keep alive (sec)".to_string()),
+                    description: Some("MQTT Keep Alive interval in seconds".to_string()),
                     description_zh: Some("MQTT Keep Alive 间隔，单位秒".to_string()),
                     description_en: Some("MQTT Keep Alive interval in seconds".to_string()),
                     attribute: ParamAttribute::Optional,
                     ty: ParamType::Int,
                     default: Some(serde_json::json!(DEFAULT_KEEP_ALIVE_SECS as i64)),
                     valid: None,
+                    ..Default::default()
                 })
                 .param(ParamSchema {
                     name: "username".to_string(),
-                    description: Some("Broker 用户名（可选）".to_string()),
                     name_zh: Some("用户名".to_string()),
                     name_en: Some("Username".to_string()),
+                    description: Some("Broker username for authentication".to_string()),
                     description_zh: Some("Broker 认证用户名，可选".to_string()),
-                    description_en: Some("Broker username for authentication, optional".to_string()),
+                    description_en: Some("Broker username for authentication".to_string()),
                     attribute: ParamAttribute::Optional,
                     ty: ParamType::String,
                     default: None,
-                    valid: None,
+                    valid: Some(ParamValid { min: None, max: None, regex: None, length: Some(255) }),
+                    ..Default::default()
                 })
                 .param(ParamSchema {
                     name: "password".to_string(),
-                    description: Some("Broker 密码（可选）".to_string()),
                     name_zh: Some("密码".to_string()),
                     name_en: Some("Password".to_string()),
+                    description: Some("Broker password for authentication".to_string()),
                     description_zh: Some("Broker 认证密码，可选".to_string()),
-                    description_en: Some("Broker password for authentication, optional".to_string()),
+                    description_en: Some("Broker password for authentication".to_string()),
                     attribute: ParamAttribute::Optional,
                     ty: ParamType::String,
                     default: None,
-                    valid: None,
+                    valid: Some(ParamValid { min: None, max: None, regex: None, length: Some(255) }),
+                    ..Default::default()
                 })
                 .param(ParamSchema {
                     name: "cache_memory_size".to_string(),
-                    description: Some("离线缓存条数".to_string()),
-                    name_zh: Some("离线缓存条数".to_string()),
-                    name_en: Some("Cache size".to_string()),
-                    description_zh: Some("离线时内存缓存的最大消息条数".to_string()),
-                    description_en: Some("Maximum number of messages to cache when offline".to_string()),
+                    name_zh: Some("缓存内存大小".to_string()),
+                    name_en: Some("Cache Memory Size".to_string()),
+                    description: Some("Max in-memory cache size (message count) when MQTT connection exception occurs.".to_string()),
+                    description_zh: Some("当 MQTT 连接异常时，最大的内存缓存条数。".to_string()),
+                    description_en: Some("Max in-memory cache size (message count) when MQTT connection exception occurs.".to_string()),
                     attribute: ParamAttribute::Optional,
                     ty: ParamType::Int,
                     default: Some(serde_json::json!(DEFAULT_CACHE_MEMORY_SIZE)),
                     valid: None,
+                    ..Default::default()
                 })
                 .param(ParamSchema {
                     name: "cache_sync_interval_ms".to_string(),
-                    description: Some("恢复连接后补发缓存消息的时间间隔（毫秒）".to_string()),
-                    name_zh: Some("补发间隔(ms)".to_string()),
-                    name_en: Some("Cache sync interval (ms)".to_string()),
+                    name_zh: Some("缓存消息重传间隔（MS）".to_string()),
+                    name_en: Some("Cache Sync Interval (MS)".to_string()),
+                    description: Some("Interval in milliseconds for replaying cached messages after reconnect.".to_string()),
                     description_zh: Some("恢复连接后补发缓存消息的时间间隔，单位毫秒".to_string()),
-                    description_en: Some("Interval for replaying cached messages after reconnect, in milliseconds".to_string()),
+                    description_en: Some("Interval in milliseconds for replaying cached messages after reconnect.".to_string()),
                     attribute: ParamAttribute::Optional,
                     ty: ParamType::Int,
                     default: Some(serde_json::json!(DEFAULT_CACHE_SYNC_INTERVAL_MS as i64)),
-                    valid: None,
+                    valid: Some(ParamValid { min: Some(10), max: Some(120_000), regex: None, length: None }),
+                    ..Default::default()
                 })
                 .param(ParamSchema {
                     name: "ssl".to_string(),
-                    description: Some("是否启用 TLS/SSL".to_string()),
-                    name_zh: None,
-                    name_en: None,
-                    description_zh: None,
-                    description_en: None,
+                    name_zh: Some("SSL".to_string()),
+                    name_en: Some("SSL".to_string()),
+                    description: Some("Enable SSL connection".to_string()),
+                    description_zh: Some("是否启用 SSL 连接".to_string()),
+                    description_en: Some("Enable SSL connection".to_string()),
                     attribute: ParamAttribute::Optional,
                     ty: ParamType::Bool,
                     default: Some(serde_json::json!(false)),
                     valid: None,
+                    ..Default::default()
                 })
                 .param(ParamSchema {
                     name: "ca_file".to_string(),
-                    description: Some("CA 证书文件路径（SSL 且自签名时）".to_string()),
-                    name_zh: None,
-                    name_en: None,
-                    description_zh: None,
-                    description_en: None,
+                    name_zh: Some("CA 证书".to_string()),
+                    name_en: Some("CA".to_string()),
+                    description: Some("CA certificate which signs the server certificate".to_string()),
+                    description_zh: Some("签发服务器证书的 CA 证书".to_string()),
+                    description_en: Some("CA certificate which signs the server certificate".to_string()),
                     attribute: ParamAttribute::Optional,
-                    ty: ParamType::String,
+                    ty: ParamType::File,
                     default: None,
                     valid: None,
+                    depends_on: Some("ssl".to_string()),
+                    depends_value: Some(serde_json::json!(true)),
+                    ..Default::default()
                 })
                 .param(ParamSchema {
                     name: "client_cert_file".to_string(),
-                    description: Some("客户端证书文件路径（双向认证时）".to_string()),
-                    name_zh: None,
-                    name_en: None,
-                    description_zh: None,
-                    description_en: None,
+                    name_zh: Some("客户端证书".to_string()),
+                    name_en: Some("Client Cert".to_string()),
+                    description: Some("Client x509 certificate when using two way authentication".to_string()),
+                    description_zh: Some("使用双向认证时，客户端的 x509 证书".to_string()),
+                    description_en: Some("Client x509 certificate when using two way authentication".to_string()),
                     attribute: ParamAttribute::Optional,
-                    ty: ParamType::String,
+                    ty: ParamType::File,
                     default: None,
                     valid: None,
+                    depends_on: Some("ssl".to_string()),
+                    depends_value: Some(serde_json::json!(true)),
+                    ..Default::default()
                 })
                 .param(ParamSchema {
                     name: "client_key_file".to_string(),
-                    description: Some("客户端私钥文件路径（双向认证时）".to_string()),
-                    name_zh: None,
-                    name_en: None,
-                    description_zh: None,
-                    description_en: None,
+                    name_zh: Some("客户端私钥".to_string()),
+                    name_en: Some("Client Private Key".to_string()),
+                    description: Some("Client private key when using two way authentication".to_string()),
+                    description_zh: Some("使用双向认证时，客户端的私钥".to_string()),
+                    description_en: Some("Client private key when using two way authentication".to_string()),
                     attribute: ParamAttribute::Optional,
-                    ty: ParamType::String,
+                    ty: ParamType::File,
                     default: None,
                     valid: None,
+                    depends_on: Some("ssl".to_string()),
+                    depends_value: Some(serde_json::json!(true)),
+                    ..Default::default()
                 }),
         )
     }
