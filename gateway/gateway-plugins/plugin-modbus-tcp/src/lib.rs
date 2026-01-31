@@ -4,170 +4,33 @@
 #[cfg(feature = "ffi")]
 mod ffi;
 
+mod address;
+mod config;
+mod state;
+mod value;
+
 use gateway_sdk::{
     ConfigSchema, Group, GroupId, NodeId, ParamOption, ParamSchema, ParamType, ParamValid,
     PluginMeta, SouthPlugin, Tag, TagId, TagRegexEntry, TagSchema,
 };
+use gateway_sdk::log;
 use gateway_sdk::types::{DataValue, PluginKind};
 use gateway_sdk::{PluginConfig, PluginError, PluginResult};
-use gateway_sdk::log;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::RwLock;
 
-/// Modbus 区域：0=线圈 1=离散输入 3=输入寄存器 4=保持寄存器
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ModbusArea {
-    Coil,
-    DiscreteInput,
-    InputRegister,
-    HoldingRegister,
-}
+use address::{parse_address, parse_address_full, ModbusArea};
+use config::{config_str, config_u16};
+use state::ModbusTcpState;
+use value::{register_to_value_ext, value_to_registers};
 
-/// 字节序：#L/#B(16bit) #LL/#LB/#BL/#BB(32/64bit)
-#[derive(Clone, Copy, Default)]
-struct Endianness {
-    /// 16bit: false=#L(1,2) true=#B(2,1)
-    swap16: bool,
-    /// 32/64bit: 0=LL 1=LB 2=BL 3=BB
-    order32: u8,
-}
-
-/// 解析后的地址（支持 4x!addr 与 1!400001[.BIT][#ENDIAN]）
-#[derive(Clone)]
-struct ParsedAddress {
-    area: ModbusArea,
-    start: u16,
-    count: u16,
-    bit_index: Option<u8>,
-    endian: Endianness,
-}
-
-fn parse_address(addr: &str) -> Option<(ModbusArea, u16, u16)> {
-    parse_address_full(addr, 1).map(|p| (p.area, p.start, p.count))
-}
-
-/// 完整解析：支持 4x!100、4x!100!2 与 1!400001、1!400001.4、1!400001#LB
-fn parse_address_full(addr: &str, start_address: u8) -> Option<ParsedAddress> {
-    let addr = addr.trim();
-    let mut endian = Endianness::default();
-    let mut bit_index: Option<u8> = None;
-    let addr_no_endian = if let Some(excl) = addr.find('#') {
-        let (addr_part, endian_part) = addr.split_at(excl);
-        let endian_str = endian_part.trim_start_matches('#').to_uppercase();
-        match endian_str.as_str() {
-            "B" => endian.swap16 = true,
-            "L" => {}
-            "LL" => {}
-            "LB" => endian.order32 = 1,
-            "BL" => endian.order32 = 2,
-            "BB" => endian.order32 = 3,
-            _ => {}
-        }
-        addr_part.trim()
-    } else {
-        addr
-    };
-    let (area, start, count) = if let Some(dot) = addr_no_endian.find('.') {
-        let (base, rest) = addr_no_endian.split_at(dot);
-        let rest = rest.trim_start_matches('.');
-        let rest_upper = rest.to_uppercase();
-        let is_string_len = rest_upper.ends_with('H') || rest_upper.ends_with('L') || rest_upper.ends_with('D') || rest_upper.ends_with('E');
-        let len_str: &str = if is_string_len { rest_upper.trim_end_matches(|c: char| c == 'H' || c == 'L' || c == 'D' || c == 'E') } else { &rest_upper };
-        if !is_string_len && rest.len() == 1 {
-            if let Ok(b) = rest.parse::<u8>() {
-                if b <= 15 {
-                    bit_index = Some(b);
-                }
-            }
-            parse_address_core(base, start_address)?
-        } else if let Ok(len) = len_str.parse::<usize>() {
-            let (a, s, _) = parse_address_core(base, start_address)?;
-            let regs = (len + 1) / 2;
-            return Some(ParsedAddress { area: a, start: s, count: regs as u16, bit_index: None, endian });
-        } else {
-            parse_address_core(base, start_address)?
-        }
-    } else {
-        parse_address_core(addr_no_endian, start_address)?
-    };
-    Some(ParsedAddress { area, start, count, bit_index, endian })
-}
-
-fn parse_address_core(addr: &str, start_address: u8) -> Option<(ModbusArea, u16, u16)> {
-    let parts: Vec<&str> = addr.split('!').map(|s| s.trim()).collect();
-    if parts.is_empty() {
-        return None;
-    }
-    let first = parts[0].to_lowercase();
-    let (area, start, count) = if first == "0x" || first == "0" || first == "1x" || first == "1"
-        || first == "3x" || first == "3" || first == "4x" || first == "4"
-    {
-        let area = match first.as_str() {
-            "0x" | "0" => ModbusArea::Coil,
-            "1x" | "1" => ModbusArea::DiscreteInput,
-            "3x" | "3" => ModbusArea::InputRegister,
-            _ => ModbusArea::HoldingRegister,
-        };
-        let start: u16 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-        let count: u16 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
-        (area, start, count.max(1))
-    } else {
-        let _slave: u8 = parts[0].parse().ok().filter(|&s| s <= 247)?;
-        let addr_num: u32 = parts.get(1).and_then(|s| s.parse().ok())?;
-        let (area, base) = if addr_num >= 400001 && addr_num <= 465536 {
-            (ModbusArea::HoldingRegister, 400000u32)
-        } else if addr_num >= 300001 && addr_num <= 365536 {
-            (ModbusArea::InputRegister, 300000)
-        } else if addr_num >= 100001 && addr_num <= 165536 {
-            (ModbusArea::DiscreteInput, 100000)
-        } else if addr_num >= 1 && addr_num <= 65536 {
-            (ModbusArea::Coil, 0)
-        } else {
-            return None;
-        };
-        let start = (addr_num.saturating_sub(base).saturating_sub(start_address as u32)) as u16;
-        let count = 1u16;
-        (area, start, count)
-    };
-    Some((area, start, count))
-}
-
-fn config_str(config: &PluginConfig, key: &str, default: &str) -> String {
-    config
-        .get(key)
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .unwrap_or_else(|| default.to_string())
-}
-
-fn config_u16(config: &PluginConfig, key: &str, default: u16) -> u16 {
-    config
-        .get(key)
-        .and_then(|v| v.as_u64())
-        .map(|n| n as u16)
-        .unwrap_or(default)
-}
+#[cfg(feature = "modbus-client")]
+use std::time::Duration;
 
 /// Modbus TCP 南向插件
 pub struct ModbusTcpPlugin {
     state: Arc<RwLock<HashMap<NodeId, ModbusTcpState>>>,
-}
-
-struct ModbusTcpState {
-    host: String,
-    port: u16,
-    slave_id: u8,
-    connection_timeout_ms: u64,
-    send_interval_ms: u64,
-    #[allow(dead_code)]
-    max_retry_times: u32,
-    #[allow(dead_code)]
-    retry_interval_ms: u64,
-    start_address: u8,
-    groups: Vec<Group>,
-    tags: Vec<Tag>,
 }
 
 impl Default for ModbusTcpPlugin {
@@ -493,7 +356,7 @@ impl SouthPlugin for ModbusTcpPlugin {
     async fn open(&self, node_id: NodeId, config: PluginConfig) -> PluginResult<()> {
         let host = config_str(&config, "host", "127.0.0.1");
         let port = config_u16(&config, "port", 502);
-        log::info(node_id, format!("open: host={}, port={}", host, port));
+        log::info(node_id, format!("open modbus-tcp: host={}, port={}", host, port));
         let slave_id = config.get("slave_id").and_then(|v| v.as_u64()).map(|n| n as u8).unwrap_or(1);
         let connection_timeout_ms = config.get("connection_timeout_ms").and_then(|v| v.as_u64()).unwrap_or(3000);
         let send_interval_ms = config.get("send_interval_ms").and_then(|v| v.as_u64()).unwrap_or(20);
@@ -537,9 +400,37 @@ impl SouthPlugin for ModbusTcpPlugin {
     }
 
     async fn close(&self, node_id: NodeId) -> PluginResult<()> {
-        log::info(node_id, "close");
+        log::info(node_id, "close modbus-tcp");
         let mut state = self.state.write().await;
         state.remove(&node_id);
+        Ok(())
+    }
+
+    async fn start(&self, node_id: NodeId) -> PluginResult<()> {
+        log::info(node_id, "start modbus-tcp");
+        Ok(())
+    }
+
+    async fn stop(&self, node_id: NodeId) -> PluginResult<()> {
+        log::info(node_id, "stop modbus-tcp");
+        Ok(())
+    }
+
+    async fn setting(&self, node_id: NodeId, config: PluginConfig) -> PluginResult<()> {
+        log::info(node_id, "setting modbus-tcp (config updated)");
+        let host = config_str(&config, "host", "127.0.0.1");
+        let port = config_u16(&config, "port", 502);
+        let mut state = self.state.write().await;
+        if let Some(s) = state.get_mut(&node_id) {
+            s.host = host;
+            s.port = port;
+            s.slave_id = config.get("slave_id").and_then(|v| v.as_u64()).map(|n| n as u8).unwrap_or(s.slave_id);
+            s.connection_timeout_ms = config.get("connection_timeout_ms").and_then(|v| v.as_u64()).unwrap_or(s.connection_timeout_ms);
+            s.send_interval_ms = config.get("send_interval_ms").and_then(|v| v.as_u64()).unwrap_or(s.send_interval_ms);
+            s.max_retry_times = config.get("max_retry_times").and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(s.max_retry_times);
+            s.retry_interval_ms = config.get("retry_interval_ms").and_then(|v| v.as_u64()).unwrap_or(s.retry_interval_ms);
+            s.start_address = config.get("start_address").and_then(|v| v.as_u64()).map(|n| n as u8).unwrap_or(s.start_address).min(1);
+        }
         Ok(())
     }
 
@@ -704,197 +595,13 @@ impl SouthPlugin for ModbusTcpPlugin {
                 }
                 tokio::time::sleep(interval).await;
             }
+            Ok(())
         }
 
         #[cfg(not(feature = "modbus-client"))]
         {
             let _ = (node_id, s, values);
-            return Err(PluginError::not_supported("write requires modbus-client feature"));
+            Err(PluginError::not_supported("write requires modbus-client feature"))
         }
-        Ok(())
-    }
-}
-
-/// 按字节序取 32 位：order32 0=LL 1=LB 2=BL 3=BB
-fn regs_to_u32(regs: &[u16], e: &Endianness) -> u32 {
-    if regs.len() < 2 {
-        return 0;
-    }
-    let (a, b) = (regs[0], regs[1]);
-    let bytes = match e.order32 {
-        1 => [(b & 0xff) as u8, (b >> 8) as u8, (a & 0xff) as u8, (a >> 8) as u8],
-        2 => [(a >> 8) as u8, (a & 0xff) as u8, (b >> 8) as u8, (b & 0xff) as u8],
-        3 => [(b >> 8) as u8, (b & 0xff) as u8, (a >> 8) as u8, (a & 0xff) as u8],
-        _ => [(a & 0xff) as u8, (a >> 8) as u8, (b & 0xff) as u8, (b >> 8) as u8],
-    };
-    u32::from_le_bytes(bytes)
-}
-
-/// 按字节序取 64 位
-fn regs_to_u64(regs: &[u16], e: &Endianness) -> u64 {
-    if regs.len() < 4 {
-        return 0;
-    }
-    let bytes = match e.order32 {
-        1 => [
-            (regs[1] & 0xff) as u8, (regs[1] >> 8) as u8, (regs[0] & 0xff) as u8, (regs[0] >> 8) as u8,
-            (regs[3] & 0xff) as u8, (regs[3] >> 8) as u8, (regs[2] & 0xff) as u8, (regs[2] >> 8) as u8,
-        ],
-        2 => [
-            (regs[0] >> 8) as u8, (regs[0] & 0xff) as u8, (regs[1] >> 8) as u8, (regs[1] & 0xff) as u8,
-            (regs[2] >> 8) as u8, (regs[2] & 0xff) as u8, (regs[3] >> 8) as u8, (regs[3] & 0xff) as u8,
-        ],
-        3 => [
-            (regs[3] >> 8) as u8, (regs[3] & 0xff) as u8, (regs[2] >> 8) as u8, (regs[2] & 0xff) as u8,
-            (regs[1] >> 8) as u8, (regs[1] & 0xff) as u8, (regs[0] >> 8) as u8, (regs[0] & 0xff) as u8,
-        ],
-        _ => [
-            (regs[0] & 0xff) as u8, (regs[0] >> 8) as u8, (regs[1] & 0xff) as u8, (regs[1] >> 8) as u8,
-            (regs[2] & 0xff) as u8, (regs[2] >> 8) as u8, (regs[3] & 0xff) as u8, (regs[3] >> 8) as u8,
-        ],
-    };
-    u64::from_le_bytes(bytes)
-}
-
-#[allow(dead_code)]
-fn register_to_value(regs: &[u16], data_type: &str) -> DataValue {
-    register_to_value_ext(regs, data_type, &Endianness::default(), None)
-}
-
-/// 将 DataValue 转为寄存器序列用于写保持寄存器
-fn value_to_registers(value: &DataValue, data_type: &str) -> Vec<u16> {
-    match value {
-        DataValue::Int16(v) => vec![*v as u16],
-        DataValue::UInt16(v) => vec![*v],
-        DataValue::Int32(v) => {
-            let b = (*v as u32).to_le_bytes();
-            vec![u16::from_le_bytes([b[0], b[1]]), u16::from_le_bytes([b[2], b[3]])]
-        }
-        DataValue::UInt32(v) => {
-            let b = v.to_le_bytes();
-            vec![u16::from_le_bytes([b[0], b[1]]), u16::from_le_bytes([b[2], b[3]])]
-        }
-        DataValue::Int64(v) => {
-            let b = (*v as u64).to_le_bytes();
-            vec![
-                u16::from_le_bytes([b[0], b[1]]),
-                u16::from_le_bytes([b[2], b[3]]),
-                u16::from_le_bytes([b[4], b[5]]),
-                u16::from_le_bytes([b[6], b[7]]),
-            ]
-        }
-        DataValue::UInt64(v) => {
-            let b = v.to_le_bytes();
-            vec![
-                u16::from_le_bytes([b[0], b[1]]),
-                u16::from_le_bytes([b[2], b[3]]),
-                u16::from_le_bytes([b[4], b[5]]),
-                u16::from_le_bytes([b[6], b[7]]),
-            ]
-        }
-        DataValue::Float32(v) => {
-            let b = v.to_bits().to_le_bytes();
-            vec![u16::from_le_bytes([b[0], b[1]]), u16::from_le_bytes([b[2], b[3]])]
-        }
-        DataValue::Float64(v) => {
-            let b = v.to_bits().to_le_bytes();
-            vec![
-                u16::from_le_bytes([b[0], b[1]]),
-                u16::from_le_bytes([b[2], b[3]]),
-                u16::from_le_bytes([b[4], b[5]]),
-                u16::from_le_bytes([b[6], b[7]]),
-            ]
-        }
-        DataValue::String(s) => {
-            let bytes = s.as_bytes();
-            let mut regs = Vec::with_capacity((bytes.len() + 1) / 2);
-            for chunk in bytes.chunks(2) {
-                let low = chunk.get(0).copied().unwrap_or(0);
-                let high = chunk.get(1).copied().unwrap_or(0);
-                regs.push(u16::from_le_bytes([low, high]));
-            }
-            regs
-        }
-        DataValue::Bytes(b) => {
-            let mut regs = Vec::with_capacity((b.len() + 1) / 2);
-            for chunk in b.chunks(2) {
-                let low = chunk.get(0).copied().unwrap_or(0);
-                let high = chunk.get(1).copied().unwrap_or(0);
-                regs.push(u16::from_le_bytes([low, high]));
-            }
-            regs
-        }
-        DataValue::Bool(v) if data_type == "bool" => vec![if *v { 0xff00 } else { 0 }],
-        _ => {
-            if let Some(u) = value.as_u64() {
-                vec![u as u16]
-            } else {
-                vec![0]
-            }
-        }
-    }
-}
-
-/// 将 u16 寄存器按数据类型与字节序转为 DataValue；bit_index 表示取寄存器内某一位
-fn register_to_value_ext(regs: &[u16], data_type: &str, endian: &Endianness, bit_index: Option<u8>) -> DataValue {
-    if let Some(bit) = bit_index {
-        if let Some(&r) = regs.first() {
-            return DataValue::Bool((r >> bit) & 1 != 0);
-        }
-        return DataValue::Bool(false);
-    }
-    match data_type {
-        "bool" => DataValue::Bool(regs.first().map(|&r| r != 0).unwrap_or(false)),
-        "int16" => {
-            let r = regs.first().copied().unwrap_or(0);
-            let r = if endian.swap16 { r.swap_bytes() } else { r };
-            DataValue::Int16(r as i16)
-        }
-        "uint16" => {
-            let r = regs.first().copied().unwrap_or(0);
-            DataValue::UInt16(if endian.swap16 { r.swap_bytes() } else { r })
-        }
-        "int32" | "uint32" => {
-            let v = regs_to_u32(regs, endian);
-            if data_type == "int32" {
-                DataValue::Int32(v as i32)
-            } else {
-                DataValue::UInt32(v)
-            }
-        }
-        "int64" | "uint64" => {
-            let v = regs_to_u64(regs, endian);
-            if data_type == "int64" {
-                DataValue::Int64(v as i64)
-            } else {
-                DataValue::UInt64(v)
-            }
-        }
-        "float32" => {
-            let v = regs_to_u32(regs, endian);
-            DataValue::Float32(f32::from_bits(v))
-        }
-        "float64" => {
-            let v = regs_to_u64(regs, endian);
-            DataValue::Float64(f64::from_bits(v))
-        }
-        "string" => {
-            let mut bytes: Vec<u8> = Vec::new();
-            for &r in regs {
-                bytes.push((r & 0xff) as u8);
-                bytes.push((r >> 8) as u8);
-            }
-            let s = String::from_utf8_lossy(&bytes).trim_end_matches('\0').to_string();
-            DataValue::String(s)
-        }
-        "bytes" => {
-            let mut bytes: Vec<u8> = Vec::new();
-            for &r in regs {
-                bytes.push((r & 0xff) as u8);
-                bytes.push((r >> 8) as u8);
-            }
-            DataValue::Bytes(bytes)
-        }
-        _ => DataValue::UInt16(regs.first().copied().unwrap_or(0)),
     }
 }

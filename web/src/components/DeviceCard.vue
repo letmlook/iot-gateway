@@ -70,6 +70,12 @@ function formatTime(timestamp) {
         <span class="device-plugin">{{ device.plugin_name }}</span>
         <span v-if="type === 'north'" class="device-type-badge north">{{ t('common.northApp') }}</span>
         <span v-else class="device-type-badge south">{{ t('common.southDevice') }}</span>
+        <span
+          v-if="device.connection_status && device.state === 'running'"
+          :class="['conn-badge', device.connection_status.connected === false ? 'disconnected' : 'connected']"
+        >
+          {{ device.connection_status.connected === false ? t('south.disconnected') : t('south.connected') }}
+        </span>
       </div>
     </div>
 
@@ -215,6 +221,23 @@ function formatTime(timestamp) {
 .device-type-badge.north {
   background: rgba(128, 90, 213, 0.1);
   color: var(--accent-purple);
+}
+
+.conn-badge {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 100px;
+  font-weight: 500;
+}
+
+.conn-badge.connected {
+  background: rgba(56, 161, 105, 0.15);
+  color: var(--success);
+}
+
+.conn-badge.disconnected {
+  background: rgba(229, 62, 62, 0.1);
+  color: var(--danger);
 }
 
 /* 指标区域 */

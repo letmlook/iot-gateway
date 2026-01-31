@@ -4,27 +4,26 @@
 #[cfg(feature = "ffi")]
 mod ffi;
 
+mod schema;
+mod state;
+
 use gateway_sdk::{
-    ConfigSchema, Group, GroupId, NodeId, ParamSchema, ParamType, PluginMeta, SouthPlugin, Tag,
-    TagId, TagRegexEntry, TagSchema,
+    ConfigSchema, Group, GroupId, NodeId, PluginMeta, SouthPlugin, Tag, TagId, TagSchema,
 };
+use gateway_sdk::log;
 use gateway_sdk::types::{DataValue, PluginKind};
 use gateway_sdk::{PluginConfig, PluginError, PluginResult};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use schema::{config_schema as build_config_schema, tag_schema as build_tag_schema};
+use state::{default_groups, default_tags, SimState};
+
 /// 模拟设备插件
 pub struct SimPlugin {
     /// 每个节点占用的“设备”状态（可扩展为更复杂结构）
     state: Arc<RwLock<HashMap<NodeId, SimState>>>,
-}
-
-struct SimState {
-    _config: PluginConfig,
-    /// 默认组与标签，用于 list_groups / list_tags / poll_group
-    groups: Vec<Group>,
-    tags: Vec<Tag>,
 }
 
 impl Default for SimPlugin {
@@ -38,40 +37,6 @@ impl SimPlugin {
         Self {
             state: Arc::new(RwLock::new(HashMap::new())),
         }
-    }
-
-    fn default_groups() -> Vec<Group> {
-        vec![Group {
-            id: GroupId::new(),
-            name: "default".to_string(),
-            interval_ms: 1000,
-            description: Some("默认采集组".to_string()),
-        }]
-    }
-
-    fn default_tags(group_id: GroupId) -> Vec<Tag> {
-        use gateway_sdk::TagAttr;
-        let gid = group_id;
-        vec![
-            Tag {
-                id: TagId::new(),
-                name: "temperature".to_string(),
-                address: "0".to_string(),
-                attr: TagAttr::Read,
-                data_type: Some("float64".to_string()),
-                description: Some("模拟温度".to_string()),
-                group_id: gid,
-            },
-            Tag {
-                id: TagId::new(),
-                name: "humidity".to_string(),
-                address: "1".to_string(),
-                attr: TagAttr::Read,
-                data_type: Some("float64".to_string()),
-                description: Some("模拟湿度".to_string()),
-                group_id: gid,
-            },
-        ]
     }
 }
 
@@ -91,37 +56,11 @@ impl SouthPlugin for SimPlugin {
     }
 
     fn config_schema(&self) -> Option<ConfigSchema> {
-        Some(
-            ConfigSchema::new()
-                .param(ParamSchema {
-                    name: "poll_base_ms".to_string(),
-                    description: Some("Poll base interval (ms)".to_string()),
-                    name_zh: Some("轮询基准间隔(ms)".to_string()),
-                    name_en: Some("Poll base interval (ms)".to_string()),
-                    description_zh: Some("采集轮询的基础间隔，单位毫秒".to_string()),
-                    description_en: Some("Base interval for polling, in milliseconds".to_string()),
-                    attribute: gateway_sdk::ParamAttribute::Optional,
-                    ty: ParamType::Int,
-                    default: Some(serde_json::json!(1000)),
-                    valid: None,
-                    ..Default::default()
-                })
-                .tag_regex(vec![
-                    TagRegexEntry {
-                        data_type: "float64".to_string(),
-                        regex: r"^[0-9]+$".to_string(),
-                    },
-                ]),
-        )
+        Some(build_config_schema())
     }
 
     fn tag_schema(&self) -> Option<TagSchema> {
-        Some(TagSchema {
-            data_types: Some(vec!["float64".to_string()]),
-            address_format: Some("0=temperature, 1=humidity".to_string()),
-            address_format_zh: Some("0=温度, 1=湿度".to_string()),
-            address_format_en: Some("0=temperature, 1=humidity".to_string()),
-        })
+        Some(build_tag_schema())
     }
 
     async fn validate_tag(&self, _node_id: NodeId, tag: &Tag) -> PluginResult<()> {
@@ -129,7 +68,7 @@ impl SouthPlugin for SimPlugin {
             return Err(PluginError::tag_invalid("tag name required"));
         }
         if let Some(ref dt) = tag.data_type {
-            if dt != "float64" {
+            if !dt.eq_ignore_ascii_case("float64") {
                 return Err(PluginError::tag_invalid("sim only supports float64"));
             }
         }
@@ -137,10 +76,11 @@ impl SouthPlugin for SimPlugin {
     }
 
     async fn open(&self, node_id: NodeId, config: PluginConfig) -> PluginResult<()> {
-        let groups = Self::default_groups();
+        log::info(node_id, "open sim (default groups/tags)");
+        let groups = default_groups();
         let tags = groups
             .iter()
-            .flat_map(|g| Self::default_tags(g.id))
+            .flat_map(|g| default_tags(g.id))
             .collect::<Vec<_>>();
         let mut state = self.state.write().await;
         state.insert(
@@ -155,6 +95,7 @@ impl SouthPlugin for SimPlugin {
     }
 
     async fn close(&self, node_id: NodeId) -> PluginResult<()> {
+        log::info(node_id, "close sim");
         let mut state = self.state.write().await;
         state.remove(&node_id);
         Ok(())

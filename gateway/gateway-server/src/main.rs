@@ -75,6 +75,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     match persist_load(&db_path).await {
         Ok(Some(snap)) => {
+            // 在 apply_snapshot 前填充 node_log_names，确保节点启动后首次写日志即用节点名称
+            if let Some(ref map) = node_log_names {
+                if let Ok(mut m) = map.write() {
+                    m.clear();
+                    for n in &snap.nodes {
+                        m.insert(n.id().0.to_string(), n.config.name.clone());
+                    }
+                }
+            }
             mgr.apply_snapshot(&snap).await;
             tracing::info!("loaded snapshot from {}", db_path.display());
         }

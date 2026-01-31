@@ -185,6 +185,11 @@ pub trait NorthPlugin: Send + Sync {
         Ok(())
     }
 
+    /// 北向插件连接状态（如 MQTT 与 Broker 的实际连接）。None 表示该插件无外部连接或不可用。
+    async fn connection_status(&self, _node_id: NodeId) -> Option<serde_json::Value> {
+        None
+    }
+
     // ---------- 订阅与数据 ----------
 
     /// 设置订阅：(south_node_id, group_id) 列表。

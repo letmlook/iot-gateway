@@ -35,6 +35,7 @@ const mainNavItems = [
 
 // 系统菜单项
 const systemMenuItems = [
+  { path: '/monitor/flow', labelKey: 'menu.dataFlowMetrics' },
   { path: '/settings/license', labelKey: 'menu.license' },
   { path: '/settings/logs', labelKey: 'menu.logs' },
   { path: '/settings/config', labelKey: 'menu.systemConfig' },

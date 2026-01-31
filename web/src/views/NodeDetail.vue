@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, computed, watch } from 'vue'
+import { ref, onMounted, computed, watch, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { getErrorMessage } from '../i18n'
@@ -12,6 +12,13 @@ const { t } = useI18n()
 
 const nodeId = computed(() => route.params.id)
 const isNorth = computed(() => route.path.startsWith('/north'))
+// 北向 MQTT 连接状态：connected === true 为已连接，connected === false 为断开，connected 为 null/未返回时若节点运行中则视为已连接，避免误显示断开
+const connectionStatusConnected = computed(() => {
+  const cs = node.value?.connection_status
+  if (cs?.connected === false) return false
+  if (cs?.connected === true) return true
+  return node.value?.state === 'running'
+})
 
 const node = ref(null)
 const groups = ref([])
@@ -53,6 +60,25 @@ const groupsBySouth = ref({})
 
 const dataTypes = ['Bool', 'Int8', 'Int16', 'Int32', 'Int64', 'UInt8', 'UInt16', 'UInt32', 'UInt64', 'Float32', 'Float64', 'String', 'Bytes']
 
+let connStatusTimer = null
+function startConnStatusPoll() {
+  if (connStatusTimer) return
+  if (!node.value || node.value.state !== 'running') return
+  connStatusTimer = setInterval(async () => {
+    if (!node.value) return
+    try {
+      const status = await api.nodeConnectionStatus(nodeId.value)
+      if (node.value) node.value.connection_status = status
+    } catch { /* ignore */ }
+  }, 5000)
+}
+function stopConnStatusPoll() {
+  if (connStatusTimer) {
+    clearInterval(connStatusTimer)
+    connStatusTimer = null
+  }
+}
+
 async function loadNode() {
   loading.value = true
   error.value = ''
@@ -71,6 +97,9 @@ async function loadNode() {
     error.value = t('nodeDetail.loadNodeFailed') + getErrorMessage(t, e)
   } finally {
     loading.value = false
+    if (node.value && node.value.state === 'running') {
+      startConnStatusPoll()
+    }
   }
 }
 
@@ -354,8 +383,7 @@ function getGroupName(gid) {
 }
 
 function goToGroupTags(group) {
-  activeTab.value = 'tags'
-  // 可选：前端过滤只显示该组点位，这里不过滤，仅切换 tab
+  router.push(`/south/${nodeId.value}/group/${group.id}`)
 }
 
 function openBatchTagModal() {
@@ -412,7 +440,12 @@ function getSouthGroupName(sid, gid) {
 }
 
 onMounted(loadNode)
-watch(nodeId, loadNode)
+watch(nodeId, () => { stopConnStatusPoll(); loadNode() })
+watch(node, (n) => {
+  stopConnStatusPoll()
+  if (n && isNorth.value && n.plugin_name === 'mqtt' && n.state === 'running') startConnStatusPoll()
+}, { deep: true })
+onUnmounted(stopConnStatusPoll)
 </script>
 
 <template>
@@ -426,6 +459,27 @@ watch(nodeId, loadNode)
           <el-tag size="small" type="info">{{ node.plugin_name }}</el-tag>
           <el-tag :type="node.state === 'running' ? 'success' : node.state === 'error' ? 'danger' : 'info'" size="small" effect="light">
             {{ node.state === 'running' ? t('common.running') : node.state === 'error' ? t('common.error') : t('common.stopped') }}
+          </el-tag>
+          <el-tooltip
+            v-if="node.connection_status && node.state === 'running' && node.connection_status.last_error"
+            :content="node.connection_status.last_error"
+            placement="bottom"
+          >
+            <el-tag
+              :type="connectionStatusConnected ? 'success' : 'danger'"
+              size="small"
+              effect="plain"
+            >
+              {{ connectionStatusConnected ? t('south.connected') : t('south.disconnected') }}
+            </el-tag>
+          </el-tooltip>
+          <el-tag
+            v-else-if="node.connection_status && node.state === 'running'"
+            :type="connectionStatusConnected ? 'success' : 'danger'"
+            size="small"
+            effect="plain"
+          >
+            {{ connectionStatusConnected ? t('south.connected') : t('south.disconnected') }}
           </el-tag>
         </div>
       </div>
@@ -452,8 +506,12 @@ watch(nodeId, loadNode)
           <h3>{{ t('nodeDetail.pointGroup') }}</h3>
           <el-button type="primary" size="small" :icon="Plus" @click="openGroupModal()">{{ t('nodeDetail.addGroup') }}</el-button>
         </div>
-        <el-table v-if="groups.length" :data="groups" size="small" stripe>
-          <el-table-column prop="name" :label="t('nodeDetail.groupNameLabel')" min-width="100" />
+        <el-table v-if="groups.length" :data="groups" size="small" stripe class="groups-table-clickable" @row-click="(row) => goToGroupTags(row)">
+          <el-table-column :label="t('nodeDetail.groupNameLabel')" min-width="120">
+            <template #default="{ row }">
+              <span class="group-name-link">{{ row.name }}</span>
+            </template>
+          </el-table-column>
           <el-table-column :label="t('nodeDetail.pointCount')" width="80">
             <template #default="{ row }">{{ tags.filter(t => t.group_id === row.id).length }}</template>
           </el-table-column>
@@ -463,64 +521,15 @@ watch(nodeId, loadNode)
           <el-table-column prop="description" :label="t('nodeDetail.description')" min-width="100" show-overflow-tooltip>
             <template #default="{ row }">{{ row.description || '-' }}</template>
           </el-table-column>
-          <el-table-column :label="t('nodeDetail.opLabel')" width="180" fixed="right">
+          <el-table-column :label="t('nodeDetail.opLabel')" width="160" fixed="right">
             <template #default="{ row }">
-              <el-button type="primary" link size="small" :icon="Edit" @click="openGroupModal(row)">{{ t('nodeDetail.edit') }}</el-button>
-              <el-button type="primary" link size="small" @click="goToGroupTags(row)">{{ t('nodeDetail.tagList') }}</el-button>
-              <el-button type="danger" link size="small" :icon="Delete" @click="deleteGroup(row.id)">{{ t('common.delete') }}</el-button>
+              <el-button type="primary" link size="small" :icon="Edit" @click.stop="openGroupModal(row)">{{ t('nodeDetail.edit') }}</el-button>
+              <el-button type="primary" link size="small" @click.stop="goToGroupTags(row)">{{ t('nodeDetail.tagList') }}</el-button>
+              <el-button type="danger" link size="small" :icon="Delete" @click.stop="deleteGroup(row.id)">{{ t('common.delete') }}</el-button>
             </template>
           </el-table-column>
         </el-table>
         <el-empty v-else :description="t('nodeDetail.noPointGroupHint')" />
-      </el-tab-pane>
-      <el-tab-pane v-if="!isNorth" name="tags">
-        <template #label>{{ t('nodeDetail.tagList') }} <el-tag size="small" type="info">{{ tags.length }}</el-tag></template>
-        <div class="tab-header">
-          <h3>{{ t('nodeDetail.dataTags') }}</h3>
-          <div class="header-actions">
-            <el-button size="small" :icon="RefreshRight" :loading="readingTags" :disabled="!tags.length" @click="readAllTags">{{ readingTags ? t('nodeDetail.readAllReading') : t('nodeDetail.readAll') }}</el-button>
-            <el-button size="small" :disabled="!groups.length" @click="openBatchTagModal()">{{ t('nodeDetail.batchAdd') }}</el-button>
-            <el-button type="primary" size="small" :icon="Plus" :disabled="!groups.length" @click="openTagModal()">{{ t('nodeDetail.addPoint') }}</el-button>
-          </div>
-        </div>
-        <el-alert v-if="!groups.length" type="warning" :title="t('nodeDetail.noGroupsCreateFirst')" show-icon class="mb-2" />
-        <el-table v-else-if="tags.length" :data="tags" size="small" stripe>
-          <el-table-column prop="name" :label="t('common.name')" min-width="80" />
-          <el-table-column prop="address" :label="t('nodeDetail.addressLabel')" min-width="80">
-            <template #default="{ row }"><span class="font-mono">{{ row.address || '-' }}</span></template>
-          </el-table-column>
-          <el-table-column :label="t('nodeDetail.typeLabel')" width="70">
-            <template #default="{ row }"><el-tag size="small" type="info">{{ row.data_type || '-' }}</el-tag></template>
-          </el-table-column>
-          <el-table-column :label="t('nodeDetail.attrLabel')" width="70">
-            <template #default="{ row }">{{ row.attr === 'write' ? 'Write' : row.attr === 'readwrite' ? 'RW' : 'Read' }}</template>
-          </el-table-column>
-          <el-table-column :label="t('nodeDetail.multiplierLabel')" width="50">
-            <template #default>-</template>
-          </el-table-column>
-          <el-table-column :label="t('nodeDetail.offsetLabel')" width="50">
-            <template #default>-</template>
-          </el-table-column>
-          <el-table-column :label="t('nodeDetail.precisionLabel')" width="50">
-            <template #default>-</template>
-          </el-table-column>
-          <el-table-column :label="t('nodeDetail.currentValue')" min-width="80">
-            <template #default="{ row }">
-              <span v-if="tagValues[row.id] !== undefined">{{ typeof tagValues[row.id] === 'object' ? JSON.stringify(tagValues[row.id]) : tagValues[row.id] }}</span>
-              <span v-else class="text-muted">-</span>
-            </template>
-          </el-table-column>
-          <el-table-column prop="description" :label="t('nodeDetail.description')" min-width="60" show-overflow-tooltip>
-            <template #default="{ row }">{{ row.description || '-' }}</template>
-          </el-table-column>
-          <el-table-column :label="t('nodeDetail.opLabel')" width="100" fixed="right">
-            <template #default="{ row }">
-              <el-button type="primary" link size="small" :icon="Edit" @click="openTagModal(row)">{{ t('nodeDetail.edit') }}</el-button>
-              <el-button type="danger" link size="small" :icon="Delete" @click="deleteTag(row.id)">{{ t('common.delete') }}</el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-        <el-empty v-else :description="t('nodeDetail.noTagsHint')" />
       </el-tab-pane>
       <el-tab-pane v-if="isNorth" name="subs">
         <template #label>{{ t('nodeDetail.subManage') }} <el-tag size="small" type="info">{{ subscriptions.length }}</el-tag></template>
@@ -709,6 +718,8 @@ watch(nodeId, loadNode)
 .font-mono { font-family: var(--font-mono); }
 .text-muted { color: var(--text-muted); }
 .detail-tabs { margin-top: 0.5rem; }
+.groups-table-clickable :deep(.el-table__row) { cursor: pointer; }
+.group-name-link { color: var(--el-color-primary); font-weight: 500; }
 .topic-section { padding: 0.75rem 0; border-bottom: 1px solid var(--el-border-color-lighter); }
 .topic-label { display: block; font-weight: 500; margin-bottom: 0.35rem; font-size: 0.9rem; }
 .topic-row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }

@@ -170,6 +170,23 @@ pub unsafe extern "C" fn gateway_north_plugin_on_group_data(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn gateway_north_plugin_connection_status(
+    handle: *mut c_void,
+    node_id_json: *const c_char,
+) -> *mut c_char {
+    if handle.is_null() {
+        return std::ptr::null_mut();
+    }
+    let n = ptr_from_cstr(node_id_json).unwrap_or_default();
+    let node_id: NodeId = serde_json::from_str(&n).unwrap_or_default();
+    let p = north(handle);
+    match block_on(p.connection_status(node_id)) {
+        Some(v) => alloc_c_string(&serde_json::to_string(&v).unwrap_or_default()),
+        None => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn gateway_north_plugin_config_schema(handle: *mut c_void) -> *mut c_char {
     if handle.is_null() {
         return std::ptr::null_mut();

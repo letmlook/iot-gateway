@@ -102,6 +102,8 @@ pub const SYM_NORTH_SETTING: &[u8] = b"gateway_north_plugin_setting";
 pub const SYM_NORTH_SET_SUBSCRIPTIONS: &[u8] = b"gateway_north_plugin_set_subscriptions";
 pub const SYM_NORTH_ON_GROUP_DATA: &[u8] = b"gateway_north_plugin_on_group_data";
 pub const SYM_NORTH_CONFIG_SCHEMA: &[u8] = b"gateway_north_plugin_config_schema";
+/// 可选：北向插件实现此符号后，宿主可查询连接状态；传入 (handle, node_id_json)，返回 JSON 如 {"connected":true,"last_error":null} 或 null 表示无状态。
+pub const SYM_NORTH_CONNECTION_STATUS: &[u8] = b"gateway_north_plugin_connection_status";
 /// 可选：北向插件实现此符号后，宿主在每次 open 成功后调用，传入 (handle, node_id_json, log_callback)，插件可据此按节点打日志。
 pub const SYM_NORTH_SET_LOG: &[u8] = b"gateway_north_plugin_set_log";
 

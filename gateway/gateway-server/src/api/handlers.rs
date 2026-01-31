@@ -5,12 +5,13 @@ use axum::extract::{Multipart, Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
-use gateway_sdk::{Group, GroupSubscription, NodeId, NodeKind, PluginConfig, PluginInfo, Tag};
+use gateway_sdk::{Group, NodeKind, NodeState, NodeId, PluginConfig, PluginInfo, Tag, GroupSubscription};
 use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::api::ApiError;
 use crate::backup;
+use crate::logging;
 use crate::state::AppState;
 
 fn parse_node_id(s: &str) -> Result<NodeId, ApiError> {
@@ -544,11 +545,12 @@ pub async fn restore(
         )));
     }
     state.manager.apply_snapshot(&snap).await;
+    state.sync_node_log_names();
     state.persist().await;
     Ok(Json(serde_json::json!({ "ok": true, "message": "restored" })))
 }
 
-/// Prometheus 格式指标（节点数、运行数、插件数等）
+/// Prometheus 格式指标（节点数、运行数、插件数、数据流链路等）
 pub async fn metrics(State(state): State<AppState>) -> (axum::http::StatusCode, String) {
     use axum::http::StatusCode;
     let nodes = state.manager.nodes_list();
@@ -561,6 +563,7 @@ pub async fn metrics(State(state): State<AppState>) -> (axum::http::StatusCode, 
         state.manager.south_plugins().len() as u64,
         state.manager.north_plugins().len() as u64,
     );
+    let df = state.manager.data_flow_snapshot();
     let body = format!(
         "# HELP gateway_nodes_total Total number of nodes.\n\
          # TYPE gateway_nodes_total gauge\n\
@@ -573,10 +576,95 @@ pub async fn metrics(State(state): State<AppState>) -> (axum::http::StatusCode, 
          gateway_plugins_south {}\n\
          # HELP gateway_plugins_north North plugin count.\n\
          # TYPE gateway_plugins_north gauge\n\
-         gateway_plugins_north {}\n",
-        nodes_total, nodes_running, plugins_south, plugins_north
+         gateway_plugins_north {}\n\
+         # HELP gateway_data_flow_south_published GroupData published by south to bus.\n\
+         # TYPE gateway_data_flow_south_published counter\n\
+         gateway_data_flow_south_published {}\n\
+         # HELP gateway_data_flow_bus_no_subscribers Times publish had no north subscribers.\n\
+         # TYPE gateway_data_flow_bus_no_subscribers counter\n\
+         gateway_data_flow_bus_no_subscribers {}\n\
+         # HELP gateway_data_flow_north_received Messages received by north from bus.\n\
+         # TYPE gateway_data_flow_north_received counter\n\
+         gateway_data_flow_north_received {}\n\
+         # HELP gateway_data_flow_north_filtered Messages filtered out by subscription table.\n\
+         # TYPE gateway_data_flow_north_filtered counter\n\
+         gateway_data_flow_north_filtered {}\n\
+         # HELP gateway_data_flow_north_forwarded Messages passed to on_group_data.\n\
+         # TYPE gateway_data_flow_north_forwarded counter\n\
+         gateway_data_flow_north_forwarded {}\n\
+         # HELP gateway_data_flow_north_on_group_data_ok on_group_data returned Ok.\n\
+         # TYPE gateway_data_flow_north_on_group_data_ok counter\n\
+         gateway_data_flow_north_on_group_data_ok {}\n\
+         # HELP gateway_data_flow_north_on_group_data_err on_group_data returned Err.\n\
+         # TYPE gateway_data_flow_north_on_group_data_err counter\n\
+         gateway_data_flow_north_on_group_data_err {}\n\
+         # HELP gateway_data_flow_north_lagged Total messages skipped due to lag.\n\
+         # TYPE gateway_data_flow_north_lagged counter\n\
+         gateway_data_flow_north_lagged {}\n",
+        nodes_total, nodes_running, plugins_south, plugins_north,
+        df.south_published, df.bus_no_subscribers, df.north_received, df.north_filtered,
+        df.north_forwarded, df.north_on_group_data_ok, df.north_on_group_data_err, df.north_lagged,
     );
     (StatusCode::OK, body)
+}
+
+/// 数据流链路监控：返回各环节计数与点位级统计，用于排查「数据未正常发出」问题
+pub async fn data_flow(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let m = state.manager.data_flow_snapshot();
+    let published_per_tag: Vec<serde_json::Value> = m.published_per_tag.iter().map(|s| {
+        let tag = state.manager.store.tag_get(s.tag_id);
+        let south_node = state.manager.node_get(s.south_node_id);
+        let group = state.manager.store.group_get(s.south_node_id, s.group_id);
+        serde_json::json!({
+            "south_node_id": s.south_node_id,
+            "south_node_name": south_node.as_ref().map(|n| &n.config.name),
+            "group_id": s.group_id,
+            "group_name": group.as_ref().map(|g| &g.name),
+            "tag_id": s.tag_id,
+            "tag_name": tag.as_ref().map(|t| &t.name),
+            "count": s.count,
+        })
+    }).collect();
+    let forwarded_per_tag: Vec<serde_json::Value> = m.forwarded_per_tag.iter().map(|s| {
+        let tag = state.manager.store.tag_get(s.tag_id);
+        let north_node = state.manager.node_get(s.north_node_id);
+        let south_node = state.manager.node_get(s.south_node_id);
+        let group = state.manager.store.group_get(s.south_node_id, s.group_id);
+        serde_json::json!({
+            "north_node_id": s.north_node_id,
+            "north_node_name": north_node.as_ref().map(|n| &n.config.name),
+            "south_node_id": s.south_node_id,
+            "south_node_name": south_node.as_ref().map(|n| &n.config.name),
+            "group_id": s.group_id,
+            "group_name": group.as_ref().map(|g| &g.name),
+            "tag_id": s.tag_id,
+            "tag_name": tag.as_ref().map(|t| &t.name),
+            "count": s.count,
+        })
+    }).collect();
+    Json(serde_json::json!({
+        "metrics": {
+            "south_published": m.south_published,
+            "bus_no_subscribers": m.bus_no_subscribers,
+            "north_received": m.north_received,
+            "north_filtered": m.north_filtered,
+            "north_forwarded": m.north_forwarded,
+            "north_on_group_data_ok": m.north_on_group_data_ok,
+            "north_on_group_data_err": m.north_on_group_data_err,
+            "north_lagged": m.north_lagged,
+        },
+        "per_tag": {
+            "published": published_per_tag,
+            "forwarded": forwarded_per_tag,
+        },
+        "flow": "南向 poll_group -> bus.publish -> 北向 recv -> 订阅过滤 -> on_group_data",
+        "troubleshoot": {
+            "bus_no_subscribers > 0": "南向有数据但无北向订阅者（北向未启动或未订阅该南向组）",
+            "north_filtered 高": "北向收到数据但被订阅表过滤（检查北向订阅的 south_node_id/group_id）",
+            "north_on_group_data_err > 0": "北向插件 on_group_data 执行失败（查北向节点日志）",
+            "north_lagged > 0": "北向消费慢，跳过了部分消息（考虑增加采集间隔或优化北向）",
+        },
+    }))
 }
 
 // ---------- Plugins ----------
@@ -673,8 +761,30 @@ pub struct CreateNodeReq {
     pub config: PluginConfig,
 }
 
-pub async fn list_nodes(State(state): State<AppState>) -> Json<Vec<gateway_core::Node>> {
-    Json(state.manager.nodes_list())
+pub async fn list_nodes(State(state): State<AppState>) -> Json<Vec<serde_json::Value>> {
+    let nodes = state.manager.nodes_list();
+    let mut result = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let mut j = serde_json::to_value(&node).unwrap_or(serde_json::json!({}));
+        if let Some(obj) = j.as_object_mut() {
+            if node.kind() == NodeKind::North {
+                if let Some(plugin) = state.manager.north_plugin(&node.config.plugin_name) {
+                    if let Some(conn) = plugin.connection_status(node.id()).await {
+                        obj.insert("connection_status".to_string(), conn);
+                    }
+                }
+            } else if node.kind() == NodeKind::South && node.state == NodeState::Running {
+                if let Some(conn) = state.manager.south_connection_status(node.id()).await {
+                    obj.insert(
+                        "connection_status".to_string(),
+                        serde_json::to_value(&conn).unwrap_or(serde_json::json!({ "connected": conn.connected, "last_error": conn.last_error })),
+                    );
+                }
+            }
+        }
+        result.push(j);
+    }
+    Json(result)
 }
 
 pub async fn create_node(
@@ -701,10 +811,27 @@ pub async fn create_node(
 pub async fn get_node(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<gateway_core::Node>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let nid = parse_node_id(&id)?;
     let node = state.manager.node_get(nid).ok_or_else(|| ApiError::not_found("node not found"))?;
-    Ok(Json(node))
+    let mut j = serde_json::to_value(&node).map_err(|e| ApiError::internal(e.to_string()))?;
+    if let Some(obj) = j.as_object_mut() {
+        if node.kind() == NodeKind::North {
+            if let Some(plugin) = state.manager.north_plugin(&node.config.plugin_name) {
+                if let Some(conn) = plugin.connection_status(nid).await {
+                    obj.insert("connection_status".to_string(), conn);
+                }
+            }
+        } else if node.kind() == NodeKind::South && node.state == NodeState::Running {
+            if let Some(conn) = state.manager.south_connection_status(nid).await {
+                obj.insert(
+                    "connection_status".to_string(),
+                    serde_json::to_value(&conn).unwrap_or(serde_json::json!({ "connected": conn.connected, "last_error": conn.last_error })),
+                );
+            }
+        }
+    }
+    Ok(Json(j))
 }
 
 #[derive(Deserialize)]
@@ -740,6 +867,9 @@ pub async fn delete_node(
 ) -> Result<StatusCode, ApiError> {
     let nid = parse_node_id(&id)?;
     state.manager.node_remove(nid).await;
+    if let Some(ref dir) = state.config.log_dir_nodes {
+        logging::remove_node_log_file(dir.as_ref(), &id, state.node_log_names.as_ref());
+    }
     state.sync_node_log_names();
     state.persist().await;
     Ok(StatusCode::NO_CONTENT)
@@ -763,6 +893,30 @@ pub async fn stop_node(
     state.manager.node_stop(nid).await.map_err(ApiError::bad_request)?;
     state.persist().await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// 获取节点连接状态。北向由插件上报（如 MQTT）；南向由最近一次采集结果推断（成功为已连接，失败为异常）。
+pub async fn get_node_connection_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let nid = parse_node_id(&id)?;
+    let node = state.manager.node_get(nid).ok_or_else(|| ApiError::not_found("node not found"))?;
+    if node.kind() == NodeKind::South {
+        let conn = state.manager.south_connection_status(nid).await;
+        let v = conn
+            .map(|c| serde_json::to_value(&c).unwrap_or(serde_json::json!({ "connected": c.connected, "last_error": c.last_error })))
+            .unwrap_or_else(|| serde_json::json!({ "connected": false, "last_error": null }));
+        return Ok(Json(v));
+    }
+    let plugin = state
+        .manager
+        .north_plugin(&node.config.plugin_name)
+        .ok_or_else(|| ApiError::not_found("plugin not found"))?;
+    match plugin.connection_status(nid).await {
+        Some(v) => Ok(Json(v)),
+        None => Ok(Json(serde_json::json!({ "connected": null, "last_error": null }))),
+    }
 }
 
 // ---------- Groups ----------
@@ -837,7 +991,7 @@ pub async fn remove_group(
     let nid = parse_node_id(&id)?;
     ensure_node_south(&state, nid)?;
     let g = parse_group_id(&gid)?;
-    state.manager.group_remove(nid, g).ok_or_else(|| ApiError::not_found("group not found"))?;
+    state.manager.group_remove(nid, g).await.ok_or_else(|| ApiError::not_found("group not found"))?;
     state.persist().await;
     Ok(StatusCode::NO_CONTENT)
 }

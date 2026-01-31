@@ -1,5 +1,5 @@
 //! 日志初始化：主程序级别、文件输出、按节点分文件。
-//! 节点日志文件名按节点名称生成（通过 node_log_names 映射），未命中时回退为 node_id。
+//! 节点日志文件名一律用节点名称（通过 node_log_names 映射），未命中时用 unnamed-{id 前 8 位}，绝不用完整 node_id。
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -66,13 +66,56 @@ fn sanitize_log_filename(name: &str) -> String {
         .collect()
 }
 
+/// 根据 node_id 与可选的节点名得到日志文件名 base（与 NodeFileLayer 一致）
+fn filename_base_for_node(node_id: &str, name_from_map: Option<&str>) -> String {
+    let name = name_from_map.map(String::from).unwrap_or_else(|| {
+        let short: String = node_id.chars().take(8).collect();
+        if short.is_empty() {
+            "unnamed".to_string()
+        } else {
+            format!("unnamed-{}", short)
+        }
+    });
+    sanitize_log_filename(&name)
+}
+
 /// 节点 ID -> 日志文件名（节点名称）的共享映射
 pub type NodeLogNameMap = Arc<RwLock<HashMap<String, String>>>;
 
-/// 按 node_id 将事件写入对应节点日志文件的 Layer；文件名优先用 node_log_names 中的节点名
+/// 返回某节点对应的日志文件路径（用于删除节点时删文件）。须在 sync_node_log_names 前调用，以便能从映射拿到节点名。
+pub fn node_log_file_path(
+    log_dir: &std::path::Path,
+    node_id: &str,
+    node_log_names: Option<&NodeLogNameMap>,
+) -> PathBuf {
+    let name: Option<String> = node_log_names
+        .and_then(|m| m.read().ok())
+        .and_then(|m| m.get(node_id).cloned());
+    let base = filename_base_for_node(node_id, name.as_deref());
+    log_dir.join(format!("{}.log", base))
+}
+
+/// 删除节点对应的日志文件（节点删除时调用）。忽略删除失败（如文件已不存在或仍被占用）。
+pub fn remove_node_log_file(
+    log_dir: &std::path::Path,
+    node_id: &str,
+    node_log_names: Option<&NodeLogNameMap>,
+) {
+    let path = node_log_file_path(log_dir, node_id, node_log_names);
+    if path.exists() {
+        if let Err(e) = std::fs::remove_file(&path) {
+            tracing::warn!(path = %path.display(), "remove node log file failed: {}", e);
+        }
+    }
+}
+
+/// 缓存条目：(当前使用的文件名 base, 文件句柄)
+type WriterCache = HashMap<String, (String, std::fs::File)>;
+
+/// 按 node_id 将事件写入对应节点日志文件的 Layer；文件名统一用 node_log_names 中的节点名
 struct NodeFileLayer {
     dir: PathBuf,
-    writers: Mutex<HashMap<String, std::fs::File>>,
+    writers: Mutex<WriterCache>,
     node_log_names: Option<NodeLogNameMap>,
 }
 
@@ -86,29 +129,33 @@ impl NodeFileLayer {
         }
     }
 
+    /// 日志文件名一律用节点名称；未命中映射时用 unnamed-{id 前 8 位}，绝不用完整 node_id。
     fn filename_base_for(&self, node_id: &str) -> String {
-        let name = self
+        let name: Option<String> = self
             .node_log_names
             .as_ref()
             .and_then(|m| m.read().ok())
-            .and_then(|m| m.get(node_id).cloned())
-            .unwrap_or_else(|| node_id.to_string());
-        sanitize_log_filename(&name)
+            .and_then(|m| m.get(node_id).cloned());
+        filename_base_for_node(node_id, name.as_deref())
     }
 
     fn writer_for(&self, node_id: &str) -> std::io::Result<std::fs::File> {
-        let mut map = self.writers.lock().unwrap();
-        if let Some(f) = map.get_mut(node_id) {
-            return f.try_clone();
-        }
         let base = self.filename_base_for(node_id);
+        let mut map = self.writers.lock().unwrap();
+        if let Some((cached_base, f)) = map.get_mut(node_id) {
+            if *cached_base == base {
+                return f.try_clone();
+            }
+            // 节点重命名，移除旧条目，使用新文件名
+            map.remove(node_id);
+        }
         let path = self.dir.join(format!("{}.log", base));
         let f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)?;
         let out = f.try_clone()?;
-        map.insert(node_id.to_string(), f);
+        map.insert(node_id.to_string(), (base, f));
         Ok(out)
     }
 }

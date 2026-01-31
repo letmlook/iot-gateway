@@ -378,6 +378,8 @@ struct NorthSoAdapter {
     set_subscriptions: StrStrFn,
     on_group_data: StrStrFn,
     config_schema: VoidFn,
+    /// 可选：插件实现 connection_status 时返回连接状态 JSON
+    connection_status: Option<StrFn>,
     set_log: Option<SetLogFn>,
     cached_meta: std::sync::OnceLock<PluginMeta>,
 }
@@ -573,6 +575,22 @@ impl NorthPlugin for NorthSoAdapter {
         })
         .map_err(gateway_sdk::PluginError::msg)
     }
+
+    async fn connection_status(&self, node_id: NodeId) -> Option<serde_json::Value> {
+        let conn_fn = self.connection_status?;
+        let n = serde_json::to_string(&node_id).ok()?;
+        let free_fn = self.free_string;
+        let json_opt = self.run_sync(move |handle| {
+            let n_c = cstr(&n);
+            let ptr = unsafe { conn_fn(handle, n_c.as_ptr()) };
+            let s = unsafe { gateway_sdk::ptr_to_string(ptr) };
+            if !ptr.is_null() {
+                unsafe { free_fn(ptr) };
+            }
+            Ok(s)
+        }).ok()??;
+        serde_json::from_str(&json_opt).ok()
+    }
 }
 
 impl Drop for NorthSoAdapter {
@@ -708,6 +726,7 @@ impl PluginLoader {
         let on_group_data: StrStrFn =
             *unsafe { lib.get(SYM_NORTH_ON_GROUP_DATA).map_err(|e| e.to_string())? };
         let config_schema: VoidFn = *unsafe { lib.get(SYM_NORTH_CONFIG_SCHEMA).map_err(|e| e.to_string())? };
+        let connection_status: Option<StrFn> = unsafe { lib.get(SYM_NORTH_CONNECTION_STATUS).ok().map(|s| *s) };
         let set_log: Option<SetLogFn> = unsafe { lib.get(SYM_NORTH_SET_LOG).ok().map(|s| *s) };
 
         Ok(NorthSoAdapter {
@@ -725,6 +744,7 @@ impl PluginLoader {
             set_subscriptions,
             on_group_data,
             config_schema,
+            connection_status,
             set_log,
             cached_meta: std::sync::OnceLock::new(),
         })

@@ -12,6 +12,15 @@ pub struct GroupData {
     pub ts: DateTime<Utc>,
     /// (tag_id, value)
     pub values: Vec<(TagId, DataValue)>,
+    /// 南向节点名称，用于北向 topic/上报字段（不把 id 放到 topic 和字段中）
+    #[serde(default)]
+    pub node_name: Option<String>,
+    /// 南向组名称
+    #[serde(default)]
+    pub group_name: Option<String>,
+    /// tag_id -> 点位名称，用于北向 values/tags 的 key
+    #[serde(default)]
+    pub tag_names: Option<std::collections::HashMap<TagId, String>>,
 }
 
 /// 北向对南向某 Group 的订阅

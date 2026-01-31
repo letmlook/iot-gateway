@@ -235,7 +235,12 @@ onMounted(loadNodes)
           </el-table-column>
           <el-table-column :label="t('south.connState')" width="100">
             <template #default="{ row }">
-              <span :class="['conn-status', row.state === 'running' ? 'online' : 'offline']">
+              <el-tooltip v-if="row.connection_status && row.state === 'running' && row.connection_status.last_error" :content="row.connection_status.last_error" placement="top">
+                <span :class="['conn-status', row.connection_status.connected === false ? 'offline' : 'online']">
+                  {{ row.connection_status.connected === false ? t('south.disconnected') : t('south.connected') }}
+                </span>
+              </el-tooltip>
+              <span v-else :class="['conn-status', row.state === 'running' ? 'online' : 'offline']">
                 {{ row.state === 'running' ? t('south.connected') : t('south.disconnected') }}
               </span>
             </template>

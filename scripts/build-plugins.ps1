@@ -1,6 +1,7 @@
 # 构建 sim/mqtt/modbus/opcua 插件 .dll 并复制到 plugins/
 # Windows 下使用此脚本（Linux/macOS 使用 build-plugins-so.sh）
 # OPC UA 完整功能需：cargo build -p plugin-opcua --features "ffi,opcua-client"
+# 注意：复制前请先停止网关进程，否则 dll 被占用无法覆盖
 
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot\..

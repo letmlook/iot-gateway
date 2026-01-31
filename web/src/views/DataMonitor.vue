@@ -247,6 +247,9 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
     <div class="page-header">
       <div class="header-content">
         <h1 class="page-title">{{ t('monitor.title') }}</h1>
+        <el-button link type="primary" size="small" @click="$router.push('/monitor/flow')" class="flow-link">
+          {{ t('dataFlow.title') }} →
+        </el-button>
         <span v-if="lastUpdateTime" class="update-time">
           {{ t('monitor.updateTime') }} {{ lastUpdateTime.toLocaleTimeString() }}
         </span>
@@ -406,6 +409,10 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
   align-items: center;
   gap: 1rem;
   flex-wrap: wrap;
+}
+
+.flow-link {
+  font-size: 0.85rem;
 }
 
 .page-title {

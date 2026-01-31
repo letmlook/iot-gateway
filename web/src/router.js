@@ -43,6 +43,12 @@ const routes = [
     meta: { title: '设备配置', kind: 'south' }
   },
   {
+    path: '/south/:id/group/:groupId',
+    name: 'SouthGroupDetail',
+    component: () => import('./views/GroupDetail.vue'),
+    meta: { title: '数据组', kind: 'south' }
+  },
+  {
     path: '/north',
     name: 'NorthApps',
     component: () => import('./views/NorthApps.vue'),
@@ -71,6 +77,12 @@ const routes = [
     name: 'DataMonitor',
     component: () => import('./views/DataMonitor.vue'),
     meta: { title: '数据监控' }
+  },
+  {
+    path: '/monitor/flow',
+    name: 'DataFlowMetrics',
+    component: () => import('./views/DataFlowMetrics.vue'),
+    meta: { title: '数据流指标' }
   },
   {
     path: '/plugins',

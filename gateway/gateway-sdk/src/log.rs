@@ -1,7 +1,7 @@
 //! 节点日志：主程序与插件中按节点打印日志，由网关统一收集并按节点分文件输出。
 //!
 //! - **主程序 / 内置插件**：直接调用 `node_log::info(node_id, "msg")` 等，使用 tracing 发出事件，
-//!   网关的 NodeFileLayer 会按 node_id 写入对应 `{node_id}.log`。
+//!   网关的 NodeFileLayer 会按**节点名称**写入对应 `{节点名称}.log`（未配置名称时用 unnamed-xxx）。
 //! - **.so 插件**：在 `open` 后通过可选符号 `gateway_south_plugin_set_log` / `gateway_north_plugin_set_log`
 //!   接收宿主传入的日志回调，在插件内调用该回调打印节点日志。
 
@@ -33,7 +33,7 @@ impl From<NodeLogLevel> for Level {
 }
 
 /// 按节点记录一条日志（主程序或内置插件使用）。
-/// 事件带 `node_id` 和 `message` 字段，网关的 NodeFileLayer 会写入 `{log_dir_nodes}/{node_id}.log`。
+/// 事件带 `node_id` 和 `message` 字段，网关的 NodeFileLayer 会按节点名称写入 `{log_dir_nodes}/{节点名称}.log`。
 #[inline]
 pub fn node_log(level: NodeLogLevel, node_id: NodeId, message: impl Display) {
     let node_id_str = node_id.0.to_string();

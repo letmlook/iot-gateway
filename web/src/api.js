@@ -98,6 +98,7 @@ export const api = {
   version: () => req('GET', '/version'),
   hardwareInfo: () => req('GET', '/hardware'),
   metrics: () => fetch(`${BASE}/metrics`).then(r => r.text()),
+  dataFlow: () => req('GET', '/data-flow'),
   backup: (password) =>
     fetch(`${BASE}/backup`, {
       method: 'POST',
@@ -138,6 +139,7 @@ export const api = {
   // 节点操作
   startNode: (id) => req('POST', `/nodes/${id}/start`),
   stopNode: (id) => req('POST', `/nodes/${id}/stop`),
+  nodeConnectionStatus: (id) => req('GET', `/nodes/${id}/connection-status`),
   nodeSetting: (id) => req('GET', `/nodes/${id}/setting`),
   updateNodeSetting: (id, config) => req('PUT', `/nodes/${id}/setting`, config),
 

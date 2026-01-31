@@ -38,7 +38,7 @@ async fn auth_middleware(
         .trim_start_matches("/api")
         .trim_start_matches('/')
         .trim_end_matches('/');
-    if path == "health" || path == "metrics" || path == "version"
+    if path == "health" || path == "metrics" || path == "version" || path == "data-flow"
         || path == "license/machine-id" || path == "license/status"
         || path == "auth/login" || path == "login"
     {
@@ -68,6 +68,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/auth/login", post(handlers::login))
         .route("/health", get(handlers::health))
         .route("/metrics", get(handlers::metrics))
+        .route("/data-flow", get(handlers::data_flow))
         .route("/version", get(handlers::version))
         .route("/license/machine-id", get(handlers::license_machine_id))
         .route("/license/status", get(handlers::license_status))
@@ -91,6 +92,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         )
         .route("/nodes/:id/start", post(handlers::start_node))
         .route("/nodes/:id/stop", post(handlers::stop_node))
+        .route("/nodes/:id/connection-status", get(handlers::get_node_connection_status))
         .route("/nodes/:id/groups", get(handlers::list_groups).post(handlers::add_group))
         .route(
             "/nodes/:id/groups/:gid",

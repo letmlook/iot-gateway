@@ -2,67 +2,34 @@
 //!
 //! 功能：QoS 0/1/2、主题模板（变量替换）、TLS/SSL、离线内存缓存与恢复补发、
 //! 上传格式（group_data / tags_format）、retain、keep_alive、cache_sync_interval。
+//! 事件循环在独立 OS 线程中运行，保证以 .so/.dll 加载时 open() 返回后仍能建连；以 .so 部署时修改代码后需重新构建插件并重启网关。
 
 #[cfg(feature = "ffi")]
 mod ffi;
 
-use gateway_sdk::schema::{ConfigSchema, ParamAttribute, ParamOption, ParamSchema, ParamType, ParamValid};
-use gateway_sdk::{
-    GroupData, GroupId, GroupSubscription, NodeId, NorthPlugin, PluginConfig, PluginMeta,
+mod config;
+mod format;
+mod state;
+
+use config::{
+    config_bool, config_schema, config_str, config_u16, config_usize,
+    DEFAULT_CACHE_MEMORY_SIZE, DEFAULT_CACHE_SYNC_INTERVAL_MS, DEFAULT_HOST, DEFAULT_KEEP_ALIVE_SECS,
+    DEFAULT_PORT, DEFAULT_TOPIC_TEMPLATE, DEFAULT_QOS, UPLOAD_FORMAT_VALUES_FORMAT,
 };
-use gateway_sdk::types::{PluginKind, TagId};
+use format::{payload_for_format, topic_from_template};
+use gateway_sdk::log;
+use gateway_sdk::{GroupData, GroupSubscription, NodeId, NorthPlugin, PluginConfig, PluginMeta};
+use gateway_sdk::types::PluginKind;
 use gateway_sdk::PluginResult;
-use std::collections::{HashMap, VecDeque};
+use state::{MqttConnectionStatus, MqttState, NodeMqttState, PublishQos};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use tracing::warn;
-
-const DEFAULT_HOST: &str = "broker.emqx.io";
-const DEFAULT_PORT: u16 = 1883;
-const DEFAULT_TOPIC_TEMPLATE: &str = "gateway/data/${node_id}/${group_id}";
-const DEFAULT_CACHE_MEMORY_SIZE: usize = 1000;
-const DEFAULT_KEEP_ALIVE_SECS: u64 = 30;
-const DEFAULT_CACHE_SYNC_INTERVAL_MS: u64 = 100;
-const DEFAULT_QOS: u8 = 1;
-const UPLOAD_FORMAT_GROUP_DATA: &str = "group_data";
-const UPLOAD_FORMAT_TAGS_FORMAT: &str = "tags_format";
 
 /// 北向 MQTT 插件
 pub struct MqttPlugin {
     state: Arc<RwLock<MqttState>>,
-}
-
-struct MqttState {
-    open_nodes: std::collections::HashSet<NodeId>,
-    subscriptions: HashMap<NodeId, Vec<GroupSubscription>>,
-    /// node_id -> 该节点的 MQTT 客户端与缓存
-    nodes: HashMap<NodeId, NodeMqttState>,
-}
-
-/// 发布时使用的 QoS（0/1/2）
-#[derive(Clone, Copy)]
-struct PublishQos(u8);
-
-#[cfg(feature = "mqtt-client")]
-struct NodeMqttState {
-    client: rumqttc::AsyncClient,
-    cache: Arc<RwLock<VecDeque<(String, Vec<u8>)>>>,
-    cache_max: usize,
-    topic_template: String,
-    qos: PublishQos,
-    retain: bool,
-    upload_format: String,
-}
-
-#[cfg(not(feature = "mqtt-client"))]
-struct NodeMqttState {
-    cache: Arc<RwLock<VecDeque<(String, Vec<u8>)>>>,
-    cache_max: usize,
-    topic_template: String,
-    qos: PublishQos,
-    retain: bool,
-    upload_format: String,
 }
 
 impl Default for MqttPlugin {
@@ -83,354 +50,29 @@ impl MqttPlugin {
     }
 }
 
-fn config_str(config: &PluginConfig, key: &str, default: &str) -> String {
-    config
-        .get(key)
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .unwrap_or_else(|| default.to_string())
-}
-
-fn config_u16(config: &PluginConfig, key: &str, default: u16) -> u16 {
-    config
-        .get(key)
-        .and_then(|v| v.as_u64())
-        .map(|n| n as u16)
-        .unwrap_or(default)
-}
-
-fn config_usize(config: &PluginConfig, key: &str, default: usize) -> usize {
-    config
-        .get(key)
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize)
-        .unwrap_or(default)
-}
-
-fn config_bool(config: &PluginConfig, key: &str, default: bool) -> bool {
-    config
-        .get(key)
-        .and_then(|v| v.as_bool())
-        .unwrap_or(default)
-}
-
-/// 从主题模板生成主题。支持变量：${node_id} ${group_id} ${timestamp}
-fn topic_from_template(template: &str, node_id: NodeId, group_id: GroupId, ts: chrono::DateTime<chrono::Utc>) -> String {
-    let node_id_s = node_id.0.to_string();
-    let group_id_s = group_id.0.to_string();
-    let timestamp_s = ts.to_rfc3339();
-    template
-        .replace("${node_id}", &node_id_s)
-        .replace("${group_id}", &group_id_s)
-        .replace("${timestamp}", &timestamp_s)
-}
-
-/// 按上传格式生成 payload：group_data = 完整 GroupData JSON；tags_format = { node_id, group_id, ts, tags: [{ tag_id, value }] }
-fn payload_for_format(data: &GroupData, upload_format: &str) -> Vec<u8> {
-    if upload_format == UPLOAD_FORMAT_TAGS_FORMAT {
-        #[derive(serde::Serialize)]
-        struct TagsFormatPayload<'a> {
-            node_id: NodeId,
-            group_id: GroupId,
-            ts: chrono::DateTime<chrono::Utc>,
-            tags: Vec<(TagId, &'a gateway_sdk::types::DataValue)>,
-        }
-        let payload = TagsFormatPayload {
-            node_id: data.node_id,
-            group_id: data.group_id,
-            ts: data.ts,
-            tags: data.values.iter().map(|(id, v)| (*id, v)).collect(),
-        };
-        serde_json::to_vec(&payload).unwrap_or_default()
-    } else {
-        serde_json::to_vec(data).unwrap_or_default()
-    }
-}
-
-impl PublishQos {
-    #[cfg(feature = "mqtt-client")]
-    fn to_rumqttc(self) -> rumqttc::QoS {
-        use rumqttc::QoS;
-        match self.0 {
-            0 => QoS::AtMostOnce,
-            2 => QoS::ExactlyOnce,
-            _ => QoS::AtLeastOnce,
-        }
-    }
-}
-
 #[async_trait::async_trait]
 impl NorthPlugin for MqttPlugin {
     fn meta(&self) -> PluginMeta {
         PluginMeta {
             name: "mqtt",
             kind: PluginKind::North,
-            description: Some("MQTT 北向：QoS 0/1/2、主题模板、TLS、离线缓存与恢复补发、上传格式 group_data/tags_format"),
+            description: Some("MQTT 北向：QoS 0/1/2、主题模板、TLS、离线缓存；上报格式兼容 NeuronEX values/tags/ecp 及 group_data/raw_data"),
             version: "0.2.0",
             name_zh: Some("MQTT"),
             name_en: Some("MQTT"),
-            description_zh: Some("MQTT 北向：QoS 0/1/2、主题模板、TLS、离线缓存与恢复补发、上传格式 group_data/tags_format"),
-            description_en: Some("MQTT north app: QoS 0/1/2, topic template, TLS, offline cache and replay, upload format group_data/tags_format"),
+            description_zh: Some("MQTT 北向：QoS 0/1/2、主题模板、TLS、离线缓存；上报格式兼容 NeuronEX values/tags/ecp 及 group_data/raw_data"),
+            description_en: Some("MQTT north: QoS 0/1/2, topic template, TLS, offline cache; upload formats aligned with NeuronEX values/tags/ecp, group_data, raw_data"),
         }
     }
 
-    fn config_schema(&self) -> Option<ConfigSchema> {
-        Some(
-            ConfigSchema::new()
-                .param(ParamSchema {
-                    name: "host".to_string(),
-                    name_zh: Some("服务器地址".to_string()),
-                    name_en: Some("Broker Host".to_string()),
-                    description: Some("MQTT Broker IP or hostname".to_string()),
-                    description_zh: Some("MQTT Broker IP 或域名".to_string()),
-                    description_en: Some("MQTT Broker IP or hostname".to_string()),
-                    attribute: ParamAttribute::Optional,
-                    ty: ParamType::String,
-                    default: Some(serde_json::json!(DEFAULT_HOST)),
-                    valid: Some(ParamValid { min: None, max: None, regex: None, length: Some(255) }),
-                    ..Default::default()
-                })
-                .param(ParamSchema {
-                    name: "port".to_string(),
-                    name_zh: Some("服务器端口".to_string()),
-                    name_en: Some("Broker Port".to_string()),
-                    description: Some("Broker port, typically 1883 or 8883 for TLS".to_string()),
-                    description_zh: Some("Broker 端口，TLS 通常为 8883".to_string()),
-                    description_en: Some("Broker port, typically 1883 or 8883 for TLS".to_string()),
-                    attribute: ParamAttribute::Optional,
-                    ty: ParamType::Int,
-                    default: Some(serde_json::json!(DEFAULT_PORT)),
-                    valid: Some(ParamValid { min: Some(1), max: Some(65535), regex: None, length: None }),
-                    ..Default::default()
-                })
-                .param(ParamSchema {
-                    name: "client_id".to_string(),
-                    name_zh: Some("客户端 ID".to_string()),
-                    name_en: Some("Client ID".to_string()),
-                    description: Some("MQTT client ID, auto-generated if empty".to_string()),
-                    description_zh: Some("MQTT 客户端 ID，不填则自动生成".to_string()),
-                    description_en: Some("MQTT client ID, auto-generated if empty".to_string()),
-                    attribute: ParamAttribute::Optional,
-                    ty: ParamType::String,
-                    default: None,
-                    valid: Some(ParamValid { min: None, max: None, regex: None, length: Some(255) }),
-                    ..Default::default()
-                })
-                .param(ParamSchema {
-                    name: "topic_template".to_string(),
-                    name_zh: Some("主题模板".to_string()),
-                    name_en: Some("Topic template".to_string()),
-                    description: Some("Publish topic template, variables: ${node_id} ${group_id} ${timestamp}".to_string()),
-                    description_zh: Some("发布主题模板，支持变量：${node_id} ${group_id} ${timestamp}".to_string()),
-                    description_en: Some("Publish topic template, variables: ${node_id} ${group_id} ${timestamp}".to_string()),
-                    attribute: ParamAttribute::Optional,
-                    ty: ParamType::String,
-                    default: Some(serde_json::json!(DEFAULT_TOPIC_TEMPLATE)),
-                    valid: Some(ParamValid { min: None, max: None, regex: None, length: Some(255) }),
-                    ..Default::default()
-                })
-                .param(ParamSchema {
-                    name: "qos".to_string(),
-                    name_zh: Some("QoS 等级".to_string()),
-                    name_en: Some("QoS Level".to_string()),
-                    description: Some("MQTT QoS level for message delivery".to_string()),
-                    description_zh: Some("MQTT 消息传输使用的服务质量等级".to_string()),
-                    description_en: Some("MQTT QoS level for message delivery".to_string()),
-                    attribute: ParamAttribute::Optional,
-                    ty: ParamType::Select,
-                    default: Some(serde_json::json!(DEFAULT_QOS)),
-                    valid: None,
-                    options: Some(vec![
-                        ParamOption {
-                            value: serde_json::json!(0),
-                            label: Some("QoS 0".to_string()),
-                            label_zh: Some("QoS 0".to_string()),
-                            label_en: Some("QoS 0".to_string()),
-                        },
-                        ParamOption {
-                            value: serde_json::json!(1),
-                            label: Some("QoS 1".to_string()),
-                            label_zh: Some("QoS 1".to_string()),
-                            label_en: Some("QoS 1".to_string()),
-                        },
-                        ParamOption {
-                            value: serde_json::json!(2),
-                            label: Some("QoS 2".to_string()),
-                            label_zh: Some("QoS 2".to_string()),
-                            label_en: Some("QoS 2".to_string()),
-                        },
-                    ]),
-                    ..Default::default()
-                })
-                .param(ParamSchema {
-                    name: "retain".to_string(),
-                    name_zh: Some("保留消息".to_string()),
-                    name_en: Some("Retain".to_string()),
-                    description: Some("Whether to set message as retained".to_string()),
-                    description_zh: Some("是否将消息设为保留（retain）".to_string()),
-                    description_en: Some("Whether to set message as retained".to_string()),
-                    attribute: ParamAttribute::Optional,
-                    ty: ParamType::Bool,
-                    default: Some(serde_json::json!(false)),
-                    valid: None,
-                    ..Default::default()
-                })
-                .param(ParamSchema {
-                    name: "upload_format".to_string(),
-                    name_zh: Some("上报数据格式".to_string()),
-                    name_en: Some("Upload Format".to_string()),
-                    description: Some("JSON format of the data reported. In GroupData format, full group data is sent. In Tags-format, tag data are in a single array.".to_string()),
-                    description_zh: Some("上报数据的 JSON 格式。GroupData 格式发送完整组数据；Tags-format 下数据放在一个数组中。".to_string()),
-                    description_en: Some("JSON format of the data reported. In GroupData format, full group data is sent. In Tags-format, tag data are in a single array.".to_string()),
-                    attribute: ParamAttribute::Optional,
-                    ty: ParamType::Select,
-                    default: Some(serde_json::json!(UPLOAD_FORMAT_GROUP_DATA)),
-                    valid: None,
-                    options: Some(vec![
-                        ParamOption {
-                            value: serde_json::json!(UPLOAD_FORMAT_GROUP_DATA),
-                            label: Some("GroupData".to_string()),
-                            label_zh: Some("完整 GroupData".to_string()),
-                            label_en: Some("Full GroupData".to_string()),
-                        },
-                        ParamOption {
-                            value: serde_json::json!(UPLOAD_FORMAT_TAGS_FORMAT),
-                            label: Some("Tags Format".to_string()),
-                            label_zh: Some("Tags 数组".to_string()),
-                            label_en: Some("Tags array".to_string()),
-                        },
-                    ]),
-                    ..Default::default()
-                })
-                .param(ParamSchema {
-                    name: "keep_alive_secs".to_string(),
-                    name_zh: Some("保活时间(秒)".to_string()),
-                    name_en: Some("Keep alive (sec)".to_string()),
-                    description: Some("MQTT Keep Alive interval in seconds".to_string()),
-                    description_zh: Some("MQTT Keep Alive 间隔，单位秒".to_string()),
-                    description_en: Some("MQTT Keep Alive interval in seconds".to_string()),
-                    attribute: ParamAttribute::Optional,
-                    ty: ParamType::Int,
-                    default: Some(serde_json::json!(DEFAULT_KEEP_ALIVE_SECS as i64)),
-                    valid: None,
-                    ..Default::default()
-                })
-                .param(ParamSchema {
-                    name: "username".to_string(),
-                    name_zh: Some("用户名".to_string()),
-                    name_en: Some("Username".to_string()),
-                    description: Some("Broker username for authentication".to_string()),
-                    description_zh: Some("Broker 认证用户名，可选".to_string()),
-                    description_en: Some("Broker username for authentication".to_string()),
-                    attribute: ParamAttribute::Optional,
-                    ty: ParamType::String,
-                    default: None,
-                    valid: Some(ParamValid { min: None, max: None, regex: None, length: Some(255) }),
-                    ..Default::default()
-                })
-                .param(ParamSchema {
-                    name: "password".to_string(),
-                    name_zh: Some("密码".to_string()),
-                    name_en: Some("Password".to_string()),
-                    description: Some("Broker password for authentication".to_string()),
-                    description_zh: Some("Broker 认证密码，可选".to_string()),
-                    description_en: Some("Broker password for authentication".to_string()),
-                    attribute: ParamAttribute::Optional,
-                    ty: ParamType::String,
-                    default: None,
-                    valid: Some(ParamValid { min: None, max: None, regex: None, length: Some(255) }),
-                    ..Default::default()
-                })
-                .param(ParamSchema {
-                    name: "cache_memory_size".to_string(),
-                    name_zh: Some("缓存内存大小".to_string()),
-                    name_en: Some("Cache Memory Size".to_string()),
-                    description: Some("Max in-memory cache size (message count) when MQTT connection exception occurs.".to_string()),
-                    description_zh: Some("当 MQTT 连接异常时，最大的内存缓存条数。".to_string()),
-                    description_en: Some("Max in-memory cache size (message count) when MQTT connection exception occurs.".to_string()),
-                    attribute: ParamAttribute::Optional,
-                    ty: ParamType::Int,
-                    default: Some(serde_json::json!(DEFAULT_CACHE_MEMORY_SIZE)),
-                    valid: None,
-                    ..Default::default()
-                })
-                .param(ParamSchema {
-                    name: "cache_sync_interval_ms".to_string(),
-                    name_zh: Some("缓存消息重传间隔（MS）".to_string()),
-                    name_en: Some("Cache Sync Interval (MS)".to_string()),
-                    description: Some("Interval in milliseconds for replaying cached messages after reconnect.".to_string()),
-                    description_zh: Some("恢复连接后补发缓存消息的时间间隔，单位毫秒".to_string()),
-                    description_en: Some("Interval in milliseconds for replaying cached messages after reconnect.".to_string()),
-                    attribute: ParamAttribute::Optional,
-                    ty: ParamType::Int,
-                    default: Some(serde_json::json!(DEFAULT_CACHE_SYNC_INTERVAL_MS as i64)),
-                    valid: Some(ParamValid { min: Some(10), max: Some(120_000), regex: None, length: None }),
-                    ..Default::default()
-                })
-                .param(ParamSchema {
-                    name: "ssl".to_string(),
-                    name_zh: Some("SSL".to_string()),
-                    name_en: Some("SSL".to_string()),
-                    description: Some("Enable SSL connection".to_string()),
-                    description_zh: Some("是否启用 SSL 连接".to_string()),
-                    description_en: Some("Enable SSL connection".to_string()),
-                    attribute: ParamAttribute::Optional,
-                    ty: ParamType::Bool,
-                    default: Some(serde_json::json!(false)),
-                    valid: None,
-                    ..Default::default()
-                })
-                .param(ParamSchema {
-                    name: "ca_file".to_string(),
-                    name_zh: Some("CA 证书".to_string()),
-                    name_en: Some("CA".to_string()),
-                    description: Some("CA certificate which signs the server certificate".to_string()),
-                    description_zh: Some("签发服务器证书的 CA 证书".to_string()),
-                    description_en: Some("CA certificate which signs the server certificate".to_string()),
-                    attribute: ParamAttribute::Optional,
-                    ty: ParamType::File,
-                    default: None,
-                    valid: None,
-                    depends_on: Some("ssl".to_string()),
-                    depends_value: Some(serde_json::json!(true)),
-                    ..Default::default()
-                })
-                .param(ParamSchema {
-                    name: "client_cert_file".to_string(),
-                    name_zh: Some("客户端证书".to_string()),
-                    name_en: Some("Client Cert".to_string()),
-                    description: Some("Client x509 certificate when using two way authentication".to_string()),
-                    description_zh: Some("使用双向认证时，客户端的 x509 证书".to_string()),
-                    description_en: Some("Client x509 certificate when using two way authentication".to_string()),
-                    attribute: ParamAttribute::Optional,
-                    ty: ParamType::File,
-                    default: None,
-                    valid: None,
-                    depends_on: Some("ssl".to_string()),
-                    depends_value: Some(serde_json::json!(true)),
-                    ..Default::default()
-                })
-                .param(ParamSchema {
-                    name: "client_key_file".to_string(),
-                    name_zh: Some("客户端私钥".to_string()),
-                    name_en: Some("Client Private Key".to_string()),
-                    description: Some("Client private key when using two way authentication".to_string()),
-                    description_zh: Some("使用双向认证时，客户端的私钥".to_string()),
-                    description_en: Some("Client private key when using two way authentication".to_string()),
-                    attribute: ParamAttribute::Optional,
-                    ty: ParamType::File,
-                    default: None,
-                    valid: None,
-                    depends_on: Some("ssl".to_string()),
-                    depends_value: Some(serde_json::json!(true)),
-                    ..Default::default()
-                }),
-        )
+    fn config_schema(&self) -> Option<gateway_sdk::ConfigSchema> {
+        Some(config_schema())
     }
 
     async fn open(&self, node_id: NodeId, config: PluginConfig) -> PluginResult<()> {
         let host = config_str(&config, "host", DEFAULT_HOST);
         let port = config_u16(&config, "port", DEFAULT_PORT);
+        log::info(node_id, format!("open mqtt: {}:{}, connecting...", host, port));
         let client_id = config_str(
             &config,
             "client_id",
@@ -446,7 +88,7 @@ impl NorthPlugin for MqttPlugin {
         let qos_u8 = config.get("qos").and_then(|v| v.as_u64()).map(|n| n as u8).unwrap_or(DEFAULT_QOS);
         let qos = PublishQos(qos_u8.min(2));
         let retain = config_bool(&config, "retain", false);
-        let upload_format = config_str(&config, "upload_format", UPLOAD_FORMAT_GROUP_DATA);
+        let upload_format = config_str(&config, "upload_format", UPLOAD_FORMAT_VALUES_FORMAT);
         let keep_alive_secs = config.get("keep_alive_secs").and_then(|v| v.as_u64()).unwrap_or(DEFAULT_KEEP_ALIVE_SECS);
         let cache_memory_size = config_usize(&config, "cache_memory_size", DEFAULT_CACHE_MEMORY_SIZE);
         let cache_sync_interval_ms = config.get("cache_sync_interval_ms").and_then(|v| v.as_u64()).unwrap_or(DEFAULT_CACHE_SYNC_INTERVAL_MS);
@@ -490,23 +132,49 @@ impl NorthPlugin for MqttPlugin {
             }
             let cap = (cache_memory_size + 32).min(65535);
             let (client, eventloop) = AsyncClient::new(mqttoptions, cap);
-            let cache = Arc::new(RwLock::new(VecDeque::new()));
+            let cache = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+            let connection_status = Arc::new(RwLock::new(MqttConnectionStatus::default()));
+            let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
             let cache_clone = cache.clone();
+            let conn_status_clone = connection_status.clone();
             let client_clone = client.clone();
             let sync_interval = cache_sync_interval_ms;
-            tokio::spawn(async move {
-                run_event_loop(client_clone, eventloop, cache_clone, cache_memory_size, qos, retain, sync_interval).await;
+            let node_id_loop = node_id;
+            let host_loop = host.clone();
+            let port_loop = port;
+            let handle = std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("mqtt event loop runtime");
+                rt.block_on(run_event_loop(
+                    node_id_loop,
+                    host_loop,
+                    port_loop,
+                    client_clone,
+                    eventloop,
+                    cache_clone,
+                    conn_status_clone,
+                    cache_memory_size,
+                    qos,
+                    retain,
+                    sync_interval,
+                    cancel_rx,
+                ));
             });
             state.nodes.insert(
                 node_id,
                 NodeMqttState {
                     client,
                     cache,
+                    connection_status,
                     cache_max: cache_memory_size,
                     topic_template,
                     qos,
                     retain,
                     upload_format,
+                    cancel_tx: Some(cancel_tx),
+                    event_loop_handle: Some(handle),
                 },
             );
         }
@@ -517,7 +185,8 @@ impl NorthPlugin for MqttPlugin {
             state.nodes.insert(
                 node_id,
                 NodeMqttState {
-                    cache: Arc::new(RwLock::new(VecDeque::new())),
+                    cache: Arc::new(RwLock::new(std::collections::VecDeque::new())),
+                    connection_status: Arc::new(RwLock::new(MqttConnectionStatus::default())),
                     cache_max: cache_memory_size,
                     topic_template,
                     qos,
@@ -531,15 +200,54 @@ impl NorthPlugin for MqttPlugin {
     }
 
     async fn close(&self, node_id: NodeId) -> PluginResult<()> {
-        let mut state = self.state.write().await;
-        state.open_nodes.remove(&node_id);
-        state.subscriptions.remove(&node_id);
-        state.nodes.remove(&node_id);
+        log::info(node_id, "close mqtt, disconnecting");
+        #[cfg(feature = "mqtt-client")]
+        {
+            let (client_opt, cancel_tx, handle_opt) = {
+                let mut state = self.state.write().await;
+                state.open_nodes.remove(&node_id);
+                state.subscriptions.remove(&node_id);
+                let node_state = state.nodes.remove(&node_id);
+                node_state.map(|ns| (Some(ns.client), ns.cancel_tx, ns.event_loop_handle)).unwrap_or((None, None, None))
+            };
+            if let Some(client) = client_opt {
+                let _ = client.disconnect().await;
+            }
+            if let Some(tx) = cancel_tx {
+                let _ = tx.send(());
+            }
+            if let Some(h) = handle_opt {
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    tokio::task::spawn_blocking(move || {
+                        let _ = h.join();
+                    }),
+                )
+                .await;
+            }
+        }
+        #[cfg(not(feature = "mqtt-client"))]
+        {
+            let mut state = self.state.write().await;
+            state.open_nodes.remove(&node_id);
+            state.subscriptions.remove(&node_id);
+            state.nodes.remove(&node_id);
+        }
         Ok(())
     }
 
-    /// 用户修改插件配置时：关闭当前连接并用新配置重新 open，使 QoS/主题模板/TLS 等生效。
+    async fn start(&self, node_id: NodeId) -> PluginResult<()> {
+        log::info(node_id, "start mqtt");
+        Ok(())
+    }
+
+    async fn stop(&self, node_id: NodeId) -> PluginResult<()> {
+        log::info(node_id, "stop mqtt");
+        Ok(())
+    }
+
     async fn setting(&self, node_id: NodeId, config: PluginConfig) -> PluginResult<()> {
+        log::info(node_id, "setting mqtt, reconnecting with new config");
         self.close(node_id).await?;
         self.open(node_id, config).await
     }
@@ -549,6 +257,7 @@ impl NorthPlugin for MqttPlugin {
         node_id: NodeId,
         subscriptions: &[GroupSubscription],
     ) -> PluginResult<()> {
+        log::info(node_id, format!("set_subscriptions: {} group(s)", subscriptions.len()));
         let mut state = self.state.write().await;
         state
             .subscriptions
@@ -556,15 +265,28 @@ impl NorthPlugin for MqttPlugin {
         Ok(())
     }
 
+    async fn connection_status(&self, node_id: NodeId) -> Option<serde_json::Value> {
+        let state = self.state.read().await;
+        let node_state = state.nodes.get(&node_id)?;
+        let st = node_state.connection_status.read().await;
+        Some(serde_json::json!({
+            "connected": st.connected,
+            "last_error": st.last_error,
+        }))
+    }
+
     async fn on_group_data(&self, node_id: NodeId, data: Arc<GroupData>) -> PluginResult<()> {
         let state = self.state.read().await;
         let Some(node_state) = state.nodes.get(&node_id) else {
+            log::warn(node_id, "on_group_data: north node not open (no MQTT client), skip publish");
             return Ok(());
         };
         let topic = topic_from_template(
             &node_state.topic_template,
             data.node_id,
             data.group_id,
+            data.node_name.as_deref(),
+            data.group_name.as_deref(),
             data.ts,
         );
         let payload = payload_for_format(&data, &node_state.upload_format);
@@ -575,7 +297,7 @@ impl NorthPlugin for MqttPlugin {
             match node_state.client.publish(&topic, qos, node_state.retain, payload.clone()).await {
                 Ok(()) => {}
                 Err(e) => {
-                    warn!(node_id = ?node_id, topic = %topic, "mqtt publish failed, enqueue cache: {}", e);
+                    log::warn(node_id, format!("mqtt publish failed, enqueue cache: {} (topic={})", e, topic));
                     let mut cache = node_state.cache.write().await;
                     if cache.len() < node_state.cache_max {
                         cache.push_back((topic, payload));
@@ -596,42 +318,75 @@ impl NorthPlugin for MqttPlugin {
 
 #[cfg(feature = "mqtt-client")]
 async fn run_event_loop(
+    node_id: NodeId,
+    host: String,
+    port: u16,
     client: rumqttc::AsyncClient,
     mut eventloop: rumqttc::EventLoop,
-    cache: Arc<RwLock<VecDeque<(String, Vec<u8>)>>>,
+    cache: Arc<RwLock<std::collections::VecDeque<(String, Vec<u8>)>>>,
+    connection_status: Arc<RwLock<MqttConnectionStatus>>,
     _cache_max: usize,
     qos: PublishQos,
     retain: bool,
     cache_sync_interval_ms: u64,
+    mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
+    use rumqttc::mqttbytes::v4::ConnectReturnCode;
     use rumqttc::{Event, Packet};
+    let addr = format!("{}:{}", host, port);
+    log::info(node_id, format!("mqtt event loop 已启动, 正在连接 broker={}", addr));
     let qos_r = qos.to_rumqttc();
     let interval = Duration::from_millis(cache_sync_interval_ms.max(10));
     loop {
-        match eventloop.poll().await {
-            Ok(Event::Incoming(Packet::ConnAck(_))) => {
-                loop {
-                    let (topic, payload) = {
-                        let mut c = cache.write().await;
-                        match c.pop_front() {
-                            Some(t) => t,
-                            None => break,
+        tokio::select! {
+            _ = &mut cancel_rx => {
+                log::info(node_id, format!("mqtt event loop 已退出 (close), broker={}", addr));
+                break;
+            }
+            ev = eventloop.poll() => {
+                match ev {
+                    Ok(Event::Incoming(Packet::ConnAck(ack))) => {
+                        if ack.code == ConnectReturnCode::Success {
+                            log::info(node_id, format!("mqtt 连接成功: broker={}", addr));
+                            let mut st = connection_status.write().await;
+                            st.connected = true;
+                            st.last_error = None;
+                        } else {
+                            let err_msg = format!("mqtt 连接失败: broker={}, 拒绝原因: {:?}", addr, ack.code);
+                            log::warn(node_id, err_msg.as_str());
+                            let mut st = connection_status.write().await;
+                            st.connected = false;
+                            st.last_error = Some(err_msg.clone());
                         }
-                    };
-                    let p = payload.clone();
-                    if let Err(e) = client.publish(&topic, qos_r, retain, p).await {
-                        warn!(topic = %topic, "cache drain publish failed: {}", e);
-                        let mut c = cache.write().await;
-                        c.push_front((topic, payload));
-                        break;
+                        loop {
+                            let (topic, payload) = {
+                                let mut c = cache.write().await;
+                                match c.pop_front() {
+                                    Some(t) => t,
+                                    None => break,
+                                }
+                            };
+                            let p = payload.clone();
+                            if let Err(e) = client.publish(&topic, qos_r, retain, p).await {
+                                log::warn(node_id, format!("cache drain publish failed: {} (topic={})", e, topic));
+                                let mut c = cache.write().await;
+                                c.push_front((topic, payload));
+                                break;
+                            }
+                            tokio::time::sleep(interval).await;
+                        }
                     }
-                    tokio::time::sleep(interval).await;
+                    Err(e) => {
+                        let err_msg = e.to_string();
+                        log::warn(node_id, format!("mqtt 连接断开: broker={}, 错误: {}, 5s 后重连", addr, err_msg));
+                        let mut st = connection_status.write().await;
+                        st.connected = false;
+                        st.last_error = Some(err_msg);
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                    _ => {}
                 }
             }
-            Err(e) => {
-                warn!("mqtt event loop error: {}", e);
-            }
-            _ => {}
         }
     }
 }

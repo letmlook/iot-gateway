@@ -56,6 +56,23 @@ function getSubCount(nodeId) {
   return subscriptionCounts.value[nodeId] ?? 0
 }
 
+// MQTT 等北向节点：使用实际连接状态；connected 为 null/未返回且运行中时视为已连接，避免误显示断开
+function getConnStatusClass(row) {
+  if (row.plugin_name === 'mqtt' && row.connection_status && row.state === 'running') {
+    const connected = row.connection_status.connected
+    return connected === false ? 'offline error' : 'online'
+  }
+  return row.state === 'running' ? 'online' : 'offline'
+}
+
+function getConnStatusText(row) {
+  if (row.plugin_name === 'mqtt' && row.connection_status && row.state === 'running') {
+    const connected = row.connection_status.connected
+    return connected === false ? t('south.disconnected') : t('south.connected')
+  }
+  return row.state === 'running' ? t('south.connected') : t('south.disconnected')
+}
+
 async function loadNodes() {
   loading.value = true
   error.value = ''
@@ -229,10 +246,19 @@ onMounted(loadNodes)
               <StatusIndicator :status="row.state" size="small" />
             </template>
           </el-table-column>
-          <el-table-column :label="t('south.connState')" width="100">
+          <el-table-column :label="t('south.connState')" width="120">
             <template #default="{ row }">
-              <span :class="['conn-status', row.state === 'running' ? 'online' : 'offline']">
-                {{ row.state === 'running' ? t('south.connected') : t('south.disconnected') }}
+              <el-tooltip
+                v-if="row.connection_status?.last_error"
+                :content="row.connection_status.last_error"
+                placement="top"
+              >
+                <span :class="['conn-status', getConnStatusClass(row)]">
+                  {{ getConnStatusText(row) }}
+                </span>
+              </el-tooltip>
+              <span v-else :class="['conn-status', getConnStatusClass(row)]">
+                {{ getConnStatusText(row) }}
               </span>
             </template>
           </el-table-column>
@@ -410,6 +436,10 @@ onMounted(loadNodes)
 
 .conn-status.offline {
   color: var(--text-muted);
+}
+
+.conn-status.offline.error {
+  color: var(--danger);
 }
 
 .sub-count {
