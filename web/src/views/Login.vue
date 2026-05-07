@@ -4,7 +4,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { api } from '../api.js'
 import { ElMessage } from 'element-plus'
-import { initTheme } from '../themes.js'
+import { initMode } from '../themes.js'
 import logBg from '../assets/logbg.png'
 
 const { t } = useI18n()
@@ -15,7 +15,7 @@ const password = ref('')
 const loading = ref(false)
 
 onMounted(() => {
-  initTheme()
+  initMode()
 })
 
 async function onSubmit() {
