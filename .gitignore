@@ -20,6 +20,9 @@ logs/
 .DS_Store
 Thumbs.db
 
+# Superpowers brainstorming artifacts
+.superpowers/
+
 # IDE
 .idea/
 *.swp
