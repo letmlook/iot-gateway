@@ -6,6 +6,7 @@ import { getErrorMessage } from '../i18n'
 import { ElMessage } from 'element-plus'
 import { VideoPlay, VideoPause, Refresh, Search } from '@element-plus/icons-vue'
 import { api } from '../api.js'
+import PageHeader from '../components/PageHeader.vue'
 import StatusIndicator from '../components/StatusIndicator.vue'
 
 const route = useRoute()
@@ -243,18 +244,16 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 
 <template>
   <div class="monitor-page">
-    <!-- 页面头部 -->
-    <div class="page-header">
-      <div class="header-content">
-        <h1 class="page-title">{{ t('monitor.title') }}</h1>
-        <el-button link type="primary" size="small" @click="$router.push('/monitor/flow')" class="flow-link">
-          {{ t('dataFlow.title') }} →
-        </el-button>
+    <PageHeader :title="t('monitor.title')">
+      <template #actions>
         <span v-if="lastUpdateTime" class="update-time">
           {{ t('monitor.updateTime') }} {{ lastUpdateTime.toLocaleTimeString() }}
         </span>
-      </div>
-    </div>
+        <el-button link type="primary" size="small" @click="$router.push('/monitor/flow')" class="flow-link">
+          {{ t('dataFlow.title') }} →
+        </el-button>
+      </template>
+    </PageHeader>
 
     <el-alert v-if="error" type="error" :title="error" closable show-icon @close="error = ''" class="mb-4" />
 
@@ -394,32 +393,8 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 
 .mb-4 { margin-bottom: 1.5rem; }
 
-/* 页面头部 */
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 1.25rem;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-}
-
-.header-content {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  flex-wrap: wrap;
-}
-
 .flow-link {
   font-size: 0.85rem;
-}
-
-.page-title {
-  font-size: 1.5rem;
-  font-weight: 700;
-  color: var(--text-primary);
-  margin: 0;
 }
 
 .update-time {

@@ -6,6 +6,7 @@ import { getErrorMessage } from '../i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Back, Plus, Edit, Delete, RefreshRight } from '@element-plus/icons-vue'
 import { api } from '../api.js'
+import PageHeader from '../components/PageHeader.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -160,15 +161,14 @@ onMounted(load)
 
 <template>
   <div class="group-detail">
-    <div class="page-header">
-      <div class="header-left">
-        <el-button :icon="Back" @click="goBack">{{ t('nodeDetail.cancelBack') }}</el-button>
-        <el-breadcrumb separator="/" class="breadcrumb">
-          <el-breadcrumb-item :to="{ path: '/south' }">{{ t('south.title') }}</el-breadcrumb-item>
-          <el-breadcrumb-item :to="{ path: `/south/${nodeId}` }">{{ node?.name || nodeId }}</el-breadcrumb-item>
-          <el-breadcrumb-item>{{ group?.name || groupId }}</el-breadcrumb-item>
-        </el-breadcrumb>
-      </div>
+    <PageHeader :title="group?.name || groupId" />
+    <div class="detail-meta">
+      <el-button :icon="Back" @click="goBack">{{ t('nodeDetail.cancelBack') }}</el-button>
+      <el-breadcrumb separator="/" class="breadcrumb">
+        <el-breadcrumb-item :to="{ path: '/south' }">{{ t('south.title') }}</el-breadcrumb-item>
+        <el-breadcrumb-item :to="{ path: `/south/${nodeId}` }">{{ node?.name || nodeId }}</el-breadcrumb-item>
+        <el-breadcrumb-item>{{ group?.name || groupId }}</el-breadcrumb-item>
+      </el-breadcrumb>
     </div>
 
     <el-alert v-if="error" type="error" :title="error" closable show-icon @close="error = ''" class="mb-2" />
@@ -307,16 +307,11 @@ onMounted(load)
 .group-detail {
   padding: 16px;
 }
-.page-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 16px;
-}
-.header-left {
+.detail-meta {
   display: flex;
   align-items: center;
   gap: 12px;
+  margin-bottom: 16px;
 }
 .breadcrumb {
   font-size: 14px;

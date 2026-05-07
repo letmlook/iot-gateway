@@ -6,6 +6,7 @@ import { getErrorMessage } from '../i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Grid, List, Search, Refresh } from '@element-plus/icons-vue'
 import { api } from '../api.js'
+import PageHeader from '../components/PageHeader.vue'
 import StatusIndicator from '../components/StatusIndicator.vue'
 import DeviceCard from '../components/DeviceCard.vue'
 
@@ -146,26 +147,22 @@ onMounted(loadNodes)
 
 <template>
   <div class="north-page">
-    <!-- 页面头部 -->
-    <div class="page-header">
-      <div class="header-content">
-        <h1 class="page-title">{{ t('north.title') }}</h1>
-        <div class="header-stats">
-          <span class="stat-chip">
-            <span class="stat-dot running"></span>
-            {{ runningCount }} {{ t('common.running') }}
-          </span>
-          <span v-if="errorCount > 0" class="stat-chip error">
-            <span class="stat-dot error"></span>
-            {{ errorCount }} {{ t('common.error') }}
-          </span>
-        </div>
-      </div>
-      <div class="header-actions">
+    <PageHeader :title="t('north.title')">
+      <template #actions>
         <el-button type="primary" :icon="Plus" @click="goToCreate">
           {{ t('north.addApp') }}
         </el-button>
-      </div>
+      </template>
+    </PageHeader>
+    <div class="header-stats">
+      <span class="stat-chip">
+        <span class="stat-dot running"></span>
+        {{ runningCount }} {{ t('common.running') }}
+      </span>
+      <span v-if="errorCount > 0" class="stat-chip error">
+        <span class="stat-dot error"></span>
+        {{ errorCount }} {{ t('common.error') }}
+      </span>
     </div>
 
     <!-- 工具栏 -->
@@ -313,29 +310,6 @@ onMounted(loadNodes)
 }
 
 .mb-4 { margin-bottom: 1.5rem; }
-
-/* 页面头部 */
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 1.25rem;
-  gap: 1rem;
-  flex-wrap: wrap;
-}
-
-.header-content {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-
-.page-title {
-  font-size: 1.5rem;
-  font-weight: 700;
-  color: var(--text-primary);
-  margin: 0;
-}
 
 .header-stats {
   display: flex;

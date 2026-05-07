@@ -6,6 +6,7 @@ import { getErrorMessage } from '../i18n'
 import { ElMessage } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import { api } from '../api.js'
+import PageHeader from '../components/PageHeader.vue'
 
 const router = useRouter()
 const { t } = useI18n()
@@ -81,17 +82,16 @@ onMounted(loadData)
 
 <template>
   <div class="page-container">
-    <div class="page-header plugins-header">
-      <h2 class="page-title">{{ t('plugins.title') }}</h2>
-      <div class="header-toolbar">
+    <PageHeader :title="t('plugins.title')">
+      <template #actions>
         <el-select v-model="activeTab" style="width: 120px" class="mr-1">
           <el-option :label="t('plugins.southPlugins')" value="south" />
           <el-option :label="t('plugins.northPlugins')" value="north" />
         </el-select>
         <el-input v-model="pluginSearch" :placeholder="t('plugins.searchPlaceholder')" clearable style="width: 200px" class="mr-1" />
         <el-button type="primary" :icon="Plus" @click="goAddPlugin">{{ t('plugins.addPlugin') }}</el-button>
-      </div>
-    </div>
+      </template>
+    </PageHeader>
 
     <el-alert v-if="error" type="error" :title="error" closable show-icon @close="error = ''" class="mb-2" />
 
@@ -285,22 +285,6 @@ onMounted(loadData)
 .mb-2 { margin-bottom: 1rem; }
 .ml-1 { margin-left: 0.25rem; }
 .mr-1 { margin-right: 0.5rem; }
-
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 1.25rem;
-  flex-wrap: wrap;
-  gap: 1rem;
-}
-
-.page-title {
-  font-size: 1.5rem;
-  font-weight: 700;
-  color: var(--text-primary);
-  margin: 0;
-}
 
 .header-toolbar {
   display: flex;

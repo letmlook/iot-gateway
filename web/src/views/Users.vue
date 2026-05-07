@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { getErrorMessage } from '../i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '../api.js'
+import PageHeader from '../components/PageHeader.vue'
 
 const { t } = useI18n()
 
@@ -156,10 +157,7 @@ onMounted(loadUsers)
 
 <template>
   <div class="page-container users-page">
-    <div class="page-header">
-      <h2 class="page-title">{{ t('users.title') }}</h2>
-      <p class="page-desc">{{ t('users.desc') }}</p>
-    </div>
+    <PageHeader :title="t('users.title')" :subtitle="t('users.desc')" />
 
     <el-alert v-if="error" type="error" :title="error" show-icon class="mb-2" />
 

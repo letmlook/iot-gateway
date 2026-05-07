@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { getErrorMessage } from '../i18n'
 import { Link } from '@element-plus/icons-vue'
 import { api } from '../api.js'
+import PageHeader from '../components/PageHeader.vue'
 
 const { t } = useI18n()
 
@@ -76,6 +77,7 @@ onMounted(loadSystemInfo)
 
 <template>
   <div class="page-container sysinfo-page">
+    <PageHeader :title="t('sysInfo.title')" />
     <div class="sysinfo-body">
       <el-alert v-if="error" type="error" :title="error" closable show-icon @close="error = ''" class="mb-2" />
 

@@ -5,6 +5,7 @@ import { useI18n } from 'vue-i18n'
 import { getErrorMessage } from '../i18n'
 import { Connection, Upload, Cpu, Monitor, Setting, TrendCharts, Warning } from '@element-plus/icons-vue'
 import { api } from '../api.js'
+import PageHeader from '../components/PageHeader.vue'
 import StatusIndicator from '../components/StatusIndicator.vue'
 
 const router = useRouter()
@@ -78,18 +79,13 @@ onMounted(loadData)
 
 <template>
   <div class="dashboard-page">
-    <!-- 页面标题 -->
-    <div class="page-header">
-      <div class="header-content">
-        <h1 class="page-title">{{ t('dashboard.title') }}</h1>
-        <p class="page-desc">{{ t('dashboard.desc') }}</p>
-      </div>
-      <div class="header-actions">
+    <PageHeader :title="t('dashboard.title')" :subtitle="t('dashboard.desc')">
+      <template #actions>
         <el-button type="primary" @click="loadData" :loading="loading">
           {{ t('common.refresh') }}
         </el-button>
-      </div>
-    </div>
+      </template>
+    </PageHeader>
 
     <el-alert v-if="error" type="error" :title="error" closable show-icon @close="error = ''" class="mb-4" />
 
@@ -287,28 +283,6 @@ onMounted(loadData)
 }
 
 .mb-4 { margin-bottom: 1.5rem; }
-
-/* 页面头部 */
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 1.5rem;
-  gap: 1rem;
-}
-
-.page-title {
-  font-size: 1.5rem;
-  font-weight: 700;
-  color: var(--text-primary);
-  margin: 0 0 0.25rem;
-}
-
-.page-desc {
-  color: var(--text-secondary);
-  font-size: 0.9rem;
-  margin: 0;
-}
 
 /* 统计卡片网格 */
 .stats-grid {

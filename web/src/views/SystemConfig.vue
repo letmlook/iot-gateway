@@ -5,6 +5,7 @@ import { getErrorMessage } from '../i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Download, Upload } from '@element-plus/icons-vue'
 import { api } from '../api.js'
+import PageHeader from '../components/PageHeader.vue'
 
 const { t } = useI18n()
 
@@ -75,6 +76,7 @@ async function doRestore() {
 
 <template>
   <div class="page-container sysconfig-page">
+    <PageHeader :title="t('sysConfig.title')" />
     <div class="sysconfig-body">
       <el-alert v-if="error" type="error" :title="error" closable show-icon @close="error = ''" class="mb-2" />
 

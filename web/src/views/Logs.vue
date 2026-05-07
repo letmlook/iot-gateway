@@ -5,6 +5,7 @@ import { getErrorMessage } from '../i18n'
 import { ElMessage } from 'element-plus'
 import { Download, Document } from '@element-plus/icons-vue'
 import { api } from '../api.js'
+import PageHeader from '../components/PageHeader.vue'
 
 const { t } = useI18n()
 
@@ -102,6 +103,7 @@ onMounted(loadLogConfig)
 
 <template>
   <div class="page-container logs-page">
+    <PageHeader :title="t('logs.title')" />
     <div class="logs-body">
       <el-tabs v-model="activeTab" class="logs-tabs">
         <el-tab-pane :label="t('logs.tabManage')" name="manage">

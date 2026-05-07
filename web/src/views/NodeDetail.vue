@@ -6,6 +6,7 @@ import { getErrorMessage } from '../i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Back, Setting, VideoPlay, VideoPause, Plus, Edit, Delete, RefreshRight, EditPen } from '@element-plus/icons-vue'
 import { api } from '../api.js'
+import PageHeader from '../components/PageHeader.vue'
 const route = useRoute()
 const router = useRouter()
 const { t } = useI18n()
@@ -450,50 +451,49 @@ onUnmounted(stopConnStatusPoll)
 
 <template>
   <div class="page-container">
-    <div class="detail-header" v-if="node">
-      <div class="header-left">
-        <el-button :icon="Back" @click="router.push(isNorth ? '/north' : '/south')">{{ t('nodeDetail.cancelBack') }}</el-button>
-        <div class="node-info">
-          <h2 class="node-name">{{ node.name }}</h2>
-          <el-button type="primary" link size="small" :icon="EditPen" @click="openNameModal">{{ t('nodeDetail.editName') }}</el-button>
-          <el-tag size="small" type="info">{{ node.plugin_name }}</el-tag>
-          <el-tag :type="node.state === 'running' ? 'success' : node.state === 'error' ? 'danger' : 'info'" size="small" effect="light">
-            {{ node.state === 'running' ? t('common.running') : node.state === 'error' ? t('common.error') : t('common.stopped') }}
-          </el-tag>
-          <el-tooltip
-            v-if="node.connection_status && node.state === 'running' && node.connection_status.last_error"
-            :content="node.connection_status.last_error"
-            placement="bottom"
+    <template v-if="node">
+      <PageHeader :title="node.name">
+        <template #actions>
+          <el-button :icon="Setting" @click="router.push(isNorth ? `/north/${nodeId}/config` : `/south/${nodeId}/config`)">{{ t('nodeDetail.config') }}</el-button>
+          <el-button
+            :type="node.state === 'running' ? 'warning' : 'success'"
+            :icon="node.state === 'running' ? VideoPause : VideoPlay"
+            @click="toggleNode"
           >
-            <el-tag
-              :type="connectionStatusConnected ? 'success' : 'danger'"
-              size="small"
-              effect="plain"
-            >
-              {{ connectionStatusConnected ? t('south.connected') : t('south.disconnected') }}
-            </el-tag>
-          </el-tooltip>
+            {{ node.state === 'running' ? t('common.stop') : t('common.start') }}
+          </el-button>
+        </template>
+      </PageHeader>
+      <div class="detail-meta">
+        <el-button :icon="Back" @click="router.push(isNorth ? '/north' : '/south')">{{ t('nodeDetail.cancelBack') }}</el-button>
+        <el-button type="primary" link size="small" :icon="EditPen" @click="openNameModal">{{ t('nodeDetail.editName') }}</el-button>
+        <el-tag size="small" type="info">{{ node.plugin_name }}</el-tag>
+        <el-tag :type="node.state === 'running' ? 'success' : node.state === 'error' ? 'danger' : 'info'" size="small" effect="light">
+          {{ node.state === 'running' ? t('common.running') : node.state === 'error' ? t('common.error') : t('common.stopped') }}
+        </el-tag>
+        <el-tooltip
+          v-if="node.connection_status && node.state === 'running' && node.connection_status.last_error"
+          :content="node.connection_status.last_error"
+          placement="bottom"
+        >
           <el-tag
-            v-else-if="node.connection_status && node.state === 'running'"
             :type="connectionStatusConnected ? 'success' : 'danger'"
             size="small"
             effect="plain"
           >
             {{ connectionStatusConnected ? t('south.connected') : t('south.disconnected') }}
           </el-tag>
-        </div>
-      </div>
-      <div class="header-right">
-        <el-button :icon="Setting" @click="router.push(isNorth ? `/north/${nodeId}/config` : `/south/${nodeId}/config`)">{{ t('nodeDetail.config') }}</el-button>
-        <el-button
-          :type="node.state === 'running' ? 'warning' : 'success'"
-          :icon="node.state === 'running' ? VideoPause : VideoPlay"
-          @click="toggleNode"
+        </el-tooltip>
+        <el-tag
+          v-else-if="node.connection_status && node.state === 'running'"
+          :type="connectionStatusConnected ? 'success' : 'danger'"
+          size="small"
+          effect="plain"
         >
-          {{ node.state === 'running' ? t('common.stop') : t('common.start') }}
-        </el-button>
+          {{ connectionStatusConnected ? t('south.connected') : t('south.disconnected') }}
+        </el-tag>
       </div>
-    </div>
+    </template>
 
     <el-alert v-if="error" type="error" :title="error" closable show-icon @close="error = ''" class="mb-2" />
 
@@ -707,11 +707,7 @@ onUnmounted(stopConnStatusPoll)
 <style scoped>
 .mb-2 { margin-bottom: 1rem; }
 .mt-1 { margin-top: 0.5rem; }
-.detail-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; margin-bottom: 1rem; }
-.detail-header .header-left { display: flex; align-items: center; gap: 1rem; }
-.detail-header .header-right { display: flex; gap: 0.5rem; }
-.node-info { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
-.node-name { margin: 0; font-size: 1.25rem; }
+.detail-meta { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 1rem; }
 .tab-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
 .header-actions { display: flex; gap: 0.5rem; }
 .form-hint { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.25rem; }

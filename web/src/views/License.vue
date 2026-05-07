@@ -5,6 +5,7 @@ import { getErrorMessage } from '../i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CopyDocument, Key, CircleCheck, CircleClose, Upload, Delete } from '@element-plus/icons-vue'
 import { api } from '../api.js'
+import PageHeader from '../components/PageHeader.vue'
 
 const { t } = useI18n()
 
@@ -133,9 +134,7 @@ onMounted(loadLicenseInfo)
 <template>
   <div class="page-container license-page">
     <div class="license-body">
-      <div class="page-header license-header">
-        <p class="header-desc">{{ t('license.desc') }}</p>
-      </div>
+      <PageHeader :title="t('license.title')" />
 
       <el-alert v-if="error" type="error" :title="error" show-icon class="mb-2" />
 
@@ -274,13 +273,6 @@ onMounted(loadLicenseInfo)
 }
 .license-body {
   max-width: 720px;
-}
-.license-header {
-  margin-bottom: 1rem;
-}
-.license-header .header-desc {
-  color: var(--el-text-color-secondary);
-  margin: 0;
 }
 .license-content {
   margin-bottom: 1.5rem;

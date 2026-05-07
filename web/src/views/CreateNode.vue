@@ -6,6 +6,7 @@ import { getErrorMessage } from '../i18n'
 import { ElMessage } from 'element-plus'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { api } from '../api.js'
+import PageHeader from '../components/PageHeader.vue'
 import NodeConfigForm from '../components/NodeConfigForm.vue'
 
 const router = useRouter()
@@ -112,9 +113,9 @@ onMounted(async () => {
 
 <template>
   <div class="page-container create-page create-page-fill">
-    <div class="page-header">
+    <PageHeader :title="kind === 'south' ? t('createNode.addSouth') : t('createNode.addNorth')" />
+    <div class="detail-meta">
       <el-button :icon="ArrowLeft" @click="goBack">{{ t('createNode.back') }}</el-button>
-      <h2 class="page-title">{{ kind === 'south' ? t('createNode.addSouth') : t('createNode.addNorth') }}</h2>
     </div>
     <el-alert v-if="error" type="error" :title="error" closable show-icon @close="error = ''" class="mb-2" />
     <el-card class="form-card create-form-card-fill">
@@ -182,8 +183,7 @@ onMounted(async () => {
 
 <style scoped>
 .create-page-fill { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.page-header { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; flex-shrink: 0; }
-.page-title { margin: 0; font-size: 1.25rem; }
+.detail-meta { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; flex-shrink: 0; }
 .create-form-card-fill { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 1.5rem; }
 .create-form-card-fill :deep(.el-card__body) { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .form-card { padding: 1.5rem; }

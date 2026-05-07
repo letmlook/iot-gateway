@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { Refresh, DataLine, InfoFilled } from '@element-plus/icons-vue'
 import { api } from '../api.js'
+import PageHeader from '../components/PageHeader.vue'
 
 const router = useRouter()
 const { t } = useI18n()
@@ -46,12 +47,8 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 
 <template>
   <div class="data-flow-page">
-    <div class="page-header">
-      <div class="header-content">
-        <h1 class="page-title">{{ t('dataFlow.title') }}</h1>
-        <p class="page-desc">{{ t('dataFlow.desc') }}</p>
-      </div>
-      <div class="header-actions">
+    <PageHeader :title="t('dataFlow.title')" :subtitle="t('dataFlow.desc')">
+      <template #actions>
         <el-button link type="primary" @click="goMonitor">
           {{ t('dataFlow.goToMonitor') }}
         </el-button>
@@ -71,8 +68,8 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
         <el-button :icon="Refresh" :loading="loading" @click="load">
           {{ t('common.refresh') }}
         </el-button>
-      </div>
-    </div>
+      </template>
+    </PageHeader>
 
     <el-alert v-if="error" type="error" :title="error" closable show-icon @close="error = ''" class="mb-4" />
 
@@ -205,35 +202,6 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 }
 
 .mb-4 { margin-bottom: 1.5rem; }
-
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 1.5rem;
-  flex-wrap: wrap;
-  gap: 1rem;
-}
-
-.page-title {
-  font-size: 1.5rem;
-  font-weight: 700;
-  color: var(--text-primary);
-  margin: 0 0 0.25rem;
-}
-
-.page-desc {
-  color: var(--text-secondary);
-  font-size: 0.9rem;
-  margin: 0;
-}
-
-.header-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-}
 
 .interval-select {
   width: 100px;

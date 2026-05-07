@@ -6,6 +6,7 @@ import { getErrorMessage } from '../i18n'
 import { ElMessage } from 'element-plus'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { api } from '../api.js'
+import PageHeader from '../components/PageHeader.vue'
 import NodeConfigForm from '../components/NodeConfigForm.vue'
 
 const route = useRoute()
@@ -63,9 +64,9 @@ onMounted(loadNodeAndSetting)
 
 <template>
   <div class="page-container config-page-fill">
-    <div class="page-header">
+    <PageHeader :title="t('nodeDetail.nodeConfig')" :subtitle="node?.name || nodeId" />
+    <div class="detail-meta">
       <el-button :icon="ArrowLeft" @click="goBack">{{ t('createNode.back') }}</el-button>
-      <h2 class="page-title">{{ t('nodeDetail.nodeConfig') }} · {{ node?.name || nodeId }}</h2>
     </div>
     <el-alert v-if="error" type="error" :title="error" closable show-icon @close="error = ''" class="mb-2" />
     <el-card v-if="node" class="config-card-fill">
@@ -89,8 +90,7 @@ onMounted(loadNodeAndSetting)
 
 <style scoped>
 .config-page-fill { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.page-header { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; flex-shrink: 0; }
-.page-title { margin: 0; font-size: 1.25rem; }
+.detail-meta { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; flex-shrink: 0; }
 .config-card-fill { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 1.5rem; overflow-y: auto; }
 .config-card-fill :deep(.el-card__body) { display: flex; flex-direction: column; gap: 1rem; }
 .config-actions { display: flex; gap: 0.75rem; flex-shrink: 0; padding-top: 0.5rem; }
