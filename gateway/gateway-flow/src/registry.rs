@@ -55,9 +55,38 @@ impl OperatorRegistry {
     }
     
     fn register_builtin_operators(&mut self) {
-        // Built-in operators will be registered here once implemented in Stage 3.
-        // Format: self.register("filter", filter_meta(), || Box::new(filter::FilterOperator::new()));
-        // Placeholder for now — Stage 3 will fill this in.
+        use crate::operators::filter;
+        use crate::operators::transform;
+
+        self.register(
+            "filter",
+            gateway_sdk::PluginMeta {
+                name: "filter",
+                kind: gateway_sdk::PluginKind::Operator,
+                description: Some("Pass through data only when condition is true"),
+                version: "0.1.0",
+                name_zh: Some("过滤器"),
+                name_en: Some("Filter"),
+                description_zh: Some("根据条件表达式过滤数据"),
+                description_en: Some("Pass through data only when condition evaluates to true"),
+            },
+            || Box::new(filter::FilterOperator::new("true")),
+        );
+
+        self.register(
+            "transform",
+            gateway_sdk::PluginMeta {
+                name: "transform",
+                kind: gateway_sdk::PluginKind::Operator,
+                description: Some("Transform fields using rhai expressions"),
+                version: "0.1.0",
+                name_zh: Some("转换器"),
+                name_en: Some("Transform"),
+                description_zh: Some("使用 rhai 表达式对字段进行转换"),
+                description_en: Some("Transform fields using rhai expressions"),
+            },
+            || Box::new(transform::TransformOperator::new("[]")),
+        );
     }
 }
 
