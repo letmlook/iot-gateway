@@ -15,4 +15,8 @@ members = [
     "gateway/gateway-plugins/plugin-s7",
     "gateway/gateway-plugins/plugin-http",
     "gateway/gateway-plugins/plugin-kafka",
+    "gateway/gateway-plugins/plugin-dlt645",
+    "gateway/gateway-plugins/plugin-iec61850",
+    "gateway/gateway-plugins/plugin-ethernet-ip",
+    "gateway/gateway-plugins/plugin-mitsubishi-mc",
 ]

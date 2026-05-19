@@ -1,0 +1,19 @@
+[package]
+name = "plugin-dlt645"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gateway-sdk = { path = "../../gateway-sdk" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+
+[features]
+ffi = []
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]

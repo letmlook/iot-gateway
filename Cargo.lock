@@ -1622,6 +1622,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "plugin-dlt645"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "gateway-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "plugin-ethernet-ip"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "gateway-sdk",
+ "once_cell",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "plugin-http"
 version = "0.1.0"
 dependencies = [
@@ -1629,6 +1656,18 @@ dependencies = [
  "once_cell",
  "serde",
  "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "plugin-iec61850"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "gateway-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
  "tracing",
 ]
 
@@ -1641,6 +1680,21 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
+]
+
+[[package]]
+name = "plugin-mitsubishi-mc"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "gateway-sdk",
+ "once_cell",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
