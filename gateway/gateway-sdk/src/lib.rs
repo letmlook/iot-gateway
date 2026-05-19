@@ -7,6 +7,7 @@ pub mod error;
 pub mod ffi;
 pub mod log;
 pub mod messages;
+pub mod metrics;
 pub mod plugin;
 pub mod schema;
 pub mod types;
@@ -17,6 +18,7 @@ pub use log::{debug, error, info, node_log, trace, warn, NodeLogLevel};
 pub use messages::{GroupData, GroupSubscription, TagRead, TagWrite};
 pub use plugin::{NorthPlugin, Operable, PluginInfo, PluginMeta, SouthPlugin};
 pub use schema::{ConfigSchema, ParamAttribute, ParamOption, ParamSchema, ParamType, ParamValid, TagRegexEntry, TagSchema};
+pub use metrics::OperatorMetrics;
 pub use types::{
     DataType, DataValue, Group, GroupId, NodeId, NodeKind, NodeState, PipelineData, PluginConfig, PluginKind,
     Tag, TagAttr, TagId,
