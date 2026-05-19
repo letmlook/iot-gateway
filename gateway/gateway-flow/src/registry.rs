@@ -58,6 +58,7 @@ impl OperatorRegistry {
         use crate::operators::filter;
         use crate::operators::transform;
         use crate::operators::aggregate;
+        use crate::operators::router;
 
         self.register(
             "filter",
@@ -102,6 +103,21 @@ impl OperatorRegistry {
                 description_en: Some("Aggregate data over time windows with Sum/Avg/Min/Max/Count"),
             },
             || Box::new(aggregate::AggregateOperator::new(60, "[]")),
+        );
+
+        self.register(
+            "router",
+            gateway_sdk::PluginMeta {
+                name: "router",
+                kind: gateway_sdk::PluginKind::Operator,
+                description: Some("Route data to different outputs based on conditions"),
+                version: "0.1.0",
+                name_zh: Some("路由器"),
+                name_en: Some("Router"),
+                description_zh: Some("根据条件将数据路由到不同的输出端口"),
+                description_en: Some("Route data to different output ports based on conditions"),
+            },
+            || Box::new(router::RouterOperator::new("[]", "default")),
         );
     }
 }
