@@ -55,6 +55,7 @@ impl OperatorRegistry {
     }
     
     fn register_builtin_operators(&mut self) {
+        use crate::operators::alarm;
         use crate::operators::filter;
         use crate::operators::transform;
         use crate::operators::aggregate;
@@ -134,6 +135,21 @@ impl OperatorRegistry {
                 description_en: Some("Buffer data and emit in batches"),
             },
             || Box::new(buffer::BufferOperator::new(100, 5)),
+        );
+
+        self.register(
+            "alarm",
+            gateway_sdk::PluginMeta {
+                name: "alarm",
+                kind: gateway_sdk::PluginKind::Operator,
+                description: Some("Alarm rule engine with threshold/rate-of-change/state-change rules"),
+                version: "0.1.0",
+                name_zh: Some("告警"),
+                name_en: Some("Alarm"),
+                description_zh: Some("告警规则引擎，支持阈值告警、变化率告警、状态变化告警"),
+                description_en: Some("Alarm rule engine with threshold, rate-of-change, and state-change rules"),
+            },
+            || Box::new(alarm::AlarmOperator::new(&gateway_sdk::PluginConfig::new())),
         );
     }
 }
