@@ -127,6 +127,9 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/flows/:id/rollback/:version", post(flow::handlers::flow_rollback))
         .route("/flows/export", get(flow::handlers::export_flows))
         .route("/flows/import", post(flow::handlers::import_flows))
+        .route("/flows/:id/live/summary", get(crate::websocket::flow_live_summary))
+        // WebSocket routes (outside /api to avoid auth layer)
+        .route("/ws/flows/:id/live", axum::routing::get(crate::websocket::ws_flow_live))
         // Admin: SQLite file-level backup/restore
         .route("/admin/sqlite-backup", post(crate::backup::sqlite_backup))
         .route("/admin/sqlite-backup", get(crate::backup::sqlite_download_latest))

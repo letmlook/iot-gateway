@@ -11,12 +11,39 @@
       <el-button v-if="flowStatus === 'running'" type="warning" @click="handlePause">暂停</el-button>
       <el-button v-if="flowStatus === 'running' || flowStatus === 'paused'" type="danger" @click="handleStop">停止</el-button>
       <el-tag v-if="flowStatus" style="margin-left: 8px">{{ statusLabel(flowStatus) }}</el-tag>
+      <el-button type="info" plain style="margin-left: auto" @click="$router.push('/monitor/live')">📊 Live</el-button>
     </div>
 
     <div class="editor-body">
       <!-- Node Palette -->
       <div class="node-palette">
         <el-collapse v-model="paletteOpen">
+          <!-- Canvas nodes tree with status badges -->
+          <el-collapse-item title="画布节点 🌳" name="canvas-nodes">
+            <div v-if="nodes.length === 0" class="canvas-nodes-empty">拖拽或添加节点到画布</div>
+            <div
+              v-for="node in nodes"
+              :key="node.id"
+              class="canvas-node-item"
+              :class="{ 'canvas-node-selected': selectedNode && selectedNode.id === node.id }"
+              @click="selectCanvasNode(node)"
+            >
+              <span class="node-type-icon">
+                {{ node.type === 'south' ? '🔌' : node.type === 'north' ? '📤' : '⚙️' }}
+              </span>
+              <span class="node-tree-label">{{ node.label }}</span>
+              <span
+                class="node-status-dot"
+                :style="{ backgroundColor: STATUS_COLORS[nodeRuntimeStatus[node.id] || 'unknown'] }"
+                :title="'状态: ' + statusLabel(nodeRuntimeStatus[node.id])"
+              ></span>
+            </div>
+            <div v-if="nodes.length > 0" class="canvas-nodes-legend">
+              <span class="legend-item"><span class="legend-dot" style="background:#52c41a"></span>运行</span>
+              <span class="legend-item"><span class="legend-dot" style="background:#ff4d4f"></span>错误</span>
+              <span class="legend-item"><span class="legend-dot" style="background:#999"></span>停止</span>
+            </div>
+          </el-collapse-item>
           <el-collapse-item title="南向设备 🔌" name="south">
             <div
               v-for="plugin in southPlugins"
@@ -427,12 +454,31 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { VueFlow, useVueFlow, MarkerType } from '@vue-flow/core'
+import { VueFlow, useVueFlow, MarkerType, Position } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
 import { Controls } from '@vue-flow/controls'
 import { MiniMap } from '@vue-flow/minimap'
 import { ElMessage } from 'element-plus'
 import { api } from '../api.js'
+
+// Node status constants
+const NODE_STATUS = {
+  RUNNING: 'running',
+  STOPPED: 'stopped',
+  ERROR: 'error',
+  UNKNOWN: 'unknown'
+}
+
+const STATUS_COLORS = {
+  running: '#52c41a',
+  stopped: '#999',
+  error: '#ff4d4f',
+  unknown: '#999'
+}
+
+function statusLabel(s) {
+  return { running: '运行中', stopped: '已停止', error: '错误', unknown: '未知' }[s] || s || '未知'
+}
 
 import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
@@ -452,6 +498,9 @@ const selectedNode = ref(null)
 const southPlugins = ref([])
 const northPlugins = ref([])
 const operatorList = ref([])
+
+// Node runtime status: { [nodeId]: 'running' | 'stopped' | 'error' | 'unknown' }
+const nodeRuntimeStatus = ref({})
 
 // Palette state
 const paletteOpen = ref(['south', 'operator', 'north'])
@@ -478,6 +527,45 @@ const recentMessages = ref([])
 // Status polling
 let statusPollTimer = null
 let statusPollCount = 0
+
+// Node status polling
+let nodeStatusTimer = null
+
+function startNodeStatusPoll() {
+  stopNodeStatusPoll()
+  fetchNodeStatus()
+  nodeStatusTimer = setInterval(fetchNodeStatus, 5000)
+}
+
+function stopNodeStatusPoll() {
+  if (nodeStatusTimer) {
+    clearInterval(nodeStatusTimer)
+    nodeStatusTimer = null
+  }
+}
+
+async function fetchNodeStatus() {
+  if (!nodes.value.length) return
+  try {
+    const allNodes = await api.nodes()
+    // Map status by node id
+    const statusMap = {}
+    allNodes.forEach(n => {
+      statusMap[n.id] = n.state || n.status || 'unknown'
+    })
+    // Also check flow-specific node statuses
+    try {
+      const flowData = await api.flow(flowId.value)
+      const flowNodes = flowData.flow?.nodes || []
+      flowNodes.forEach(fn => {
+        statusMap[fn.id] = fn.state || fn.status || statusMap[fn.id] || 'unknown'
+      })
+    } catch (_) {}
+    nodeRuntimeStatus.value = statusMap
+  } catch (e) {
+    console.error('Failed to fetch node status', e)
+  }
+}
 
 onMounted(async () => {
   // Load operators from API
@@ -533,6 +621,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (statusPollTimer) clearInterval(statusPollTimer)
+  stopNodeStatusPoll()
 })
 
 // Watch selected node to load schema/points data
@@ -561,6 +650,13 @@ watch(selectedNode, async (node) => {
       const subsData = await api.subscriptions(node.id)
       node.data.subscriptions = (subsData.subscriptions || []).map(s => s.south_node_id)
     } catch (e) { console.error(e) }
+  }
+}, { immediate: true })
+
+// Start node status polling once nodes are loaded
+watch(nodes, (newNodes) => {
+  if (newNodes && newNodes.length > 0) {
+    startNodeStatusPoll()
   }
 }, { immediate: true })
 
@@ -693,6 +789,16 @@ function onNodeClick({ node }) {
   previewActiveNames.value = ['preview']
 }
 
+function selectCanvasNode(node) {
+  // Find the vue-flow node and select it
+  const vueFlowNode = nodes.value.find(n => n.id === node.id)
+  if (vueFlowNode) {
+    selectedNode.value = vueFlowNode
+    previewOpen.value = true
+    previewActiveNames.value = ['preview']
+  }
+}
+
 function onPaneContextMenu() {
   selectedNode.value = null
 }
@@ -807,10 +913,6 @@ async function handleStop() {
   } catch (e) { ElMessage.error('停止失败: ' + e.message) }
 }
 
-function statusLabel(s) {
-  return { draft: '草稿', deployed: '已部署', running: '运行中', paused: '已暂停', stopped: '已停止', error: '错误' }[s] || s
-}
-
 // Data preview refresh
 let previewTimer = null
 
@@ -861,6 +963,69 @@ function refreshPreview() {
 .palette-item.south { background: #e3f2fd; border: 1px solid #90caf9; }
 .palette-item.operator { background: #fff3e0; border: 1px solid #ffcc80; }
 .palette-item.north { background: #e8f5e9; border: 1px solid #a5d6a7; }
+
+/* Canvas node tree */
+.canvas-node-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  margin-bottom: 3px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: background 0.15s;
+  border: 1px solid transparent;
+}
+.canvas-node-item:hover {
+  background: #e8e8e8;
+}
+.canvas-node-item.canvas-node-selected {
+  background: #e6f7ff;
+  border-color: #91d5ff;
+}
+.node-type-icon {
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.node-tree-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.node-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  cursor: help;
+}
+.canvas-nodes-empty {
+  font-size: 11px;
+  color: #999;
+  text-align: center;
+  padding: 8px 0;
+}
+.canvas-nodes-legend {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid #e0e0e0;
+}
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  color: #888;
+}
+.legend-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
 .flow-canvas { flex: 1; position: relative; }
 .properties-panel { width: 280px; padding: 12px; background: #fff; border-left: 1px solid #ddd; overflow-y: auto; }
 .properties-panel h4 { margin: 0 0 8px; }

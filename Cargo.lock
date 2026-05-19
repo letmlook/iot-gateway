@@ -803,6 +803,7 @@ dependencies = [
  "base64 0.21.7",
  "chrono",
  "flate2",
+ "futures-util",
  "gateway-core",
  "gateway-flow",
  "gateway-sdk",

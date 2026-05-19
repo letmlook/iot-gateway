@@ -101,6 +101,11 @@ impl FlowRuntime {
     pub fn status(&self) -> crate::flow::FlowStatus {
         self.status
     }
+
+    /// Get flow name.
+    pub fn flow_name(&self) -> &str {
+        &self.flow_name
+    }
     
     /// Get all node metrics.
     pub fn metrics(&self) -> Vec<OperatorMetrics> {

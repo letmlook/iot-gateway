@@ -103,6 +103,12 @@ const routes = [
     meta: { title: '编辑数据流' }
   },
   {
+    path: '/monitor/live',
+    name: 'LiveMonitor',
+    component: () => import('./views/LiveMonitor.vue'),
+    meta: { title: '实时监控' }
+  },
+  {
     path: '/plugins',
     name: 'Plugins',
     component: () => import('./views/Plugins.vue'),

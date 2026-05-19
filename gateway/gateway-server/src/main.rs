@@ -9,6 +9,7 @@ mod logging;
 mod metrics;
 mod state;
 mod users;
+mod websocket;
 
 use axum::Router;
 use gateway_core::{persist_load, persist_load_json, persist_save, PluginLoader, Manager};
@@ -122,8 +123,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let flow_store = crate::flow::FlowStore::new(&db_path)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     let flow_runtimes: Arc<tokio::sync::RwLock<std::collections::HashMap<uuid::Uuid, gateway_flow::FlowRuntime>>> = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+    let ws_hub = crate::websocket::WsHub::new();
     
-    let state = AppState::new(mgr, config.clone(), loader_opt, feature_manager, user_store, node_log_names, flow_store, flow_runtimes);
+    let state = AppState::new(mgr, config.clone(), loader_opt, feature_manager, user_store, node_log_names, flow_store, flow_runtimes, ws_hub);
     state.sync_node_log_names();
 
     let app = Router::new()

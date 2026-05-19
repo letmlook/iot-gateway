@@ -249,4 +249,7 @@ export const api = {
 
   // Operators
   operators: () => req('GET', '/flows/operators'),
+
+  // Alarm events
+  alarmEvents: () => req('GET', '/alarm/events'),
 }

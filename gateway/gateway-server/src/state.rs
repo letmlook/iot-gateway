@@ -5,6 +5,7 @@ use crate::flow::FlowStore;
 use crate::license::FeatureManager;
 use crate::logging::NodeLogNameMap;
 use crate::users::UserStore;
+use crate::websocket::WsHub;
 use gateway_core::{persist_save, PluginLoader, Manager};
 use gateway_flow::FlowRuntime;
 use std::sync::Arc;
@@ -24,6 +25,8 @@ pub struct AppState {
     pub flow_store: FlowStore,
     /// 运行中的 Flow 运行时
     pub flow_runtimes: Arc<tokio::sync::RwLock<std::collections::HashMap<Uuid, FlowRuntime>>>,
+    /// WebSocket hub for real-time flow monitoring
+    pub ws_hub: WsHub,
     _loader: Option<Arc<PluginLoader>>,
 }
 
@@ -37,6 +40,7 @@ impl Clone for AppState {
             node_log_names: self.node_log_names.clone(),
             flow_store: self.flow_store.clone(),
             flow_runtimes: self.flow_runtimes.clone(),
+            ws_hub: self.ws_hub.clone(),
             _loader: self._loader.clone(),
         }
     }
@@ -52,6 +56,7 @@ impl AppState {
         node_log_names: Option<NodeLogNameMap>,
         flow_store: FlowStore,
         flow_runtimes: Arc<tokio::sync::RwLock<std::collections::HashMap<Uuid, FlowRuntime>>>,
+        ws_hub: WsHub,
     ) -> Self {
         Self {
             manager,
@@ -61,6 +66,7 @@ impl AppState {
             node_log_names,
             flow_store,
             flow_runtimes,
+            ws_hub,
             _loader: loader.map(Arc::new),
         }
     }
