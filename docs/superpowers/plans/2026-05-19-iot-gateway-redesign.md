@@ -1,8 +1,8 @@
 # IoT 网关破坏性重构：最终形态设计
 
-> 文档版本：v1.2
+> 文档版本：v1.3
 > 日期：2026-05-19
-> 更新：2026-05-19 Phase 1/2/3/4 实现完成
+> 更新：2026-05-19 Phase 5 WebSocket 实时可视化实现完成（LiveMonitor + AlarmEventList + 状态徽章）
 > 目标：不考虑兼容，完全重新设计，实现可视化物联网数据流编排平台
 
 ---
@@ -1258,38 +1258,30 @@ cab48c0 feat(gateway-server): add D3 hot reload, D4 Prometheus metrics, D2 versi
 
 ---
 
-## Phase 5: WebSocket 实时可视化（规划中）
+## Phase 5 实现状态
 
-### 目标
-Flow 运行数据实时推送，前端 WebSocket 订阅。
+✅ **已完成**
 
-### 方案
-```
-gateway-server              Web 前端
-     │                           │
-  FlowRuntime ──────────────────┼── WebSocket /ws/flows/:id/live
-     │                           │   {"type": "node_data", "node_id": "...", "tags": {...}}
-     └───────────────────────────┘
-```
+### 后端实现
+- [x] `gateway-server/src/websocket/mod.rs` — `WsHub` (broadcast channel pub/sub) + `ws_flow_live` WebSocket handler + `FlowLiveEvent` enum
+- [x] `FlowRuntime` 集成 `WsHub`：实时广播 `NodeData` / `NodeStatus` / `FlowStatus` / `Alarm` 事件
+- [x] `GET /flows/:id/live/summary` — 返回当前 Flow 运行快照（节点状态、数据点、启动时间）
+- [x] `WS /ws/flows/:id/live` — WebSocket 实时数据订阅
+- [x] `AppState::ws_hub` — 全局 WsHub 单例注入
 
-### API 设计
-| Method | Path | 说明 |
-|--------|------|------|
-| `WS` | `/ws/flows/:id/live` | 订阅 Flow 实时数据 |
-| `GET` | `/flows/:id/live/summary` | 获取当前 Flow 运行快照 |
+### 前端实现
+- [x] `LiveMonitor.vue` — 实时监控视图（ECharts 曲线图 + 节点树 + 告警列表 + 指标仪表盘）
+- [x] `AlarmEventList.vue` — 实时告警列表（级别过滤 + 新事件高亮闪烁）
+- [x] `useFlowWebSocket.js` — WebSocket Hook（自动重连 + BroadcastChannel 多 Tab 同步 + 100msg/s 节流 + 500 点降采样）
+- [x] `FlowEditor.vue` — 节点状态徽章（🟢running/🔴error/⚪stopped）+ 📊 Live 按钮
+- [x] `/monitor/live` 路由
+- [x] `api.alarmEvents()` → `GET /alarm/events`
 
-### WebSocket 事件
-```json
-{ "type": "node_data", "flow_id": "...", "node_id": "...", "timestamp": 1234567890, "tags": {...} }
-{ "type": "node_status", "flow_id": "...", "node_id": "...", "status": "running|error", "message": "..." }
-{ "type": "flow_status", "flow_id": "...", "status": "running|paused|stopped", "nodes_total": 5 }
-```
-
-### 前端 DataMonitor 增强
-- 实时曲线图（基于 ECharts）
-- 节点状态指示（绿色=运行/红色=错误/灰色=停止）
-- 消息速率仪表盘
-- 告警事件列表
+### 技术细节
+- ECharts + zrender 从 `lan-device-management/frontend/node_modules/` 复制
+- 多 Tab 共享：BroadcastChannel `flow_ws_{flowId}` 同步消息
+- 页面隐藏时暂停渲染（Page Visibility API）
+- `statusLabel()` 函数重复定义修复
 
 ---
 
@@ -1301,4 +1293,4 @@ gateway-server              Web 前端
 
 ---
 
-*文档状态：v1.2 — Phase 1/2/3/4 全部实现完成，Phase 5 WebSocket 实时可视化规划中*
+*文档状态：v1.3 — Phase 1/2/3/4/5 全部实现完成*
