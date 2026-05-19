@@ -12,6 +12,7 @@ serde_json = "1"
 thiserror = "1"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
+rhai = { version = "1", features = ["sync"] }
 chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["sync", "rt", "macros"] }
 petgraph = "0.6"

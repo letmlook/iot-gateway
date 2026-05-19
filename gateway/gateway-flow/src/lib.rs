@@ -8,6 +8,7 @@ pub mod executor;
 pub mod registry;
 pub mod error;
 pub mod runtime;
+pub mod operators;
 
 pub use flow::{Flow, FlowEdge, FlowStatus};
 pub use node::{FlowNode, NodeKind, Port, PortType};

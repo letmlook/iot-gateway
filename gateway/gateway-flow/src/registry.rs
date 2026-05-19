@@ -59,6 +59,7 @@ impl OperatorRegistry {
         use crate::operators::transform;
         use crate::operators::aggregate;
         use crate::operators::router;
+        use crate::operators::buffer;
 
         self.register(
             "filter",
@@ -118,6 +119,21 @@ impl OperatorRegistry {
                 description_en: Some("Route data to different output ports based on conditions"),
             },
             || Box::new(router::RouterOperator::new("[]", "default")),
+        );
+
+        self.register(
+            "buffer",
+            gateway_sdk::PluginMeta {
+                name: "buffer",
+                kind: gateway_sdk::PluginKind::Operator,
+                description: Some("Buffer data and emit in batches"),
+                version: "0.1.0",
+                name_zh: Some("缓冲器"),
+                name_en: Some("Buffer"),
+                description_zh: Some("缓冲数据并批量输出"),
+                description_en: Some("Buffer data and emit in batches"),
+            },
+            || Box::new(buffer::BufferOperator::new(100, 5)),
         );
     }
 }
