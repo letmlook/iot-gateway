@@ -63,6 +63,11 @@ impl OperatorRegistry {
         use crate::operators::buffer;
         use crate::operators::json_path;
         use crate::operators::deadband;
+        use crate::operators::formula;
+        use crate::operators::clamp;
+        use crate::operators::round;
+        use crate::operators::change;
+        use crate::operators::range;
 
         self.register(
             "filter",
@@ -182,6 +187,81 @@ impl OperatorRegistry {
                 description_en: Some("Only pass data when value change exceeds deadband threshold"),
             },
             || Box::new(deadband::DeadbandOperator::new(&gateway_sdk::PluginConfig::new())),
+        );
+
+        self.register(
+            "formula",
+            gateway_sdk::PluginMeta {
+                name: "formula",
+                kind: gateway_sdk::PluginKind::Operator,
+                description: Some("Evaluate mathematical expressions on data fields"),
+                version: "0.1.0",
+                name_zh: Some("公式解析"),
+                name_en: Some("Formula"),
+                description_zh: Some("对数据字段进行数学公式求值"),
+                description_en: Some("Evaluate mathematical expressions on data fields using formula syntax"),
+            },
+            || Box::new(formula::FormulaOperator::new(&gateway_sdk::PluginConfig::new())),
+        );
+
+        self.register(
+            "clamp",
+            gateway_sdk::PluginMeta {
+                name: "clamp",
+                kind: gateway_sdk::PluginKind::Operator,
+                description: Some("Clamp values to a specified range"),
+                version: "0.1.0",
+                name_zh: Some("值域限幅"),
+                name_en: Some("Clamp"),
+                description_zh: Some("将数值限制在指定范围内"),
+                description_en: Some("Clamp numeric values to a minimum and maximum range"),
+            },
+            || Box::new(clamp::ClampOperator::new(&gateway_sdk::PluginConfig::new())),
+        );
+
+        self.register(
+            "round",
+            gateway_sdk::PluginMeta {
+                name: "round",
+                kind: gateway_sdk::PluginKind::Operator,
+                description: Some("Round numeric values to specified precision"),
+                version: "0.1.0",
+                name_zh: Some("数值取整"),
+                name_en: Some("Round"),
+                description_zh: Some("将数值四舍五入到指定精度"),
+                description_en: Some("Round numeric values to specified decimal precision"),
+            },
+            || Box::new(round::RoundOperator::new(&gateway_sdk::PluginConfig::new())),
+        );
+
+        self.register(
+            "change",
+            gateway_sdk::PluginMeta {
+                name: "change",
+                kind: gateway_sdk::PluginKind::Operator,
+                description: Some("Replace, rename, or delete fields"),
+                version: "0.1.0",
+                name_zh: Some("字段变更"),
+                name_en: Some("Change"),
+                description_zh: Some("对字段进行替换/重命名/删除操作"),
+                description_en: Some("Replace, rename, or delete fields in data payload"),
+            },
+            || Box::new(change::ChangeOperator::new(&gateway_sdk::PluginConfig::new())),
+        );
+
+        self.register(
+            "range",
+            gateway_sdk::PluginMeta {
+                name: "range",
+                kind: gateway_sdk::PluginKind::Operator,
+                description: Some("Map values from one range to another (linear transformation)"),
+                version: "0.1.0",
+                name_zh: Some("线性变换"),
+                name_en: Some("Range"),
+                description_zh: Some("将数值从一个范围线性映射到另一个范围"),
+                description_en: Some("Linear transformation: map a value from an input range to an output range"),
+            },
+            || Box::new(range::RangeOperator::new(&gateway_sdk::PluginConfig::new())),
         );
     }
 }
