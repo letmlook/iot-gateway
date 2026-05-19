@@ -11,6 +11,7 @@ use uuid::Uuid;
 pub enum PluginKind {
     South,
     North,
+    Operator,
 }
 
 /// 统一数据值类型

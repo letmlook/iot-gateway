@@ -107,6 +107,19 @@ pub const SYM_NORTH_CONNECTION_STATUS: &[u8] = b"gateway_north_plugin_connection
 /// 可选：北向插件实现此符号后，宿主在每次 open 成功后调用，传入 (handle, node_id_json, log_callback)，插件可据此按节点打日志。
 pub const SYM_NORTH_SET_LOG: &[u8] = b"gateway_north_plugin_set_log";
 
+// ---------- Operator (external .so plugins, future) ----------
+
+pub const SYM_OPERATOR_CREATE: &[u8] = b"gateway_operator_plugin_create";
+pub const SYM_OPERATOR_DESTROY: &[u8] = b"gateway_operator_plugin_destroy";
+pub const SYM_OPERATOR_META: &[u8] = b"gateway_operator_plugin_meta";
+pub const SYM_OPERATOR_OPEN: &[u8] = b"gateway_operator_plugin_open";
+pub const SYM_OPERATOR_CLOSE: &[u8] = b"gateway_operator_plugin_close";
+pub const SYM_OPERATOR_PROCESS: &[u8] = b"gateway_operator_plugin_process";
+pub const SYM_OPERATOR_RESET: &[u8] = b"gateway_operator_plugin_reset";
+pub const SYM_OPERATOR_CONFIG_SCHEMA: &[u8] = b"gateway_operator_plugin_config_schema";
+/// Optional: operator plugin can implement to receive per-node logging
+pub const SYM_OPERATOR_SET_LOG: &[u8] = b"gateway_operator_plugin_set_log";
+
 // ---------- 插件侧：Meta 转换与分配 ----------
 
 /// 将 PluginMeta 转为 FfiPluginMeta（用于 meta JSON）
@@ -116,6 +129,7 @@ pub fn meta_to_ffi(m: &crate::plugin::PluginMeta) -> FfiPluginMeta {
         kind: match m.kind {
             crate::PluginKind::South => "south".to_string(),
             crate::PluginKind::North => "north".to_string(),
+            crate::PluginKind::Operator => "operator".to_string(),
         },
         description: m.description.map(|s| s.to_string()),
         version: m.version.to_string(),
