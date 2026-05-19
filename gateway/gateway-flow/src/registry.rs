@@ -76,6 +76,8 @@ impl OperatorRegistry {
         use crate::operators::throttle;
         use crate::operators::convert;
         use crate::operators::log;
+        use crate::operators::xml_path;
+        use crate::operators::script_python;
 
         self.register(
             "filter",
@@ -390,6 +392,36 @@ impl OperatorRegistry {
                 description_en: Some("Log data payload for debugging — passes data through unchanged"),
             },
             || Box::new(log::LogOperator::new(&gateway_sdk::PluginConfig::new())),
+        );
+
+        self.register(
+            "xml-path",
+            gateway_sdk::PluginMeta {
+                name: "xml-path",
+                kind: gateway_sdk::PluginKind::Operator,
+                description: Some("Extract values from XML using XPath expressions"),
+                version: "0.1.0",
+                name_zh: Some("XML路径提取"),
+                name_en: Some("XML Path"),
+                description_zh: Some("使用XPath从XML数据中提取字段值"),
+                description_en: Some("Extract values from XML data using XPath expressions"),
+            },
+            || Box::new(xml_path::XmlPathOperator::new(&gateway_sdk::PluginConfig::new())),
+        );
+
+        self.register(
+            "script-python",
+            gateway_sdk::PluginMeta {
+                name: "script-python",
+                kind: gateway_sdk::PluginKind::Operator,
+                description: Some("Execute Python-like scripting (rhai engine)"),
+                version: "0.1.0",
+                name_zh: Some("Python脚本"),
+                name_en: Some("Python Script"),
+                description_zh: Some("使用类Python语法执行脚本处理数据"),
+                description_en: Some("Execute Python-like scripts for custom data processing using rhai"),
+            },
+            || Box::new(script_python::ScriptPythonOperator::new(&gateway_sdk::PluginConfig::new())),
         );
     }
 }

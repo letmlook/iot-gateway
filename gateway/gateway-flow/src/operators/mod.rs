@@ -21,6 +21,8 @@ pub mod script;
 pub mod throttle;
 pub mod convert;
 pub mod log;
+pub mod xml_path;
+pub mod script_python;
 
 pub use alarm::AlarmOperator;
 pub use filter::FilterOperator;
@@ -43,3 +45,5 @@ pub use script::ScriptOperator;
 pub use throttle::ThrottleOperator;
 pub use convert::ConvertOperator;
 pub use log::LogOperator;
+pub use xml_path::XmlPathOperator;
+pub use script_python::ScriptPythonOperator;
