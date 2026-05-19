@@ -86,6 +86,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/plugins/south/:name/tag_schema", get(handlers::south_plugin_tag_schema))
         .route("/plugins/north", get(handlers::list_north_plugins))
         .route("/plugins/north/:name/config_schema", get(handlers::north_plugin_config_schema))
+        .route("/plugins", get(handlers::plugins_all))
         .route("/nodes", get(handlers::list_nodes).post(handlers::create_node))
         .route(
             "/nodes/:id",
@@ -114,6 +115,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/nodes/:id/write_tags", post(handlers::write_tags))
         .route("/upload", post(handlers::upload_config_file))
         .route("/flows", get(flow::handlers::list_flows).post(flow::handlers::create_flow))
+        .route("/flows/operators", get(flow::handlers::list_operators))
         .route("/flows/:id", get(flow::handlers::get_flow).put(flow::handlers::update_flow).delete(flow::handlers::delete_flow))
         .route("/flows/:id/deploy", post(flow::handlers::deploy_flow))
         .route("/flows/:id/start", post(flow::handlers::start_flow))

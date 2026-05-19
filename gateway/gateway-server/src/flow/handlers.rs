@@ -189,3 +189,28 @@ pub async fn flow_metrics(
     let metrics: Vec<OperatorMetrics> = runtime.metrics();
     Ok(Json(serde_json::json!({ "metrics": metrics })))
 }
+
+// ---------- Operators ----------
+
+/// GET /flows/operators — list all registered operators with metadata
+pub async fn list_operators() -> Result<Json<serde_json::Value>, ApiError> {
+    let registry = gateway_flow::OperatorRegistry::new();
+    let names = registry.list();
+    let operators: Vec<serde_json::Value> = names
+        .iter()
+        .filter_map(|name| {
+            let meta = registry.meta(name)?;
+            Some(serde_json::json!({
+                "name": meta.name,
+                "name_zh": meta.name_zh,
+                "name_en": meta.name_en,
+                "description": meta.description,
+                "description_zh": meta.description_zh,
+                "description_en": meta.description_en,
+                "version": meta.version,
+                "kind": "operator",
+            }))
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "operators": operators })))
+}

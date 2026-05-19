@@ -715,6 +715,58 @@ pub async fn list_north_plugins(State(state): State<AppState>) -> Json<Vec<serde
     Json(result)
 }
 
+/// GET /plugins — combined list of all south + north plugins with metadata
+pub async fn plugins_all(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let south_plugins: Vec<serde_json::Value> = state
+        .manager
+        .south_plugins()
+        .into_iter()
+        .map(|p| {
+            let licensed = state.feature_manager.can_use_plugin(&p.name);
+            let is_free = crate::license::FeatureManager::is_free_plugin(&p.name);
+            serde_json::json!({
+                "name": p.name,
+                "description": p.description,
+                "version": p.version,
+                "name_zh": p.name_zh,
+                "name_en": p.name_en,
+                "description_zh": p.description_zh,
+                "description_en": p.description_en,
+                "kind": "south",
+                "licensed": licensed,
+                "is_free": is_free,
+            })
+        })
+        .collect();
+
+    let north_plugins: Vec<serde_json::Value> = state
+        .manager
+        .north_plugins()
+        .into_iter()
+        .map(|p| {
+            let licensed = state.feature_manager.can_use_plugin(&p.name);
+            let is_free = crate::license::FeatureManager::is_free_plugin(&p.name);
+            serde_json::json!({
+                "name": p.name,
+                "description": p.description,
+                "version": p.version,
+                "name_zh": p.name_zh,
+                "name_en": p.name_en,
+                "description_zh": p.description_zh,
+                "description_en": p.description_en,
+                "kind": "north",
+                "licensed": licensed,
+                "is_free": is_free,
+            })
+        })
+        .collect();
+
+    Json(serde_json::json!({
+        "south": south_plugins,
+        "north": north_plugins,
+    }))
+}
+
 pub async fn north_plugin_config_schema(
     State(state): State<AppState>,
     Path(name): Path<String>,
