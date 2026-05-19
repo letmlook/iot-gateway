@@ -19,4 +19,6 @@ members = [
     "gateway/gateway-plugins/plugin-iec61850",
     "gateway/gateway-plugins/plugin-ethernet-ip",
     "gateway/gateway-plugins/plugin-mitsubishi-mc",
+    "gateway/gateway-plugins/plugin-influxdb",
+    "gateway/gateway-plugins/plugin-tdengine",
 ]
