@@ -1,6 +1,7 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
 use std::sync::Mutex;
+use std::time::Duration;
 
 static CONN: once_cell::sync::Lazy<Mutex<Option<SNMPState>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(None));
@@ -9,7 +10,65 @@ struct SNMPState {
     host: String,
     port: u16,
     community: String,
-    version: String, // "2c" or "1"
+    timeout_ms: u64,
+}
+
+/// Parse a dotted OID string like "1.3.6.1.2.1.1.1.0" into a Vec<u32>.
+fn parse_oid(oid_str: &str) -> Option<Vec<u32>> {
+    if oid_str.is_empty() {
+        return None;
+    }
+    let parts: Vec<u32> = oid_str
+        .split('.')
+        .map(|p| p.parse::<u32>().ok())
+        .collect::<Option<_>>()?;
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts)
+    }
+}
+
+impl SNMPState {
+    /// Perform a single SNMP GET for one OID. Returns the JSON value.
+    fn get_one(&self, oid: &[u32]) -> Result<serde_json::Value, String> {
+        let addr = format!("{}:{}", self.host, self.port);
+        let timeout = Duration::from_millis(self.timeout_ms);
+
+        let community_bytes = self.community.as_bytes();
+        let mut session = snmp::SyncSession::new(&addr, community_bytes, Some(timeout), 0)
+            .map_err(|e| format!("SNMP session: {:?}", e))?;
+
+        let response = session.get(oid).map_err(|e| format!("SNMP get: {:?}", e))?;
+
+        // Varbinds is an iterator
+        let mut vb = response.varbinds;
+        if let Some((_oid, val)) = vb.next() {
+            Ok(snmp_val_to_json(&val))
+        } else {
+            Ok(serde_json::Value::Null)
+        }
+    }
+}
+
+fn snmp_val_to_json(v: &snmp::Value) -> serde_json::Value {
+    match v {
+        snmp::Value::OctetString(s) => serde_json::json!(String::from_utf8_lossy(s).to_string()),
+        snmp::Value::Integer(i) => serde_json::json!(*i),
+        snmp::Value::Unsigned32(u) => serde_json::json!(*u),
+        snmp::Value::Counter32(u) => serde_json::json!(*u),
+        snmp::Value::Counter64(u) => serde_json::json!(*u),
+        snmp::Value::Timeticks(u) => serde_json::json!(*u),
+        snmp::Value::IpAddress(a) => {
+            serde_json::json!(format!("{}.{}.{}.{}", a[0], a[1], a[2], a[3]))
+        }
+        snmp::Value::ObjectIdentifier(oid) => {
+            // Use Display trait to get dotted string
+            serde_json::json!(format!("{}", oid))
+        }
+        snmp::Value::Null => serde_json::json!(null),
+        _ => serde_json::json!(null),
+    }
 }
 
 fn result_to_json(v: serde_json::Value) -> *mut c_char {
@@ -70,43 +129,62 @@ pub unsafe extern "C" fn south_open(
         .and_then(|v| v.as_str())
         .unwrap_or("public")
         .to_string();
-    let version = config
-        .get("version")
-        .and_then(|v| v.as_str())
-        .unwrap_or("2c")
-        .to_string();
+    let timeout_ms = config
+        .get("timeout_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(3000);
 
-    let mut guard = CONN.lock().unwrap();
-    *guard = Some(SNMPState {
+    let state = SNMPState {
         host: host.clone(),
         port,
         community: community.clone(),
-        version: version.clone(),
-    });
+        timeout_ms,
+    };
 
-    result_to_json(serde_json::json!({
-        "status": "connected",
-        "host": host,
-        "port": port,
-        "community": community,
-        "version": version,
-        "note": "stub mode — real implementation requires snmp crate or snmp人一体的async library"
-    }))
+    // Real SNMP ping - try to GET sysDescr
+    let sys_descr_oid = [1, 3, 6, 1, 2, 1, 1, 1, 0];
+    let ping_result = state.get_one(&sys_descr_oid);
+
+    let mut guard = CONN.lock().unwrap();
+    *guard = Some(state);
+
+    match ping_result {
+        Ok(serde_json::Value::String(s)) => result_to_json(serde_json::json!({
+            "status": "connected",
+            "host": host,
+            "port": port,
+            "community": community,
+            "sysDescr": s,
+            "note": "SNMP connected"
+        })),
+        Ok(_) => result_to_json(serde_json::json!({
+            "status": "connected",
+            "host": host,
+            "port": port,
+            "community": community,
+            "note": "SNMP connected"
+        })),
+        Err(e) => result_to_json(serde_json::json!({
+            "status": "connected (ping failed)",
+            "host": host,
+            "port": port,
+            "community": community,
+            "error": e,
+            "note": "SNMP connected but ping failed"
+        })),
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn south_close(_handle: *mut c_void, _node_id: *const c_char) -> *mut c_char {
     let mut guard = CONN.lock().unwrap();
     *guard = None;
-    result_to_json(serde_json::json!({ "status": "disconnected" }))
+    result_to_json(serde_json::json!({ "status": "closed" }))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn south_init(
-    _handle: *mut c_void,
-    _config_json: *const c_char,
-) -> *mut c_char {
-    result_to_json(serde_json::json!({}))
+pub unsafe extern "C" fn south_init(_handle: *mut c_void, _node_id: *const c_char) -> *mut c_char {
+    result_to_json(serde_json::json!({ "status": "init ok" }))
 }
 
 #[no_mangle]
@@ -114,85 +192,92 @@ pub unsafe extern "C" fn south_uninit(
     _handle: *mut c_void,
     _node_id: *const c_char,
 ) -> *mut c_char {
-    result_to_json(serde_json::json!({}))
+    result_to_json(serde_json::json!({ "status": "uninit ok" }))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn south_start(
-    _handle: *mut c_void,
-    _config_json: *const c_char,
-) -> *mut c_char {
-    result_to_json(serde_json::json!({}))
+pub unsafe extern "C" fn south_start(_handle: *mut c_void, _node_id: *const c_char) -> *mut c_char {
+    result_to_json(serde_json::json!({ "status": "started" }))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn south_stop(_handle: *mut c_void, _node_id: *const c_char) -> *mut c_char {
-    result_to_json(serde_json::json!({}))
+    result_to_json(serde_json::json!({ "status": "stopped" }))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn south_poll_group(
     _handle: *mut c_void,
     _node_id: *const c_char,
-    group_json: *const c_char,
+    group_id: *const c_char,
+    tags_json: *const c_char,
 ) -> *mut c_char {
-    let guard = CONN.lock().unwrap();
-    if guard.is_none() {
-        return result_to_json(serde_json::json!({"error": "not connected"}));
-    }
-
-    let group = if group_json.is_null() {
-        return result_to_json(serde_json::json!({"error": "null"}));
+    let guard = match CONN.lock() {
+        Ok(g) => g,
+        Err(e) => return result_to_json(serde_json::json!({"error": e.to_string()})),
     };
-    let group_str = unsafe { CStr::from_ptr(group_json) }.to_string_lossy();
-    let group: serde_json::Value = serde_json::from_str(&group_str).unwrap_or_default();
+    let state = match guard.as_ref() {
+        Some(s) => s,
+        None => return result_to_json(serde_json::json!({"error": "not connected"})),
+    };
 
-    let mut values = serde_json::Map::new();
-    if let Some(tags) = group.get("tags").and_then(|t| t.as_array()) {
-        for tag in tags {
-            let tag_name = tag
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let address = tag.get("address").and_then(|v| v.as_str()).unwrap_or("");
+    let group_id_str = if group_id.is_null() {
+        return result_to_json(serde_json::json!({"error": "null group_id"}));
+    } else {
+        unsafe { CStr::from_ptr(group_id) }
+            .to_string_lossy()
+            .to_string()
+    };
 
-            // SNMP OID mapping — common OIDs:
-            // 1.3.6.1.2.1.1.1.0 = sysDescr
-            // 1.3.6.1.2.1.2.2.1.10.N = ifInOctets (interface N)
-            // 1.3.6.1.2.1.2.2.1.16.N = ifOutOctets
-            // 1.3.6.1.2.1.25.1.1.0 = hrStorageSize
-            let value = if address.contains("1.3.6.1.2.1.1.1") {
-                serde_json::json!("Linux router")
-            } else if address.contains("ifInOctets") || address.contains("ifOutOctets") {
-                serde_json::json!(1000000u64)
-            } else if address.contains("1.3.6.1.2.1.2.1") || address.contains("ifNumber") {
-                serde_json::json!(4u64)
-            } else if address.contains("1.3.6.1.2.1.25.2") {
-                serde_json::json!(80u64) // hrStorageUsedPercent
-            } else {
-                serde_json::json!(0u64)
-            };
-            let tag_type = if address.contains("1.3.6.1.2.1.1.1") {
-                "string"
-            } else if address.contains("ifInOctets") || address.contains("ifOutOctets") {
-                "counter"
-            } else {
-                "gauge"
-            };
+    let tags_str = if tags_json.is_null() {
+        return result_to_json(serde_json::json!({"error": "null tags"}));
+    } else {
+        unsafe { CStr::from_ptr(tags_json) }
+            .to_string_lossy()
+            .to_string()
+    };
 
-            values.insert(
-                tag_name.to_string(),
-                serde_json::json!({
-                    "value": value,
-                    "type": tag_type,
-                    "quality": "good",
-                    "timestamp": chrono::Utc::now().to_rfc3339()
-                }),
-            );
+    let tags: Vec<serde_json::Value> = serde_json::from_str(&tags_str).unwrap_or_default();
+
+    let mut values: Vec<serde_json::Value> = Vec::new();
+    for tag in &tags {
+        let address = tag.get("address").and_then(|a| a.as_str()).unwrap_or("");
+        let oid = match parse_oid(address) {
+            Some(o) => o,
+            None => {
+                values.push(serde_json::json!({
+                    "tag": tag.get("tag").or(tag.get("id")),
+                    "address": address,
+                    "value": serde_json::Value::Null,
+                    "error": "invalid OID"
+                }));
+                continue;
+            }
+        };
+
+        match state.get_one(&oid) {
+            Ok(val) => {
+                values.push(serde_json::json!({
+                    "tag": tag.get("tag").or(tag.get("id")),
+                    "address": address,
+                    "value": val
+                }));
+            }
+            Err(e) => {
+                values.push(serde_json::json!({
+                    "tag": tag.get("tag").or(tag.get("id")),
+                    "address": address,
+                    "value": serde_json::Value::Null,
+                    "error": e
+                }));
+            }
         }
     }
 
-    result_to_json(serde_json::json!({ "values": values }))
+    result_to_json(serde_json::json!({
+        "group_id": group_id_str,
+        "values": values
+    }))
 }
 
 #[no_mangle]
@@ -201,23 +286,31 @@ pub unsafe extern "C" fn south_validate_tag(
     _node_id: *const c_char,
     tag_json: *const c_char,
 ) -> *mut c_char {
-    let tag = if tag_json.is_null() {
-        return result_to_json(serde_json::json!({"valid": false}));
+    let tag_str = if tag_json.is_null() {
+        return result_to_json(serde_json::json!({"error": "null"}));
     };
     let tag_str = unsafe { CStr::from_ptr(tag_json) }.to_string_lossy();
-    // Valid OID format: dotted numbers e.g., 1.3.6.1.2.1.1.1.0
-    let valid = !tag_str.is_empty() && tag_str.split('.').all(|p| p.parse::<u64>().is_ok());
-    result_to_json(serde_json::json!({ "valid": valid }))
+    let tag: serde_json::Value = serde_json::from_str(&tag_str).unwrap_or_default();
+
+    let address = tag.get("address").and_then(|v| v.as_str()).unwrap_or("");
+    let valid = parse_oid(address).is_some();
+
+    result_to_json(serde_json::json!({
+        "valid": valid,
+        "address": address
+    }))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn south_write_tags(
     _handle: *mut c_void,
     _node_id: *const c_char,
-    _write_json: *const c_char,
+    _writes_json: *const c_char,
 ) -> *mut c_char {
-    // SNMP SET is supported in v1/v2c for writable OIDs
-    result_to_json(serde_json::json!({ "written": 0, "note": "SNMP write not implemented" }))
+    result_to_json(serde_json::json!({
+        "written": 0,
+        "error": "SNMP write not implemented"
+    }))
 }
 
 #[no_mangle]
@@ -226,10 +319,7 @@ pub unsafe extern "C" fn south_list_groups(
     _node_id: *const c_char,
 ) -> *mut c_char {
     result_to_json(serde_json::json!({
-        "groups": [
-            { "id": "interface", "name": "Network Interfaces", "interval_ms": 1000 },
-            { "id": "system", "name": "System Info", "interval_ms": 5000 }
-        ]
+        "groups": [{ "id": "default", "name": "Default", "interval_ms": 1000 }]
     }))
 }
 
@@ -240,12 +330,7 @@ pub unsafe extern "C" fn south_list_tags(
     _group_id: *const c_char,
 ) -> *mut c_char {
     result_to_json(serde_json::json!({
-        "tags": [
-            { "name": "sysDescr", "address": "1.3.6.1.2.1.1.1.0", "type": "string", "access": "read" },
-            { "name": "ifNumber", "address": "1.3.6.1.2.1.2.1.0", "type": "gauge", "access": "read" },
-            { "name": "ifInOctets_1", "address": "1.3.6.1.2.1.2.2.1.10.1", "type": "counter", "access": "read" },
-            { "name": "ifOutOctets_1", "address": "1.3.6.1.2.1.2.2.1.16.1", "type": "counter", "access": "read" }
-        ]
+        "tags": []
     }))
 }
 
@@ -254,11 +339,30 @@ pub unsafe extern "C" fn south_config_schema(_handle: *mut c_void) -> *mut c_cha
     let schema = serde_json::json!({
         "type": "object",
         "properties": {
-            "host": { "type": "string", "default": "192.168.1.1" },
-            "port": { "type": "number", "default": 161 },
-            "community": { "type": "string", "default": "public" },
-            "version": { "type": "string", "enum": ["1", "2c"], "default": "2c" },
-            "timeout_ms": { "type": "number", "default": 3000 }
+            "host": {
+                "type": "string",
+                "title": "Host",
+                "default": "192.168.1.1",
+                "description": "SNMP agent IP address"
+            },
+            "port": {
+                "type": "integer",
+                "title": "Port",
+                "default": 161,
+                "description": "SNMP UDP port"
+            },
+            "community": {
+                "type": "string",
+                "title": "Community",
+                "default": "public",
+                "description": "SNMP v2c community string"
+            },
+            "timeout_ms": {
+                "type": "integer",
+                "title": "Timeout (ms)",
+                "default": 3000,
+                "description": "Request timeout in milliseconds"
+            }
         }
     });
     CString::new(schema.to_string()).unwrap().into_raw()

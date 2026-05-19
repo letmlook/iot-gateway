@@ -2,9 +2,11 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
 use std::sync::Mutex;
 
+use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::{connect_async, tungstenite::Message};
+
 struct WebSocketState {
     url: String,
-    connected: bool,
 }
 
 static STATE: once_cell::sync::Lazy<Mutex<Option<WebSocketState>>> =
@@ -12,6 +14,12 @@ static STATE: once_cell::sync::Lazy<Mutex<Option<WebSocketState>>> =
 
 fn result_to_json(v: serde_json::Value) -> *mut c_char {
     CString::new(v.to_string()).unwrap().into_raw()
+}
+
+/// Synchronous wrapper that bridges the async tokio-tungstenite world
+/// into the blocking FFI calls by grabbing the current Tokio runtime handle.
+fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    tokio::runtime::Handle::current().block_on(f)
 }
 
 #[no_mangle]
@@ -41,20 +49,28 @@ pub unsafe extern "C" fn north_meta() -> *mut c_char {
 
 #[no_mangle]
 pub unsafe extern "C" fn north_free_string(s: *mut c_char) {
-    if !s.is_null() { drop(unsafe { CString::from_raw(s) }); }
+    if !s.is_null() {
+        drop(unsafe { CString::from_raw(s) });
+    }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn north_open(_handle: *mut c_void, config_json: *const c_char) -> *mut c_char {
-    let config = if config_json.is_null() { return result_to_json(serde_json::json!({"error": "null"})); };
+pub unsafe extern "C" fn north_open(
+    _handle: *mut c_void,
+    config_json: *const c_char,
+) -> *mut c_char {
     let config_str = unsafe { CStr::from_ptr(config_json) }.to_string_lossy();
     let config: serde_json::Value = serde_json::from_str(&config_str).unwrap_or_default();
-    
-    let url = config.get("url").and_then(|v| v.as_str()).unwrap_or("ws://localhost:8080/ws").to_string();
-    
+
+    let url = config
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("ws://localhost:8080/ws")
+        .to_string();
+
     let mut guard = STATE.lock().unwrap();
-    *guard = Some(WebSocketState { url: url.clone(), connected: true });
-    
+    *guard = Some(WebSocketState { url: url.clone() });
+
     result_to_json(serde_json::json!({ "status": "connected", "url": url }))
 }
 
@@ -66,22 +82,34 @@ pub unsafe extern "C" fn north_close(_handle: *mut c_void, _node_id: *const c_ch
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn north_init(_handle: *mut c_void, _config_json: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn north_init(
+    _handle: *mut c_void,
+    _config_json: *const c_char,
+) -> *mut c_char {
     result_to_json(serde_json::json!({}))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn north_uninit(_handle: *mut c_void, _node_id: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn north_uninit(
+    _handle: *mut c_void,
+    _node_id: *const c_char,
+) -> *mut c_char {
     result_to_json(serde_json::json!({}))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn north_start(_handle: *mut c_void, _config_json: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn north_start(
+    _handle: *mut c_void,
+    _config_json: *const c_char,
+) -> *mut c_char {
     result_to_json(serde_json::json!({}))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn north_stop(_handle: *mut c_void, _node_id: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn north_stop(
+    _handle: *mut c_void,
+    _node_id: *const c_char,
+) -> *mut c_char {
     result_to_json(serde_json::json!({}))
 }
 
@@ -91,30 +119,47 @@ pub unsafe extern "C" fn north_on_group_data(
     _node_id: *const c_char,
     group_json: *const c_char,
 ) -> *mut c_char {
-    let guard = STATE.lock().unwrap();
-    let state = match guard.as_ref() {
-        Some(s) => s,
-        None => return result_to_json(serde_json::json!({"error": "not connected"})),
+    let state = {
+        let guard = STATE.lock().unwrap();
+        match guard.as_ref() {
+            Some(s) => s.url.clone(),
+            None => return result_to_json(serde_json::json!({"error": "not connected"})),
+        }
     };
-    
-    let data = if group_json.is_null() { return result_to_json(serde_json::json!({"error": "null"})); };
+
+    if group_json.is_null() {
+        return result_to_json(serde_json::json!({"error": "null"}));
+    }
     let data_str = unsafe { CStr::from_ptr(group_json) }.to_string_lossy();
-    let data: serde_json::Value = serde_json::from_str(&data_str).unwrap_or_default();
-    
-    // In real impl: send JSON over WebSocket to state.url
-    // Stub: just return success with payload size
-    let payload = serde_json::to_string(&data).unwrap_or_default();
-    let size = payload.len();
-    
-    result_to_json(serde_json::json!({
-        "sent": size,
-        "endpoint": state.url,
-        "note": "stub mode — real implementation uses tokio-tungstenite"
-    }))
+
+    // Validate that the incoming JSON is well-formed before sending.
+    #[allow(unused)]
+    let _data: Result<serde_json::Value, _> = serde_json::from_str(&data_str);
+
+    let send_result = block_on(send_over_ws(state.clone(), data_str.to_string()));
+
+    match send_result {
+        Ok(()) => result_to_json(serde_json::json!({
+            "sent": data_str.len(),
+            "endpoint": state,
+        })),
+        Err(e) => result_to_json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+async fn send_over_ws(url: String, payload: String) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let (ws, _) = connect_async(&url).await?;
+    let (mut sink, _stream) = ws.split();
+    sink.send(Message::Text(payload)).await?;
+    Ok(())
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn north_set_subscriptions(_handle: *mut c_void, _node_id: *const c_char, _sub_json: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn north_set_subscriptions(
+    _handle: *mut c_void,
+    _node_id: *const c_char,
+    _sub_json: *const c_char,
+) -> *mut c_char {
     result_to_json(serde_json::json!({}))
 }
 
@@ -132,7 +177,10 @@ pub unsafe extern "C" fn north_config_schema(_handle: *mut c_void) -> *mut c_cha
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn north_connection_status(_handle: *mut c_void, _node_id: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn north_connection_status(
+    _handle: *mut c_void,
+    _node_id: *const c_char,
+) -> *mut c_char {
     let guard = STATE.lock().unwrap();
     result_to_json(serde_json::json!({ "status": if guard.is_some() { "connected" } else { "disconnected" } }))
 }

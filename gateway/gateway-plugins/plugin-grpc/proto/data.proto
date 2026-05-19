@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package iot;
+
+message TagValue {
+  string name = 1;
+  string value = 2;
+  int64 timestamp = 3;
+  string quality = 4;
+}
+
+message GroupData {
+  string group_id = 1;
+  string node_id = 2;
+  repeated TagValue tags = 3;
+  int64 timestamp = 4;
+}
+
+message PushDataRequest {
+  GroupData data = 1;
+}
+
+message PushDataResponse {
+  bool success = 1;
+  string message = 2;
+  int32 tags_received = 3;
+}
+
+service DataSink {
+  rpc PushData(PushDataRequest) returns (PushDataResponse);
+}

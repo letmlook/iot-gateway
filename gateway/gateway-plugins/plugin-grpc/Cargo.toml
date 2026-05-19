@@ -13,6 +13,8 @@ tonic = { version = "0.12", features = ["transport", "tls"] }
 prost = "0.13"
 bytes = "1"
 once_cell = "1"
+http-body = "1"
+tower = { version = "0.5", features = ["util"] }
 
 [lib]
 path = "src/lib.rs"

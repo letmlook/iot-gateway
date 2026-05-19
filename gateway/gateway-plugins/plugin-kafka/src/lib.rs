@@ -11,6 +11,8 @@ struct KafkaState {
     brokers: String,
     #[allow(dead_code)]
     topic: String,
+    #[cfg(feature = "kafka-client")]
+    producer: std::sync::Mutex<Option<rdkafka::producer::Producer>>,
 }
 
 static KAFKA_STATE: once_cell::sync::Lazy<Mutex<Option<KafkaState>>> =
@@ -72,9 +74,23 @@ pub unsafe extern "C" fn north_open(
         .and_then(|v| v.as_str())
         .unwrap_or("iot-data");
 
+    #[cfg(feature = "kafka-client")]
+    let producer = {
+        let conf = rdkafka::config::ClientConfig::new();
+        let conf = conf.set("bootstrap.servers", brokers);
+        match conf.set("message.timeout.ms", "5000").create::<rdkafka::producer::Producer>() {
+            Ok(p) => std::sync::Mutex::new(Some(p)),
+            Err(e) => return result_to_json(serde_json::json!({"error": e.to_string()})),
+        }
+    };
+
+    #[cfg(not(feature = "kafka-client"))]
+    let producer = ();
+
     let state = KafkaState {
         brokers: brokers.to_string(),
         topic: topic.to_string(),
+        producer,
     };
     let mut guard = KAFKA_STATE.lock().unwrap();
     *guard = Some(state);
@@ -139,18 +155,59 @@ pub unsafe extern "C" fn north_on_group_data(
         None => return result_to_json(serde_json::json!({"error": "not connected"})),
     };
 
-    // Log the data that would be sent
-    tracing::info!(
-        "kafka: would send {} to {} ({})",
-        data,
-        state.topic,
-        state.brokers
-    );
+    #[cfg(feature = "kafka-client")]
+    {
+        let producer_guard = state.producer.lock().unwrap();
+        let producer = match producer_guard.as_ref() {
+            Some(p) => p,
+            None => return result_to_json(serde_json::json!({"error": "no producer"})),
+        };
 
-    result_to_json(serde_json::json!({
-        "sent": 1,
-        "note": "stub mode - kafka client not available"
-    }))
+        let payload = rdkafka::producer::ProducerRecordBuilder::new(
+            state.topic.clone(),
+            rdkafka::message::OwnedMessage::new(
+                data.into_bytes(),
+                None,
+                format!("{}-{}", state.brokers, chrono::Utc::now().timestamp_millis()).into(),
+            ),
+        )
+        .key(&state.brokers)
+        .build();
+
+        match producer.send(payload) {
+            Ok((partition, offset)) => {
+                tracing::info!(
+                    "kafka: sent to {} [{}] offset={}",
+                    state.topic,
+                    partition,
+                    offset
+                );
+                result_to_json(serde_json::json!({
+                    "sent": 1,
+                    "partition": partition,
+                    "offset": offset
+                }))
+            }
+            Err((e, _)) => {
+                tracing::warn!("kafka: failed to send to {}: {}", state.topic, e);
+                result_to_json(serde_json::json!({"error": e.to_string()}))
+            }
+        }
+    }
+
+    #[cfg(not(feature = "kafka-client"))]
+    {
+        tracing::info!(
+            "kafka: would send {} to {} ({})",
+            data,
+            state.topic,
+            state.brokers
+        );
+        result_to_json(serde_json::json!({
+            "sent": 1,
+            "note": "stub mode - kafka client not available"
+        }))
+    }
 }
 
 #[no_mangle]

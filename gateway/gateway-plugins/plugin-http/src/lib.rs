@@ -150,18 +150,58 @@ pub unsafe extern "C" fn north_on_group_data(
         None => return result_to_json(serde_json::json!({"error": "not connected"})),
     };
 
-    // Log the data that would be sent
-    tracing::info!(
-        "http: would send {} to {} ({})",
-        data,
-        state.endpoint,
-        state.method
-    );
+    #[cfg(feature = "http-client")]
+    {
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => return result_to_json(serde_json::json!({"error": e.to_string()})),
+        };
 
-    result_to_json(serde_json::json!({
-        "sent": 1,
-        "note": "stub mode - HTTP client not available"
-    }))
+        let mut req = match state.method.to_uppercase().as_str() {
+            "PUT" => client.put(state.endpoint.as_str()),
+            _ => client.post(state.endpoint.as_str()),
+        };
+
+        for (k, v) in &state.headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+
+        match req.json(&data).send() {
+            Ok(resp) => {
+                tracing::info!(
+                    "http: sent {} bytes to {}, status={}",
+                    data.len(),
+                    state.endpoint,
+                    resp.status()
+                );
+                result_to_json(serde_json::json!({
+                    "sent": 1,
+                    "status": resp.status().as_u16()
+                }))
+            }
+            Err(e) => {
+                tracing::warn!("http: failed to send to {}: {}", state.endpoint, e);
+                result_to_json(serde_json::json!({"error": e.to_string()}))
+            }
+        }
+    }
+
+    #[cfg(not(feature = "http-client"))]
+    {
+        tracing::info!(
+            "http: would send {} to {} ({})",
+            data,
+            state.endpoint,
+            state.method
+        );
+        result_to_json(serde_json::json!({
+            "sent": 1,
+            "note": "stub mode - HTTP client not available"
+        }))
+    }
 }
 
 #[no_mangle]
