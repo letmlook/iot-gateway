@@ -57,6 +57,7 @@ impl OperatorRegistry {
     fn register_builtin_operators(&mut self) {
         use crate::operators::filter;
         use crate::operators::transform;
+        use crate::operators::aggregate;
 
         self.register(
             "filter",
@@ -86,6 +87,21 @@ impl OperatorRegistry {
                 description_en: Some("Transform fields using rhai expressions"),
             },
             || Box::new(transform::TransformOperator::new("[]")),
+        );
+
+        self.register(
+            "aggregate",
+            gateway_sdk::PluginMeta {
+                name: "aggregate",
+                kind: gateway_sdk::PluginKind::Operator,
+                description: Some("Aggregate data over time windows"),
+                version: "0.1.0",
+                name_zh: Some("聚合器"),
+                name_en: Some("Aggregate"),
+                description_zh: Some("按时间窗口聚合数据，支持 Sum/Avg/Min/Max/Count"),
+                description_en: Some("Aggregate data over time windows with Sum/Avg/Min/Max/Count"),
+            },
+            || Box::new(aggregate::AggregateOperator::new(60, "[]")),
         );
     }
 }
