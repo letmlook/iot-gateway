@@ -31,6 +31,7 @@ const mainNavItems = [
   { path: '/south', icon: 'devices', labelKey: 'menu.southDevices' },
   { path: '/north', icon: 'cloud', labelKey: 'menu.northApps' },
   { path: '/monitor', icon: 'monitor', labelKey: 'menu.dataMonitor' },
+  { path: '/flows', icon: 'flow', labelKey: 'menu.flowOrchestration' },
   { path: '/plugins', icon: 'plugins', labelKey: 'menu.pluginManage' },
 ]
 

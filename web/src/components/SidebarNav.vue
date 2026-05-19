@@ -85,6 +85,9 @@ function toggleCollapsed() {
           <svg v-else-if="item.icon === 'plugins'" viewBox="0 0 20 20" fill="currentColor">
             <path d="M11 17a1 1 0 001.447.894l4-2A1 1 0 0017 15V9.236a1 1 0 00-1.447-.894l-4 2a1 1 0 00-.553.894V17zM15.211 6.276a1 1 0 000-1.788l-4.764-2.382a1 1 0 00-.894 0L4.789 4.488a1 1 0 000 1.788l4.764 2.382a1 1 0 00.894 0l4.764-2.382zM4.447 8.342A1 1 0 003 9.236V15a1 1 0 00.553.894l4 2A1 1 0 009 17v-5.764a1 1 0 00-.553-.894l-4-2z"/>
           </svg>
+          <svg v-else-if="item.icon === 'flow'" viewBox="0 0 20 20" fill="currentColor">
+            <path d="M3 4a1 1 0 000 2v4a1 1 0 001 1h3v1a1 1 0 01-1 1H4v3a1 1 0 01-1 1H1v2a1 1 0 001 1h4a1 1 0 001-1v-1h3a1 1 0 001-1V7h1a1 1 0 001-1V4a1 1 0 00-1-1H9V1a1 1 0 011-1h2a1 1 0 011 1v1h1a1 1 0 011 1v2a1 1 0 01-1 1h-1v1a1 1 0 01-1 1H4a1 1 0 01-1-1V6a1 1 0 00-1-1H1a1 1 0 00-1 1v3a1 1 0 001 1h4v2H3V4z"/>
+          </svg>
         </span>
         <span class="nav-label">{{ item.label }}</span>
         <span v-if="item.badge && item.badge > 0" class="nav-badge">{{ item.badge }}</span>

@@ -94,6 +94,8 @@ export default {
     usersDesc: 'Users & roles',
     dataFlowMetrics: 'Data Flow Metrics',
     dataFlowMetricsDesc: 'Data flow monitoring',
+    flowOrchestration: 'Flow Orchestration',
+    flowOrchestrationDesc: 'Data flow visual orchestration',
     appName: 'IoT Gateway',
     expandMenu: 'Expand menu',
     collapseMenu: 'Collapse menu',

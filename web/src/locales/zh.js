@@ -94,6 +94,8 @@ export default {
     usersDesc: '用户与角色',
     dataFlowMetrics: '数据流指标',
     dataFlowMetricsDesc: '数据流链路监控',
+    flowOrchestration: '数据流编排',
+    flowOrchestrationDesc: '数据流可视化编排',
     appName: 'IoT 网关',
     expandMenu: '展开菜单',
     collapseMenu: '收起菜单',

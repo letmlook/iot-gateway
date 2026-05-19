@@ -85,6 +85,24 @@ const routes = [
     meta: { title: '数据流指标' }
   },
   {
+    path: '/flows',
+    name: 'FlowList',
+    component: () => import('./views/FlowList.vue'),
+    meta: { title: '数据流编排' }
+  },
+  {
+    path: '/flows/new',
+    name: 'FlowCreate',
+    component: () => import('./views/FlowEditor.vue'),
+    meta: { title: '新建数据流' }
+  },
+  {
+    path: '/flows/:id',
+    name: 'FlowDetail',
+    component: () => import('./views/FlowEditor.vue'),
+    meta: { title: '编辑数据流' }
+  },
+  {
     path: '/plugins',
     name: 'Plugins',
     component: () => import('./views/Plugins.vue'),

@@ -232,4 +232,21 @@ export const api = {
   // 系统配置
   getSystemConfig: () => req('GET', '/system/config'),
   setSystemConfig: (config) => req('PUT', '/system/config', config),
+
+  // Flow CRUD
+  flows: () => req('GET', '/flows'),
+  flow: (id) => req('GET', `/flows/${id}`),
+  createFlow: (body) => req('POST', '/flows', body),
+  updateFlow: (id, body) => req('PUT', `/flows/${id}`, body),
+  deleteFlow: (id) => req('DELETE', `/flows/${id}`),
+
+  // Flow lifecycle
+  deployFlow: (id) => req('POST', `/flows/${id}/deploy`),
+  startFlow: (id) => req('POST', `/flows/${id}/start`),
+  pauseFlow: (id) => req('POST', `/flows/${id}/pause`),
+  stopFlow: (id) => req('POST', `/flows/${id}/stop`),
+  flowMetrics: (id) => req('GET', `/flows/${id}/metrics`),
+
+  // Operators
+  operators: () => req('GET', '/flows/operators'),
 }
