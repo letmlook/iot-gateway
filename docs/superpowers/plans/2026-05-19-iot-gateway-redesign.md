@@ -1,0 +1,611 @@
+# IoT 网关破坏性重构：最终形态设计
+
+> 文档版本：v1.0
+> 日期：2026-05-19
+> 目标：不考虑兼容，完全重新设计，实现可视化物联网数据流编排平台
+
+---
+
+## 一、设计愿景
+
+构建一个**可插件化扩展的物联网数据流编排平台**，核心能力：
+
+- **采集层（South）**：通过插件接入任何工业协议
+- **处理层（Operator）**：通过插件实现数据转换、过滤、聚合、路由
+- **传输层（North）**：通过插件将数据发送到任意云端/应用
+- **编排层（Flow）**：通过可视化拖拽画布编排数据流
+- **新协议接入 = 实现一个插件，无须修改核心代码**
+
+---
+
+## 二、目标架构
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                        Web UI (Vue3)                        │
+│  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────┐ │
+│  │  Flow      │  │  Plugin    │  │  Data      │  │ System │ │
+│  │  Editor    │  │  Manager   │  │  Monitor   │  │ Config │ │
+│  │  (拖拽画布) │  │  (插件配置) │  │  (实时数据) │  │        │ │
+│  └────────────┘  └────────────┘  └────────────┘  └────────┘ │
+└──────────────────────────┬───────────────────────────────────┘
+                           │ REST + WebSocket
+┌──────────────────────────▼───────────────────────────────────┐
+│                   Gateway Server (Axum)                      │
+│                                                             │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │              Flow Orchestrator (NEW)                   │   │
+│  │  - Flow Definition CRUD                              │   │
+│  │  - Flow Instance Lifecycle                             │   │
+│  │  - Operator Scheduling                                 │   │
+│  │  - Data Pipeline Execution                            │   │
+│  └──────────────────────────────────────────────────────┘   │
+│                                                             │
+│  ┌──────────────┐  ┌──────────────────┐  ┌──────────────┐  │
+│  │ SouthPlugin  │  │ OperatorPlugin   │  │ NorthPlugin  │  │
+│  │  (采集)       │─▶│  (数据处理)       │─▶│  (传输)       │  │
+│  │              │  │  (插件化)         │  │              │  │
+│  └──────────────┘  └──────────────────┘  └──────────────┘  │
+└──────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 三、插件体系（三层）
+
+### Layer 1: South Plugins（采集层）
+
+| ID | 插件名 | 协议 | 状态 |
+|----|--------|------|------|
+| S01 | sim | 模拟数据 | ✅ 已有 |
+| S02 | modbus-tcp | Modbus TCP | ✅ 已有 |
+| S03 | modbus-rtu | Modbus RTU（串口） | ✅ 已有 |
+| S04 | opcua | OPC UA | ✅ 已有 |
+| S05 | bacnet | BACnet/IP | 🆕 新增 |
+| S06 | s7 | Siemens S7 (1200/1500/300/400) | 🆕 新增 |
+| S07 | iec61850 | IEC 61850 (MMS/GOOSE/SV) | 🆕 新增 |
+| S08 | ethernet-ip | EtherNet/IP (AB PLC) | 🆕 新增 |
+| S09 | mitsubishi-mc | 三菱 MC 协议 | 🆕 新增 |
+| S10 | omron-fins | Omron FINS | 🆕 新增 |
+| S11 | hollysys | 和利时 DCS | 🆕 新增 |
+| S12 | deltadvp | 台达 DVP | 🆕 新增 |
+| S13 | yokogawa | 横河 DCS (Centum/PROSEC) | 🆕 新增 |
+| S14 | abb-dcs | ABB 800xA / Industrial IT | 🆕 新增 |
+| S15 | honeywell-pks | Honeywell PKS | 🆕 新增 |
+| S16 | emerson-deltav | Emerson DeltaV | 🆕 新增 |
+| S17 | siemens-pcs7 | Siemens PCS 7 | 🆕 新增 |
+| S18 | dlt645 | DL/T645（电能表） | 🆕 新增 |
+| S19 | gb28181 | GB/T 28181（视频监控） | 🆕 新增 |
+| S20 | knx | KNX 总线 | 🆕 新增 |
+| S21 | enocean | EnOcean 无线 | 🆕 新增 |
+| S22 | mbus | M-Bus（热量表） | 🆕 新增 |
+| S23 | obix | oBIX 协议 | 🆕 新增 |
+| S24 | ethercat | EtherCAT | 🆕 新增 |
+| S25 | profinet | PROFINET | 🆕 新增 |
+| S26 | userprog | 用户自定义程序 | 🆕 新增 |
+
+### Layer 2: Operator Plugins（处理层）🆕 NEW
+
+|| ID | 插件名 | 功能 | 复杂度 | 参考实现 |
+|----|--------|------|--------|---------|
+|| O01 | filter | 按条件过滤数据（表达式） | ⭐ | NeuronEX / Node-RED |
+|| O02 | transform | 数据类型转换、缩放、计算 | ⭐ | NeuronEX |
+|| O03 | aggregate | 窗口聚合（count/sum/avg/max/min/first/last） | ⭐⭐ | Apache Flink / NeuronEX |
+|| O04 | router | 按条件路由到不同下游分支 | ⭐ | Node-RED |
+|| O05 | buffer | 缓冲批量输出（攒批） | ⭐ | Node-RED / MQTT Bridge |
+|| O06 | delay | 延迟注入 | ⭐ | Node-RED |
+|| O07 | script-js | JavaScript 脚本自定义处理 | ⭐⭐ | Node-RED / EMQX |
+|| O08 | script-python | Python 脚本自定义处理 | ⭐⭐ | NeuronEX Enterprise |
+|| O09 | json-path | JSON 路径提取 | ⭐ | Jayway JsonPath |
+|| O10 | xml-path | XML 路径提取 | ⭐⭐ | Apache JMeter XPath |
+|| O11 | splitter | 批量消息拆分 | ⭐ | Node-RED |
+|| O12 | merger | 多源数据合并 | ⭐⭐ | Node-RED / Apache Flink |
+|| O13 | cache | 缓存（读上一条值/时间窗口） | ⭐⭐ | Redis / In-Memory |
+|| O14 | throttle | 限流/采样 | ⭐ | Node-RED / EMQX |
+|| O15 | alarm | 告警规则（阈值/状态/变化率） | ⭐⭐⭐ | NeuronEX / industrial frameworks |
+|| O16 | batch | 批量分组 | ⭐ | Node-RED / Apache Kafka |
+|| O17 | switch | 多分支条件匹配（比router更强大） | ⭐ | Node-RED |
+|| O18 | clamp | 值域限幅（上下限截断） | ⭐ | — |
+|| O19 | round | 数值取整（round/ceil/floor） | ⭐ | — |
+|| O20 | change | 特定字段替换/删除/重命名 | ⭐ | Node-RED |
+|| O21 | range | 线性变换（将值从一个范围映射到另一个范围） | ⭐ | Node-RED |
+|| O22 | csv-parser | CSV 编码/解码 | ⭐⭐ | — |
+|| O23 | binary | 二进制解析（字节位操作） | ⭐⭐ | — |
+|| O24 | time-window | 时间窗口缓存（滑动/滚动窗口） | ⭐⭐⭐ | Apache Flink / Kafka Streams |
+|| O25 | deadband | 死区过滤（变化量小于阈值则忽略） | ⭐ | industrial SCADA |
+|| O26 | formula | 公式解析求值（支持数学函数） | ⭐⭐ | NeuronEX |
+|| O27 | string-ops | 字符串操作（trim/substring/regex/replace） | ⭐ | — |
+|| O28 | timestamp | 时间戳操作（转换/格式化/解析） | ⭐ | — |
+
+---
+
+## 三-附录：算子技术调研
+
+### 1. 行业参考实现
+
+#### NeuronEX（南潮物联）
+- **内置算子**：filter、transform、aggregate、router、switch、json-path、xml-path、formula、string-ops、time-window、deadband、range、round、clamp 等 28 个
+- **特点**：工业级稳定，支持插件扩展
+- **窗口机制**： Tumbling Window（滚动）、Sliding Window（滑动）、Count Window、Session Window
+- **表达式引擎**：基于 Rust 动态脚本（rhai）
+
+#### Node-RED
+- **内置节点**：filter(change)、switch、router(split/join)、delay、buffer(batch)、throttle、template、csv、json、xml、function(script-js)、rbe(deadband)
+- **特点**：轻量、社区活跃，适合快速原型
+- **不足**：无原生时间窗口聚合（需额外节点库 node-red-contrib-windows）
+
+#### Apache Flink
+- **算子类型**：Map、Filter、FlatMap、KeyBy、Window、Reduce、Aggregate、Fold、Process
+- **窗口**：TumblingEventTimeWindow、SlidingEventTimeWindow、SessionWindow、CounWindow
+- **特点**：分布式、流批一体，工业级
+- **不足**：重量级，不适合边缘网关
+
+#### EMQX Rule Engine
+- **内置函数**：50+ SQL 函数（数学、字符串、时间、JSON、MQTT）
+- **特点**：规则 SQL 化，数据流编排
+- **不足**：依赖 MQTT 生态，非独立部署
+
+### 2. 表达式引擎选型（O01 Filter / O26 Formula 核心）
+
+| 引擎 | 语言 | 性能 | 安全性 | 适用场景 |
+|------|------|------|--------|---------|
+| **rhai** | Rust 嵌入 | 极高 | 沙箱/受限 | 高性能数据处理（网关首选） |
+| **mujs** | C 嵌入 | 高 | 沙箱 | JavaScript 脚本执行 |
+| **PyO3** | Rust+Python | 高 | 沙箱（受限） | Python 脚本（重量级） |
+| **jsonpath-rust** | Rust | 极高 | 无脚本 | JSON 路径提取 |
+| **xpath** | Rust xmltree | 高 | 无脚本 | XML 路径提取 |
+| **formicai/evalexpr** | Rust | 极高 | 沙箱 | 通用表达式求值 |
+
+**推荐**：rhai（主）+ mujs（JS扩展）
+
+### 3. 时间窗口实现方案
+
+窗口是 aggregate 和 time-window 的核心能力，分4类：
+
+| 窗口类型 | 触发时机 | 适用场景 | 实现复杂度 |
+|---------|---------|---------|-----------|
+| **Tumbling Window**（滚动） | 窗口结束时 | 固定周期统计（每分钟均值） | ⭐ |
+| **Sliding Window**（滑动） | 窗口滑动步长 | 移动平均、趋势检测 | ⭐⭐ |
+| **Count Window**（计数） | 达到N条 | 凑满N条再处理 | ⭐ |
+| **Session Window**（会话） | 间隙超时 | 用户行为分析 | ⭐⭐⭐ |
+
+**实现技术**：
+- 边缘网关轻量级：用 `tokio::time::Interval` + `HashMap<WindowKey, Vec<Data>>`
+- 进阶：参考 Flink 的 watermark 机制，处理乱序数据
+
+### 4. 脚本算子安全性
+
+O07（JavaScript）和 O08（Python）均为用户自定义脚本，必须沙箱化：
+
+**JS 沙箱方案**：
+```
+mujs（轻量）> Duktape（已停止维护）> QuickJS（推荐）
+  → 禁用：eval、Function.constructor、require、import
+  → 只暴露：math、json、date、string、number 操作
+```
+
+**Python 沙箱方案**：
+```
+PyO3（Rust 调用 Python）
+  → 禁用：os、sys、subprocess、socket、import
+  → 只暴露：math、json、datetime、collections、statistics
+  → 超时控制：每个脚本最大执行时间（如 100ms）
+```
+
+### 5. 算子实现优先级
+
+| 优先级 | 算子 | 理由 |
+|--------|------|------|
+| **P0 必须** | O01 filter, O02 transform, O04 router | 核心数据流处理 |
+| **P1 高优** | O03 aggregate, O05 buffer, O26 formula | 统计类场景必需 |
+| **P2 中优** | O07 script-js, O09 json-path, O25 deadband, O15 alarm | 灵活扩展性 |
+| **P3 低优** | O08 script-python, O24 time-window, O22 csv-parser | 高级特性 |
+
+### 6. 算子与数据流模式
+
+常见工业数据流编排模式：
+
+```
+模式1: 采集 → Filter → Transform → Aggregate(1min) → MQTT
+  用途: 数据清洗 + 统计上报
+
+模式2: 采集 → Deadband → Router → [Alarm分支 → HTTP] [Normal分支 → MQTT]
+  用途: 异常数据分离告警
+
+模式3: [South-A] ─┐
+                 ├─→ Merger → Aggregate → North-MQTT
+[South-B] ──────┘
+  用途: 多源数据汇聚统计
+
+模式4: 采集 → TimeWindow(sliding 30s/10s) → Aggregate(avg) → Throttle → MQTT
+  用途: 平滑数据上报、降低带宽
+
+模式5: 采集 → Script-JS(自定义计算) → Transform → Batch(攒50条) → HTTP POST
+  用途: 批量数据上报企业系统
+```
+
+### Layer 3: North Plugins（传输层）
+
+| ID | 插件名 | 协议 | 状态 |
+|----|--------|------|------|
+| N01 | mqtt | MQTT v3.1.1 / v5.0 | ✅ 已有 |
+| N02 | http | HTTP POST/GET/PUT | 🆕 新增 |
+| N03 | websocket | WebSocket Server/Push | 🆕 新增 |
+| N04 | sparkplugb | Sparkplug B | 🆕 新增 |
+| N05 | opcua-server | OPC UA Server | 🆕 新增 |
+| N06 | grpc | gRPC | 🆕 新增 |
+| N07 | kafka | Apache Kafka | 🆕 新增 |
+| N08 | influxdb | InfluxDB | 🆕 新增 |
+| N09 | tdengine | TDengine | 🆕 新增 |
+| N10 | timescaledb | TimescaleDB | 🆕 新增 |
+| N11 | postgresql | PostgreSQL | 🆕 新增 |
+| N12 | mysql | MySQL | 🆕 新增 |
+| N13 | oracle | Oracle | 🆕 新增 |
+| N14 | modbus-tcp-north | Modbus TCP (作为主站) | 🆕 新增 |
+
+---
+
+## 四、数据流模型
+
+### Flow 定义（JSON）
+
+```json
+{
+  "version": "1.0",
+  "flows": [
+    {
+      "id": "flow-uuid",
+      "name": "Modbus→Filter→MQTT",
+      "description": "示例流程",
+      "enabled": true,
+      "nodes": [
+        {
+          "id": "node-1",
+          "type": "south",
+          "plugin": "modbus-tcp",
+          "name": "PLC-1",
+          "config": {
+            "host": "192.168.1.100",
+            "port": 502,
+            "slave_id": 1
+          }
+        },
+        {
+          "id": "node-2",
+          "type": "operator",
+          "plugin": "filter",
+          "name": "温度过滤",
+          "config": {
+            "condition": "temperature > 100",
+            "pass": true
+          }
+        },
+        {
+          "id": "node-3",
+          "type": "operator",
+          "plugin": "transform",
+          "name": "数据转换",
+          "config": {
+            "rules": [
+              {"tag": "temperature", "expr": "value / 10.0", "target_tag": "temp_scaled"},
+              {"tag": "pressure", "expr": "value * 1.01325", "target_tag": "pressure_bar"}
+            ]
+          }
+        },
+        {
+          "id": "node-4",
+          "type": "north",
+          "plugin": "mqtt",
+          "name": "云端上传",
+          "config": {
+            "broker": "mqtt://broker.emqx.io:1883",
+            "topic": "plant/${tags.location}/${tags.device_id}",
+            "qos": 1,
+            "username": "",
+            "password": ""
+          }
+        }
+      ],
+      "edges": [
+        {"from": "node-1", "to": "node-2"},
+        {"from": "node-2", "to": "node-3"},
+        {"from": "node-3", "to": "node-4"}
+      ]
+    }
+  ]
+}
+```
+
+### 数据包格式（PipelineData）
+
+```rust
+pub struct PipelineData {
+    pub flow_id: Uuid,
+    pub node_id: Uuid,           // 当前节点
+    pub source_node_id: Uuid,    // 数据来源节点（追踪用）
+    pub tags: HashMap<TagId, TagValue>,
+    pub timestamp: i64,
+    pub metadata: HashMap<String, String>,  // 传递上下文
+}
+```
+
+---
+
+## 五、插件 Trait 设计
+
+### SouthPlugin Trait
+
+```rust
+#[async_trait]
+pub trait SouthPlugin: Send + Sync {
+    fn meta(&self) -> PluginMeta;
+    fn config_schema(&self) -> Option<ConfigSchema>;
+    fn tag_schema(&self) -> Option<TagSchema>;
+
+    async fn open(&self, node_id: Uuid, config: PluginConfig) -> PluginResult<()>;
+    async fn close(&self, node_id: Uuid) -> PluginResult<()>;
+    async fn init(&self, node_id: Uuid) -> PluginResult<()>;
+    async fn uninit(&self, node_id: Uuid) -> PluginResult<()>;
+    async fn start(&self, node_id: Uuid) -> PluginResult<()>;
+    async fn stop(&self, node_id: Uuid) -> PluginResult<()>;
+    async fn setting(&self, node_id: Uuid, config: PluginConfig) -> PluginResult<()>;
+
+    async fn validate_tag(&self, node_id: Uuid, tag: &Tag) -> PluginResult<()>;
+    async fn poll_group(&self, node_id: Uuid, group_id: Uuid, tags: &[Tag]) -> PluginResult<Vec<(TagId, DataValue)>>;
+    async fn write_tags(&self, node_id: Uuid, values: &[(Tag, DataValue)]) -> PluginResult<()>;
+    async fn list_groups(&self, node_id: Uuid) -> PluginResult<Vec<Group>>;
+    async fn list_tags(&self, node_id: Uuid, group_id: Uuid) -> PluginResult<Vec<Tag>>;
+}
+```
+
+### OperatorPlugin Trait 🆕 NEW
+
+```rust
+#[async_trait]
+pub trait OperatorPlugin: Send + Sync {
+    fn meta(&self) -> PluginMeta;
+    fn config_schema(&self) -> Option<ConfigSchema>;
+
+    async fn init(&self, config: PluginConfig) -> PluginResult<()>;
+    async fn uninit(&self) -> PluginResult<()>;
+
+    /// 处理数据，返回变换后的数据（可增删改tags）
+    async fn process(&self, data: PipelineData) -> PluginResult<PipelineData>;
+
+    /// 可选：支持批处理（多个数据合并处理）
+    async fn process_batch(&self, batch: Vec<PipelineData>) -> PluginResult<Vec<PipelineData>> {
+        let mut results = Vec::new();
+        for d in batch {
+            results.push(self.process(d).await?);
+        }
+        Ok(results)
+    }
+}
+```
+
+### NorthPlugin Trait
+
+```rust
+#[async_trait]
+pub trait NorthPlugin: Send + Sync {
+    fn meta(&self) -> PluginMeta;
+    fn config_schema(&self) -> Option<ConfigSchema>;
+
+    async fn open(&self, node_id: Uuid, config: PluginConfig) -> PluginResult<()>;
+    async fn close(&self, node_id: Uuid) -> PluginResult<()>;
+    async fn init(&self, node_id: Uuid) -> PluginResult<()>;
+    async fn uninit(&self, node_id: Uuid) -> PluginResult<()>;
+    async fn start(&self, node_id: Uuid) -> PluginResult<()>;
+    async fn stop(&self, node_id: Uuid) -> PluginResult<()>;
+    async fn setting(&self, node_id: Uuid, config: PluginConfig) -> PluginResult<()>;
+
+    async fn connection_status(&self, node_id: Uuid) -> Option<serde_json::Value>;
+
+    async fn on_pipeline_data(&self, node_id: Uuid, data: PipelineData) -> PluginResult<()>;
+    async fn on_batch(&self, node_id: Uuid, batch: Vec<PipelineData>) -> PluginResult<()>;
+}
+```
+
+---
+
+## 六、Flow Orchestrator 核心
+
+### 目录结构
+
+```
+gateway/
+├── gateway-sdk/           # 共享类型、trait定义、错误类型
+├── gateway-core/         # Bus、Store、Manager（保留）
+├── gateway-flow/         # 🆕 Flow编排器
+│   ├── src/
+│   │   ├── lib.rs
+│   │   ├── flow.rs       # Flow定义、验证、DAG检查
+│   │   ├── instance.rs   # Flow实例、生命周期
+│   │   ├── scheduler.rs  # Pipeline调度、拓扑排序
+│   │   ├── executor.rs   # 数据执行引擎
+│   │   └── registry.rs  # 三层插件注册表
+├── gateway-server/       # HTTP Server
+└── gateway-plugins/      # 所有插件
+    ├── south/            # 采集插件
+    │   ├── sim/
+    │   ├── modbus-tcp/
+    │   ├── modbus-rtu/
+    │   ├── opcua/
+    │   ├── bacnet/
+    │   ├── s7/
+    │   ├── iec61850/
+    │   ├── ethernet-ip/
+    │   ├── mitsubishi-mc/
+    │   ├── omron-fins/
+    │   └── ... (其他南向)
+    ├── operator/         # 🆕 处理插件
+    │   ├── filter/
+    │   ├── transform/
+    │   ├── aggregate/
+    │   ├── router/
+    │   ├── buffer/
+    │   ├── script-js/
+    │   ├── alarm/
+    │   └── ... (其他算子)
+    └── north/            # 传输插件
+        ├── mqtt/
+        ├── http/
+        ├── websocket/
+        ├── kafka/
+        ├── influxdb/
+        └── ... (其他北向)
+```
+
+### Flow 生命周期
+
+```
+DRAFT → VALIDATED → DEPLOYED → RUNNING ←→ PAUSED
+                    ↓
+                 FAILED (错误恢复)
+```
+
+### DAG 拓扑执行
+
+- Flow 启动时对 nodes + edges 做拓扑排序
+- 每个节点在独立 tokio task 中运行
+- 数据通过 channel 在节点间传递
+- 支持并行分支（同一层的节点可并发执行）
+- 循环依赖检测（启动时拒绝）
+
+---
+
+## 七、前端可视化设计
+
+### 技术选型
+
+| 库 | Stars | 理由 |
+|----|-------|------|
+| **VueFlow** (@vue-flow/core) | ~3k | Vue3 专用，API 简洁，文档清晰，支持自定义节点，可与 Element Plus 很好结合 |
+| Drawflow | 6k | 轻量但非 Vue 专用 |
+| G6 (AntV) | 13k | 功能强大但学习曲线陡峭，集成 Vue 需额外工作 |
+
+**推荐：VueFlow**
+- Vue3 生态原生集成
+- 支持拖拽、自定义节点、边样式
+- 社区活跃，TypeScript 支持好
+- 内置 minimap、controls、background
+
+### 页面结构
+
+```
+/flow                          # 流程列表
+/flow/new                      # 新建流程（画布）
+/flow/:id/edit                 # 编辑流程
+/flow/:id/monitor              # 监控流程运行状态
+/plugin                        # 插件市场
+/plugin/:type/:name            # 插件详情
+/south                         # 南向节点列表
+/north                         # 北向节点列表
+/data                          # 数据监控
+/system                        # 系统配置
+```
+
+### Flow Editor 画布布局
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│  Flow: Modbus→MQTT  [Save] [Deploy] [Delete]      [Zoom: 100%]   │
+├────────┬───────────────────────────────────────────────┬───────────┤
+│        │                                               │           │
+│ PANEL  │                                               │  CONFIG   │
+│        │              CANVAS (VueFlow)                 │           │
+│ [South]│    ┌─────────┐      ┌─────────┐              │  Plugin:  │
+│  sim   │    │ MODBUS  │─────▶│ FILTER  │────────┐    │  mqtt     │
+│  modbus│    │  TCP    │      │ temp>100│        │    │           │
+│  opcua │    └─────────┘      └─────────┘        │    │  Broker:  │
+│  bacnet│                                        ▼    │  mqtt://  │
+│  ...   │                                  ┌─────────┐ │           │
+│        │                                  │  MQTT   │ │           │
+│[Operator]                                 │         │ │           │
+│  filter │                                  └─────────┘ │           │
+│  transform                                 ▲           │           │
+│  aggregate│                                │           │           │
+│  router  │                        ┌─────────┘           │           │
+│  ...     │                        │                    │           │
+│        │                        │                       │           │
+│[North] │                        └──────────────────────┘           │
+│  mqtt   │                  (数据流连线)                             │
+│  http   │                                                       │
+│  kafka  │                                                       │
+│  ...   │                                                       │
+└────────┴───────────────────────────────────────────────────────┴───┘
+```
+
+---
+
+## 八、数据库 Schema（SQLite）
+
+```sql
+-- Flow 定义
+CREATE TABLE flows (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    definition TEXT NOT NULL,  -- JSON: nodes + edges
+    version INTEGER DEFAULT 1,
+    enabled INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'draft',  -- draft/validated/deployed/running/paused
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- South 节点（复用原结构）
+CREATE TABLE nodes (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,  -- south/operator/north
+    plugin_name TEXT NOT NULL,
+    name TEXT NOT NULL,
+    config TEXT NOT NULL,  -- JSON
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- 保留原 groups/tags/subscriptions 表结构不变
+```
+
+---
+
+## 九、实施路线
+
+### Phase 1: 核心框架（4-6周）
+- [ ] 重构 gateway-sdk：新增 OperatorPlugin trait、PipelineData 类型
+- [ ] 新建 gateway-flow crate：Flow 定义、验证、编排器
+- [ ] 重构 gateway-server：Flow CRUD API
+- [ ] 内置 5 个算子：filter、transform、aggregate、router、buffer
+- [ ] 前端 VueFlow 集成：Flow Editor 画布页面
+- [ ] Flow 与 South/North 节点统一配置管理
+
+### Phase 2: 协议插件补全（8-12周）
+- [ ] S05-S10（bacnet、s7、iec61850、ethernet-ip、mitsubishi-mc、omron-fins）
+- [ ] S11-S18（hollysys、deltadvp、yokogawa、abb-dcs、honeywell-pks、emerson-deltav、siemens-pcs7、dlt645）
+- [ ] S19-S26（gb28181、knx、enocean、mbus、obix、ethercat、profinet、userprog）
+- [ ] N02-N14（http、websocket、sparkplugb、opcua-server、grpc、kafka、influxdb、tdengine、timescaledb、postgresql、mysql、oracle、modbus-tcp-north）
+
+### Phase 3: 高级算子（4-6周）
+- [ ] script-js、script-python（沙箱执行）
+- [ ] alarm（告警规则引擎）
+- [ ] json-path、xml-path
+- [ ] throttle、cache、batch
+
+### Phase 4: 生产化（2-4周）
+- [ ] 高可用（多实例部署）
+- [ ] 配置导入/导出
+- [ ] 备份与恢复
+- [ ] 性能压测
+
+---
+
+## 十、向后兼容性
+
+**完全破坏性，不保留旧代码。**
+
+新仓库建议命名：`neuron-gateway` 或 `flowlink`（待定）
+
+---
+
+*文档状态：待用户确认后进入实施阶段*
