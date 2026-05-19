@@ -11,4 +11,8 @@ members = [
     "gateway/gateway-plugins/plugin-modbus-rtu",
     "gateway/gateway-plugins/plugin-opcua",
     "gateway/gateway-plugins/plugin-virb",
+    "gateway/gateway-plugins/plugin-bacnet",
+    "gateway/gateway-plugins/plugin-s7",
+    "gateway/gateway-plugins/plugin-http",
+    "gateway/gateway-plugins/plugin-kafka",
 ]

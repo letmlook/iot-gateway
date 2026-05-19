@@ -1,0 +1,19 @@
+[package]
+name = "plugin-kafka"
+version = "0.1.0"
+edition = "2021"
+description = "Kafka producer north plugin — stream data to Kafka topics"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+default = []
+ffi = []
+
+[dependencies]
+gateway-sdk = { path = "../../gateway-sdk" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+once_cell = "1.19"
