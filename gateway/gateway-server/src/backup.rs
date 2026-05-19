@@ -1,11 +1,18 @@
 //! 备份文件：gzip 压缩 + AES-256-GCM 加密，不直接可见内容。
 
 use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit};
+use axum::{extract::{Query, State}, http::header::CONTENT_DISPOSITION, response::IntoResponse, Json};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use gateway_core::Snapshot;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Write;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::api::ApiError;
+use crate::state::AppState;
 
 const NONCE_LEN: usize = 12;
 
@@ -60,4 +67,96 @@ pub fn decrypt_backup(data: &[u8], secret: &str) -> Result<Snapshot, String> {
     std::io::copy(&mut gz, &mut json).map_err(|e| e.to_string())?;
     let snap: Snapshot = serde_json::from_slice(&json).map_err(|e| e.to_string())?;
     Ok(snap)
+}
+
+// ---------- SQLite file-level backup/restore ----------
+
+#[derive(Serialize)]
+pub struct SqliteBackupResponse {
+    pub path: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Deserialize)]
+pub struct SqliteRestoreQuery {
+    pub password: Option<String>,
+}
+
+/// POST /admin/sqlite-backup — trigger SQLite file-level backup
+pub async fn sqlite_backup(
+    State(state): State<AppState>,
+) -> Result<Json<SqliteBackupResponse>, ApiError> {
+    let backup_dir = PathBuf::from("data/backups");
+    tokio::fs::create_dir_all(&backup_dir).await.ok();
+
+    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
+    let backup_path = backup_dir.join(format!("gateway_sqlite_{}.db", timestamp));
+
+    let db_path = &state.config.data_db();
+
+    tokio::fs::copy(db_path, &backup_path)
+        .await
+        .map_err(|e| ApiError::internal(&format!("sqlite backup failed: {}", e)))?;
+
+    let metadata = tokio::fs::metadata(&backup_path)
+        .await
+        .map_err(|e| ApiError::internal(&e.to_string()))?;
+
+    Ok(Json(SqliteBackupResponse {
+        path: backup_path.to_string_lossy().to_string(),
+        size_bytes: metadata.len(),
+    }))
+}
+
+/// GET /admin/sqlite-backup — download latest SQLite backup file
+pub async fn sqlite_download_latest(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, ApiError> {
+    let backup_dir = PathBuf::from("data/backups");
+
+    let mut entries = tokio::fs::read_dir(&backup_dir)
+        .await
+        .map_err(|e| ApiError::internal(&e.to_string()))?;
+
+    let mut latest_entry: Option<tokio::fs::DirEntry> = None;
+    let mut latest_modified: Option<std::time::SystemTime> = None;
+    while let Some(entry) = entries.next_entry().await.map_err(|e| ApiError::internal(e.to_string()))? {
+        if entry.path().extension().map_or(false, |ext| ext == "db") {
+            if let Ok(meta) = entry.metadata().await {
+                let modified = meta.modified().ok();
+                let is_newer = latest_modified.is_none()
+                    || (modified.is_some() && latest_modified.is_some() && modified > latest_modified);
+                if is_newer {
+                    latest_entry = Some(entry);
+                    latest_modified = modified;
+                }
+            }
+        }
+    }
+
+    let latest = latest_entry.ok_or_else(|| ApiError::not_found("no sqlite backup found"))?;
+
+    let filename = latest.file_name().to_string_lossy().to_string();
+    let bytes = tokio::fs::read(latest.path()).await
+        .map_err(|e| ApiError::internal(&e.to_string()))?;
+
+    Ok(([(CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"", filename))], bytes))
+}
+
+/// POST /admin/sqlite-restore — restore SQLite database from backup
+pub async fn sqlite_restore(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let backup_path = body.get("backup_path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError::bad_request("backup_path required"))?;
+
+    let dest = state.config.data_db();
+
+    tokio::fs::copy(backup_path, &dest)
+        .await
+        .map_err(|e| ApiError::internal(&format!("sqlite restore failed: {}", e)))?;
+
+    Ok(Json(serde_json::json!({ "status": "restored", "from": backup_path })))
 }

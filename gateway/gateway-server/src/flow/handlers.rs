@@ -190,6 +190,49 @@ pub async fn flow_metrics(
     Ok(Json(serde_json::json!({ "metrics": metrics })))
 }
 
+/// POST /flows/:id/reload — hot reload Flow definition
+/// Stops the running flow runtime, re-validates the flow definition, and resets status to draft
+pub async fn flow_reload(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("invalid flow id"))?;
+
+    // 1. Load flow from DB
+    let flow = state
+        .flow_store
+        .get_flow(id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("flow not found"))?;
+
+    // 2. If flow is running or deployed, stop and remove the runtime
+    {
+        let mut runtimes = state.flow_runtimes.write().await;
+        if runtimes.contains_key(&id) {
+            let mut runtime = runtimes.remove(&id).unwrap();
+            // Ignore errors during stop - runtime may already be stopped
+            let _ = runtime.stop().await;
+        }
+    }
+
+    // 3. Re-validate the flow definition
+    flow.validate()
+        .map_err(|e| ApiError::bad_request(format!("flow validation failed: {}", e)))?;
+
+    // 4. Update status back to draft (user must re-deploy)
+    state
+        .flow_store
+        .update_flow_status(id, gateway_flow::FlowStatus::Draft)
+        .await?;
+
+    tracing::info!(flow_id = %id, "flow hot-reloaded, status reset to draft");
+
+    Ok(Json(serde_json::json!({
+        "status": "draft",
+        "message": "flow hot-reloaded, please re-deploy to start"
+    })))
+}
+
 // ---------- Operators ----------
 
 /// GET /flows/operators — list all registered operators with metadata
@@ -213,4 +256,177 @@ pub async fn list_operators() -> Result<Json<serde_json::Value>, ApiError> {
         })
         .collect();
     Ok(Json(serde_json::json!({ "operators": operators })))
+}
+
+// ---------- Version History ----------
+
+/// GET /flows/:id/versions — list version history
+pub async fn flow_versions(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("invalid flow id"))?;
+
+    let history = state
+        .flow_store
+        .get_flow_version_history(&id)
+        .await
+        .map_err(ApiError::from)?;
+
+    Ok(Json(serde_json::json!({ "versions": history })))
+}
+
+/// GET /flows/export — export flows as JSON
+/// Query param: ids=id1,id2 (optional, exports all if not provided)
+pub async fn export_flows(
+    axum::extract::Query(params): axum::extract::Query<ExportParams>,
+    State(state): State<AppState>,
+) -> Result<Json<ExportResponse>, ApiError> {
+    let flows = if let Some(ids) = &params.ids {
+        let id_list: Vec<Uuid> = ids.split(',')
+            .filter_map(|s| Uuid::parse_str(s.trim()).ok())
+            .collect();
+        let mut result = Vec::new();
+        for id in id_list {
+            if let Ok(Some(flow)) = state.flow_store.get_flow(id).await {
+                result.push(flow);
+            }
+        }
+        result
+    } else {
+        state.flow_store.list_flows().await?
+    };
+
+    let exported_flows: Vec<ExportedFlow> = flows.into_iter().map(|f| {
+        let definition = serde_json::to_string(&f).unwrap_or_default();
+        ExportedFlow {
+            id: f.id.to_string(),
+            name: f.name,
+            description: f.description,
+            definition,
+            status: serde_json::to_string(&f.status).unwrap_or_default(),
+            version: f.version,
+        }
+    }).collect();
+
+    Ok(Json(ExportResponse {
+        version: "1.0".to_string(),
+        exported_at: chrono::Utc::now().to_rfc3339(),
+        flows: exported_flows,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct ExportParams {
+    pub ids: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct ExportResponse {
+    pub version: String,
+    pub exported_at: String,
+    pub flows: Vec<ExportedFlow>,
+}
+
+#[derive(serde::Serialize)]
+pub struct ExportedFlow {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub definition: String,
+    pub status: String,
+    pub version: i64,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ImportRequest {
+    pub flows: Vec<ImportedFlow>,
+    pub force: Option<bool>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ImportedFlow {
+    pub name: String,
+    pub description: Option<String>,
+    pub definition: String,
+}
+
+/// POST /flows/import — import flows from JSON
+pub async fn import_flows(
+    State(state): State<AppState>,
+    Json(body): Json<ImportRequest>,
+) -> Result<Json<ImportResponse>, ApiError> {
+    let mut imported = 0;
+    let mut skipped = 0;
+    let force = body.force.unwrap_or(false);
+
+    for flow in body.flows {
+        // Check if flow with same name exists
+        let existing = state.flow_store.get_flow_by_name(&flow.name).await.ok().flatten();
+
+        if existing.is_some() && !force {
+            skipped += 1;
+            continue;
+        }
+
+        // Parse the definition to extract nodes/edges, then create new flow
+        let parsed: Flow = serde_json::from_str(&flow.definition)
+            .map_err(|e| ApiError::bad_request(format!("invalid flow definition: {}", e)))?;
+
+        // Create new flow with new UUID
+        let now = chrono::Utc::now();
+        let new_flow = Flow {
+            id: Uuid::new_v4(),
+            name: flow.name,
+            description: flow.description,
+            nodes: parsed.nodes,
+            edges: parsed.edges,
+            status: gateway_flow::FlowStatus::Draft,
+            version: 1,
+            created_at: now,
+            updated_at: now,
+        };
+
+        state.flow_store.create_flow(&new_flow).await?;
+        imported += 1;
+    }
+
+    Ok(Json(ImportResponse { imported, skipped }))
+}
+
+#[derive(serde::Serialize)]
+pub struct ImportResponse {
+    pub imported: usize,
+    pub skipped: usize,
+}
+
+/// POST /flows/:id/rollback/:version — rollback to specific version
+pub async fn flow_rollback(
+    State(state): State<AppState>,
+    Path((id, version)): Path<(String, i64)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("invalid flow id"))?;
+
+    let history = state
+        .flow_store
+        .get_flow_version_history(&id)
+        .await
+        .map_err(ApiError::from)?;
+
+    let snapshot = history
+        .iter()
+        .find(|s| s.version == version)
+        .ok_or_else(|| ApiError::not_found("version not found"))?;
+
+    // Save current state as a new snapshot before rollback
+    state.flow_store.save_flow_snapshot(&id).await.ok();
+
+    // Restore from snapshot
+    let restored = state
+        .flow_store
+        .restore_from_snapshot(&id, snapshot)
+        .await
+        .map_err(ApiError::from)?;
+
+    Ok(Json(serde_json::json!({ "flow": restored })))
 }

@@ -3,4 +3,4 @@
 pub mod store;
 pub mod handlers;
 
-pub use store::FlowStore;
+pub use store::{FlowStore, FlowSnapshot};

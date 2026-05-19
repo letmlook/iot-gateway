@@ -6,6 +6,7 @@ mod config;
 mod flow;
 mod license;
 mod logging;
+mod metrics;
 mod state;
 mod users;
 
@@ -126,6 +127,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     state.sync_node_log_names();
 
     let app = Router::new()
+        .route("/health", axum::routing::get(health_handler))
+        .route("/metrics", axum::routing::get(metrics_handler))
         .nest("/api", api::router(state.clone()))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
@@ -140,4 +143,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, serve).await?;
     Ok(())
+}
+
+// ---------- Top-level handlers ----------
+
+/// GET /health — simple health check with timestamp
+async fn health_handler() -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({
+        "status": "ok",
+        "timestamp": chrono::Utc::now().to_rfc3339()
+    }))
+}
+
+/// GET /metrics — Prometheus text format metrics (flow-specific)
+async fn metrics_handler() -> impl axum::response::IntoResponse {
+    let body = metrics::render_prometheus();
+    (axum::http::StatusCode::OK, body)
 }

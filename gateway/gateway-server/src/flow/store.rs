@@ -5,9 +5,22 @@
 use chrono::{DateTime, Utc};
 use gateway_flow::{Flow, FlowEdge, FlowNode, FlowStatus};
 use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
+
+/// Snapshot of a flow version for history tracking.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlowSnapshot {
+    pub version: i64,
+    pub name: String,
+    pub description: Option<String>,
+    pub status: String,
+    pub nodes: Vec<FlowNode>,
+    pub edges: Vec<FlowEdge>,
+    pub saved_at: String,
+}
 
 /// Thread-safe wrapper around SQLite connection for Flow persistence.
 #[derive(Clone)]
@@ -39,6 +52,7 @@ impl FlowStore {
                 description TEXT,
                 status TEXT NOT NULL DEFAULT 'draft',
                 version INTEGER NOT NULL DEFAULT 1,
+                version_history TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -79,14 +93,15 @@ impl FlowStore {
     pub async fn create_flow(&self, flow: &Flow) -> Result<(), FlowStoreError> {
         let conn = self.conn.lock().await;
         conn.execute(
-            "INSERT INTO flows (id, name, description, status, version, created_at, updated_at) 
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO flows (id, name, description, status, version, version_history, created_at, updated_at) 
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 flow.id.to_string(),
                 &flow.name,
                 &flow.description,
                 serde_json::to_string(&flow.status).unwrap_or_default(),
                 flow.version,
+                "[]",
                 flow.created_at.to_rfc3339(),
                 flow.updated_at.to_rfc3339(),
             ],
@@ -106,7 +121,7 @@ impl FlowStore {
         let conn = self.conn.lock().await;
         let mut stmt = conn
             .prepare(
-                "SELECT id, name, description, status, version, created_at, updated_at FROM flows WHERE id = ?1",
+                "SELECT id, name, description, status, version, version_history, created_at, updated_at FROM flows WHERE id = ?1",
             )
             .map_err(FlowStoreError::Rusqlite)?;
 
@@ -125,7 +140,7 @@ impl FlowStore {
         let conn = self.conn.lock().await;
         let mut stmt = conn
             .prepare(
-                "SELECT id, name, description, status, version, created_at, updated_at FROM flows ORDER BY updated_at DESC",
+                "SELECT id, name, description, status, version, version_history, created_at, updated_at FROM flows ORDER BY updated_at DESC",
             )
             .map_err(FlowStoreError::Rusqlite)?;
 
@@ -138,6 +153,9 @@ impl FlowStore {
     }
 
     pub async fn update_flow(&self, flow: &Flow) -> Result<(), FlowStoreError> {
+        // Save snapshot before updating (ignore errors if flow doesn't exist yet)
+        let _ = self.save_flow_snapshot(&flow.id).await;
+        
         let conn = self.conn.lock().await;
         conn.execute(
             "UPDATE flows SET name=?2, description=?3, status=?4, version=?5, updated_at=?6 WHERE id=?1",
@@ -180,6 +198,25 @@ impl FlowStore {
         Ok(())
     }
 
+    pub async fn get_flow_by_name(&self, name: &str) -> Result<Option<Flow>, FlowStoreError> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name, description, status, version, version_history, created_at, updated_at FROM flows WHERE name = ?1 LIMIT 1",
+            )
+            .map_err(FlowStoreError::Rusqlite)?;
+
+        let mut rows = stmt
+            .query(params![name])
+            .map_err(FlowStoreError::Rusqlite)?;
+        if let Some(row) = rows.next().map_err(FlowStoreError::Rusqlite)? {
+            let flow = self.row_to_flow_sync(&conn, row)?;
+            Ok(Some(flow))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub async fn update_flow_status(
         &self,
         id: Uuid,
@@ -196,6 +233,103 @@ impl FlowStore {
         )
         .map_err(FlowStoreError::Rusqlite)?;
         Ok(())
+    }
+
+    /// Save a version snapshot of the flow before major updates.
+    pub async fn save_flow_snapshot(&self, id: &Uuid) -> Result<(), FlowStoreError> {
+        let flow = self.get_flow(*id).await?
+            .ok_or_else(|| FlowStoreError::Rusqlite(rusqlite::Error::QueryReturnedNoRows))?;
+
+        let snapshot = FlowSnapshot {
+            version: flow.version,
+            name: flow.name.clone(),
+            description: flow.description.clone(),
+            status: serde_json::to_string(&flow.status).unwrap_or_default(),
+            nodes: flow.nodes.clone(),
+            edges: flow.edges.clone(),
+            saved_at: Utc::now().to_rfc3339(),
+        };
+
+        let mut history: Vec<FlowSnapshot> = self.get_flow_version_history_raw(id).await?;
+        
+        // Keep only last 10 snapshots
+        if history.len() >= 10 {
+            history.remove(0);
+        }
+        history.push(snapshot);
+
+        let history_json = serde_json::to_string(&history).map_err(FlowStoreError::Json)?;
+
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE flows SET version_history=?1 WHERE id=?2",
+            params![history_json, id.to_string()],
+        )
+        .map_err(FlowStoreError::Rusqlite)?;
+        Ok(())
+    }
+
+    /// Get version history for a flow (deserialized).
+    pub async fn get_flow_version_history(&self, id: &Uuid) -> Result<Vec<FlowSnapshot>, FlowStoreError> {
+        self.get_flow_version_history_raw(id).await
+    }
+
+    /// Internal: get version history raw JSON and parse.
+    async fn get_flow_version_history_raw(&self, id: &Uuid) -> Result<Vec<FlowSnapshot>, FlowStoreError> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare("SELECT version_history FROM flows WHERE id=?1")
+            .map_err(FlowStoreError::Rusqlite)?;
+        
+        let history_str: String = stmt
+            .query_row(params![id.to_string()], |row| row.get(0))
+            .map_err(FlowStoreError::Rusqlite)?;
+        
+        let history: Vec<FlowSnapshot> = serde_json::from_str(&history_str)
+            .unwrap_or_default();
+        Ok(history)
+    }
+
+    /// Restore a flow from a snapshot definition.
+    pub async fn restore_from_snapshot(&self, id: &Uuid, snapshot: &FlowSnapshot) -> Result<Flow, FlowStoreError> {
+        let conn = self.conn.lock().await;
+        
+        // Update flow metadata
+        conn.execute(
+            "UPDATE flows SET name=?2, description=?3, status=?4, version=?5, updated_at=?6 WHERE id=?1",
+            params![
+                id.to_string(),
+                &snapshot.name,
+                &snapshot.description,
+                &snapshot.status,
+                snapshot.version,
+                Utc::now().to_rfc3339(),
+            ],
+        )
+        .map_err(FlowStoreError::Rusqlite)?;
+
+        // Delete existing nodes and edges
+        conn.execute(
+            "DELETE FROM flow_nodes WHERE flow_id=?1",
+            params![id.to_string()],
+        )
+        .map_err(FlowStoreError::Rusqlite)?;
+        conn.execute(
+            "DELETE FROM flow_edges WHERE flow_id=?1",
+            params![id.to_string()],
+        )
+        .map_err(FlowStoreError::Rusqlite)?;
+
+        // Re-insert nodes and edges from snapshot
+        for node in &snapshot.nodes {
+            Self::upsert_node_sync(&conn, *id, node)?;
+        }
+        for edge in &snapshot.edges {
+            Self::upsert_edge_sync(&conn, *id, edge)?;
+        }
+
+        drop(conn);
+        self.get_flow(*id).await?.ok_or_else(|| FlowStoreError::Rusqlite(rusqlite::Error::QueryReturnedNoRows))
     }
 
     fn upsert_node_sync(
@@ -259,8 +393,10 @@ impl FlowStore {
         let description: Option<String> = row.get(2).map_err(FlowStoreError::Rusqlite)?;
         let status_str: String = row.get(3).map_err(FlowStoreError::Rusqlite)?;
         let version: i64 = row.get(4).map_err(FlowStoreError::Rusqlite)?;
-        let created_at_str: String = row.get(5).map_err(FlowStoreError::Rusqlite)?;
-        let updated_at_str: String = row.get(6).map_err(FlowStoreError::Rusqlite)?;
+        // version_history at index 5 - read but not used in Flow struct
+        let _version_history: String = row.get(5).map_err(FlowStoreError::Rusqlite)?;
+        let created_at_str: String = row.get(6).map_err(FlowStoreError::Rusqlite)?;
+        let updated_at_str: String = row.get(7).map_err(FlowStoreError::Rusqlite)?;
 
         let status: FlowStatus =
             serde_json::from_str(&status_str).unwrap_or(FlowStatus::Draft);
