@@ -3,6 +3,7 @@
 mod api;
 mod backup;
 mod config;
+mod flow;
 mod license;
 mod logging;
 mod state;
@@ -117,7 +118,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     };
 
-    let state = AppState::new(mgr, config.clone(), loader_opt, feature_manager, user_store, node_log_names);
+    let flow_store = crate::flow::FlowStore::new(&db_path)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let flow_runtimes: Arc<tokio::sync::RwLock<std::collections::HashMap<uuid::Uuid, gateway_flow::FlowRuntime>>> = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+    
+    let state = AppState::new(mgr, config.clone(), loader_opt, feature_manager, user_store, node_log_names, flow_store, flow_runtimes);
     state.sync_node_log_names();
 
     let app = Router::new()

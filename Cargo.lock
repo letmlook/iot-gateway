@@ -750,6 +750,7 @@ dependencies = [
  "chrono",
  "flate2",
  "gateway-core",
+ "gateway-flow",
  "gateway-sdk",
  "hex",
  "mac_address",

@@ -13,6 +13,7 @@ use axum::routing::{delete, get, post, put};
 use axum::Router;
 
 use crate::state::AppState;
+use crate::flow;
 
 async fn request_id_middleware(request: Request, next: Next) -> Response {
     let id = uuid::Uuid::new_v4().to_string();
@@ -112,6 +113,13 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/nodes/:id/read_tags", post(handlers::read_tags))
         .route("/nodes/:id/write_tags", post(handlers::write_tags))
         .route("/upload", post(handlers::upload_config_file))
+        .route("/flows", get(flow::handlers::list_flows).post(flow::handlers::create_flow))
+        .route("/flows/:id", get(flow::handlers::get_flow).put(flow::handlers::update_flow).delete(flow::handlers::delete_flow))
+        .route("/flows/:id/deploy", post(flow::handlers::deploy_flow))
+        .route("/flows/:id/start", post(flow::handlers::start_flow))
+        .route("/flows/:id/pause", post(flow::handlers::pause_flow))
+        .route("/flows/:id/stop", post(flow::handlers::stop_flow))
+        .route("/flows/:id/metrics", get(flow::handlers::flow_metrics))
         .with_state(state.clone())
         .route_layer(middleware::from_fn_with_state(state, auth_middleware))
         .route_layer(middleware::from_fn(request_id_middleware))

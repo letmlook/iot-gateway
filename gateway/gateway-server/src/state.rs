@@ -1,14 +1,16 @@
 //! 应用状态：Manager + Config + 可选 PluginLoader + 功能授权 + 用户存储，供 API 与持久化使用。
 
 use crate::config::Config;
+use crate::flow::FlowStore;
 use crate::license::FeatureManager;
 use crate::logging::NodeLogNameMap;
 use crate::users::UserStore;
 use gateway_core::{persist_save, PluginLoader, Manager};
+use gateway_flow::FlowRuntime;
 use std::sync::Arc;
 use tracing::warn;
+use uuid::Uuid;
 
-#[derive(Clone)]
 pub struct AppState {
     pub manager: Arc<Manager>,
     pub config: Config,
@@ -18,7 +20,26 @@ pub struct AppState {
     pub user_store: Arc<UserStore>,
     /// 节点 ID -> 节点名称，用于节点日志文件名（按名称生成）
     pub node_log_names: Option<NodeLogNameMap>,
+    /// Flow 持久化存储
+    pub flow_store: FlowStore,
+    /// 运行中的 Flow 运行时
+    pub flow_runtimes: Arc<tokio::sync::RwLock<std::collections::HashMap<Uuid, FlowRuntime>>>,
     _loader: Option<Arc<PluginLoader>>,
+}
+
+impl Clone for AppState {
+    fn clone(&self) -> Self {
+        Self {
+            manager: self.manager.clone(),
+            config: self.config.clone(),
+            feature_manager: self.feature_manager.clone(),
+            user_store: self.user_store.clone(),
+            node_log_names: self.node_log_names.clone(),
+            flow_store: self.flow_store.clone(),
+            flow_runtimes: self.flow_runtimes.clone(),
+            _loader: self._loader.clone(),
+        }
+    }
 }
 
 impl AppState {
@@ -29,6 +50,8 @@ impl AppState {
         feature_manager: FeatureManager,
         user_store: Arc<UserStore>,
         node_log_names: Option<NodeLogNameMap>,
+        flow_store: FlowStore,
+        flow_runtimes: Arc<tokio::sync::RwLock<std::collections::HashMap<Uuid, FlowRuntime>>>,
     ) -> Self {
         Self {
             manager,
@@ -36,6 +59,8 @@ impl AppState {
             feature_manager,
             user_store,
             node_log_names,
+            flow_store,
+            flow_runtimes,
             _loader: loader.map(Arc::new),
         }
     }

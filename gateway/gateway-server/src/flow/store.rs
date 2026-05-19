@@ -1,0 +1,400 @@
+//! SQLite store for flows and flow_nodes.
+//!
+//! Uses `Arc<tokio::sync::Mutex<Connection>>` to allow thread-safe access from async handlers.
+
+use chrono::{DateTime, Utc};
+use gateway_flow::{Flow, FlowEdge, FlowNode, FlowStatus};
+use rusqlite::{params, Connection};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use uuid::Uuid;
+
+/// Thread-safe wrapper around SQLite connection for Flow persistence.
+#[derive(Clone)]
+pub struct FlowStore {
+    conn: Arc<Mutex<Connection>>,
+}
+
+impl FlowStore {
+    pub fn new(db_path: &std::path::Path) -> Result<Self, rusqlite::Error> {
+        let conn = Connection::open(db_path)?;
+        let store = Self {
+            conn: Arc::new(Mutex::new(conn)),
+        };
+        store.init()?;
+        Ok(store)
+    }
+
+    pub fn init(&self) -> Result<(), rusqlite::Error> {
+        // Use try_lock since we're in a sync context
+        // This should succeed immediately as no other thread has accessed the mutex yet
+        let conn = self
+            .conn
+            .try_lock()
+            .expect("FlowStore.init(): mutex should be available immediately");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS flows (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                status TEXT NOT NULL DEFAULT 'draft',
+                version INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            
+            CREATE TABLE IF NOT EXISTS flow_nodes (
+                id TEXT PRIMARY KEY,
+                flow_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                operator_name TEXT,
+                config TEXT NOT NULL DEFAULT '{}',
+                input_ports TEXT NOT NULL DEFAULT '[]',
+                output_ports TEXT NOT NULL DEFAULT '[]',
+                position_x REAL DEFAULT 0,
+                position_y REAL DEFAULT 0,
+                FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE
+            );
+            
+            CREATE TABLE IF NOT EXISTS flow_edges (
+                id TEXT PRIMARY KEY,
+                flow_id TEXT NOT NULL,
+                source_node_id TEXT NOT NULL,
+                source_port TEXT NOT NULL,
+                target_node_id TEXT NOT NULL,
+                target_port TEXT NOT NULL,
+                FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE
+            );
+            
+            CREATE INDEX IF NOT EXISTS idx_flow_nodes_flow_id ON flow_nodes(flow_id);
+            CREATE INDEX IF NOT EXISTS idx_flow_edges_flow_id ON flow_edges(flow_id);
+            ",
+        )?;
+        Ok(())
+    }
+
+    // ---------- Flow CRUD ----------
+
+    pub async fn create_flow(&self, flow: &Flow) -> Result<(), FlowStoreError> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT INTO flows (id, name, description, status, version, created_at, updated_at) 
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                flow.id.to_string(),
+                &flow.name,
+                &flow.description,
+                serde_json::to_string(&flow.status).unwrap_or_default(),
+                flow.version,
+                flow.created_at.to_rfc3339(),
+                flow.updated_at.to_rfc3339(),
+            ],
+        )
+        .map_err(FlowStoreError::Rusqlite)?;
+
+        for node in &flow.nodes {
+            Self::upsert_node_sync(&conn, flow.id, node)?;
+        }
+        for edge in &flow.edges {
+            Self::upsert_edge_sync(&conn, flow.id, edge)?;
+        }
+        Ok(())
+    }
+
+    pub async fn get_flow(&self, id: Uuid) -> Result<Option<Flow>, FlowStoreError> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name, description, status, version, created_at, updated_at FROM flows WHERE id = ?1",
+            )
+            .map_err(FlowStoreError::Rusqlite)?;
+
+        let mut rows = stmt
+            .query(params![id.to_string()])
+            .map_err(FlowStoreError::Rusqlite)?;
+        if let Some(row) = rows.next().map_err(FlowStoreError::Rusqlite)? {
+            let flow = self.row_to_flow_sync(&conn, row)?;
+            Ok(Some(flow))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn list_flows(&self) -> Result<Vec<Flow>, FlowStoreError> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name, description, status, version, created_at, updated_at FROM flows ORDER BY updated_at DESC",
+            )
+            .map_err(FlowStoreError::Rusqlite)?;
+
+        let mut flows = Vec::new();
+        let mut rows = stmt.query([]).map_err(FlowStoreError::Rusqlite)?;
+        while let Some(row) = rows.next().map_err(FlowStoreError::Rusqlite)? {
+            flows.push(self.row_to_flow_sync(&conn, row)?);
+        }
+        Ok(flows)
+    }
+
+    pub async fn update_flow(&self, flow: &Flow) -> Result<(), FlowStoreError> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE flows SET name=?2, description=?3, status=?4, version=?5, updated_at=?6 WHERE id=?1",
+            params![
+                flow.id.to_string(),
+                &flow.name,
+                &flow.description,
+                serde_json::to_string(&flow.status).unwrap_or_default(),
+                flow.version,
+                Utc::now().to_rfc3339(),
+            ],
+        )
+        .map_err(FlowStoreError::Rusqlite)?;
+
+        // Delete and re-insert nodes and edges
+        conn.execute(
+            "DELETE FROM flow_nodes WHERE flow_id=?1",
+            params![flow.id.to_string()],
+        )
+        .map_err(FlowStoreError::Rusqlite)?;
+        conn.execute(
+            "DELETE FROM flow_edges WHERE flow_id=?1",
+            params![flow.id.to_string()],
+        )
+        .map_err(FlowStoreError::Rusqlite)?;
+
+        for node in &flow.nodes {
+            Self::upsert_node_sync(&conn, flow.id, node)?;
+        }
+        for edge in &flow.edges {
+            Self::upsert_edge_sync(&conn, flow.id, edge)?;
+        }
+        Ok(())
+    }
+
+    pub async fn delete_flow(&self, id: Uuid) -> Result<(), FlowStoreError> {
+        let conn = self.conn.lock().await;
+        conn.execute("DELETE FROM flows WHERE id=?1", params![id.to_string()])
+            .map_err(FlowStoreError::Rusqlite)?;
+        Ok(())
+    }
+
+    pub async fn update_flow_status(
+        &self,
+        id: Uuid,
+        status: FlowStatus,
+    ) -> Result<(), FlowStoreError> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE flows SET status=?2, updated_at=?3 WHERE id=?1",
+            params![
+                id.to_string(),
+                serde_json::to_string(&status).unwrap_or_default(),
+                Utc::now().to_rfc3339()
+            ],
+        )
+        .map_err(FlowStoreError::Rusqlite)?;
+        Ok(())
+    }
+
+    fn upsert_node_sync(
+        conn: &Connection,
+        flow_id: Uuid,
+        node: &FlowNode,
+    ) -> Result<(), FlowStoreError> {
+        conn.execute(
+            "INSERT INTO flow_nodes (id, flow_id, name, kind, operator_name, config, input_ports, output_ports, position_x, position_y)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(id) DO UPDATE SET
+                name=?3, kind=?4, operator_name=?5, config=?6, input_ports=?7, output_ports=?8, position_x=?9, position_y=?10",
+            params![
+                node.id.to_string(),
+                flow_id.to_string(),
+                &node.name,
+                serde_json::to_string(&node.kind).unwrap_or_default(),
+                &node.operator_name,
+                serde_json::to_string(&node.config).unwrap_or_default(),
+                serde_json::to_string(&node.input_ports).unwrap_or_default(),
+                serde_json::to_string(&node.output_ports).unwrap_or_default(),
+                0.0f64,
+                0.0f64,
+            ],
+        )
+        .map_err(FlowStoreError::Rusqlite)?;
+        Ok(())
+    }
+
+    fn upsert_edge_sync(
+        conn: &Connection,
+        flow_id: Uuid,
+        edge: &FlowEdge,
+    ) -> Result<(), FlowStoreError> {
+        conn.execute(
+            "INSERT INTO flow_edges (id, flow_id, source_node_id, source_port, target_node_id, target_port)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                source_node_id=?3, source_port=?4, target_node_id=?5, target_port=?6",
+            params![
+                Uuid::new_v4().to_string(),
+                flow_id.to_string(),
+                edge.source_node_id.to_string(),
+                &edge.source_port,
+                edge.target_node_id.to_string(),
+                &edge.target_port,
+            ],
+        )
+        .map_err(FlowStoreError::Rusqlite)?;
+        Ok(())
+    }
+
+    fn row_to_flow_sync(
+        &self,
+        conn: &Connection,
+        row: &rusqlite::Row,
+    ) -> Result<Flow, FlowStoreError> {
+        let id_str: String = row.get(0).map_err(FlowStoreError::Rusqlite)?;
+        let id = Uuid::parse_str(&id_str).unwrap_or_else(|_| Uuid::new_v4());
+        let name: String = row.get(1).map_err(FlowStoreError::Rusqlite)?;
+        let description: Option<String> = row.get(2).map_err(FlowStoreError::Rusqlite)?;
+        let status_str: String = row.get(3).map_err(FlowStoreError::Rusqlite)?;
+        let version: i64 = row.get(4).map_err(FlowStoreError::Rusqlite)?;
+        let created_at_str: String = row.get(5).map_err(FlowStoreError::Rusqlite)?;
+        let updated_at_str: String = row.get(6).map_err(FlowStoreError::Rusqlite)?;
+
+        let status: FlowStatus =
+            serde_json::from_str(&status_str).unwrap_or(FlowStatus::Draft);
+        let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now());
+        let updated_at = DateTime::parse_from_rfc3339(&updated_at_str)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now());
+
+        // Load nodes and edges
+        let nodes = self.load_nodes_sync(conn, id)?;
+        let edges = self.load_edges_sync(conn, id)?;
+
+        Ok(Flow {
+            id,
+            name,
+            description,
+            status,
+            nodes,
+            edges,
+            version,
+            created_at,
+            updated_at,
+        })
+    }
+
+    fn load_nodes_sync(
+        &self,
+        conn: &Connection,
+        flow_id: Uuid,
+    ) -> Result<Vec<FlowNode>, FlowStoreError> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name, kind, operator_name, config, input_ports, output_ports FROM flow_nodes WHERE flow_id=?1",
+            )
+            .map_err(FlowStoreError::Rusqlite)?;
+        let mut nodes = Vec::new();
+        let mut rows = stmt
+            .query(params![flow_id.to_string()])
+            .map_err(FlowStoreError::Rusqlite)?;
+        while let Some(row) = rows.next().map_err(FlowStoreError::Rusqlite)? {
+            let id_str: String = row.get(0).map_err(FlowStoreError::Rusqlite)?;
+            let name: String = row.get(1).map_err(FlowStoreError::Rusqlite)?;
+            let kind_str: String = row.get(2).map_err(FlowStoreError::Rusqlite)?;
+            let operator_name: Option<String> =
+                row.get(3).map_err(FlowStoreError::Rusqlite)?;
+            let config_str: String = row.get(4).map_err(FlowStoreError::Rusqlite)?;
+            let input_ports_str: String = row.get(5).map_err(FlowStoreError::Rusqlite)?;
+            let output_ports_str: String = row.get(6).map_err(FlowStoreError::Rusqlite)?;
+
+            let id = Uuid::parse_str(&id_str).unwrap_or_else(|_| Uuid::new_v4());
+            let kind: gateway_flow::NodeKind =
+                serde_json::from_str(&kind_str).unwrap_or(gateway_flow::NodeKind::South);
+            let config: gateway_sdk::PluginConfig =
+                serde_json::from_str(&config_str).unwrap_or_default();
+            let input_ports: Vec<gateway_flow::Port> =
+                serde_json::from_str(&input_ports_str).unwrap_or_default();
+            let output_ports: Vec<gateway_flow::Port> =
+                serde_json::from_str(&output_ports_str).unwrap_or_default();
+
+            nodes.push(FlowNode {
+                id,
+                name,
+                kind,
+                operator_name,
+                config,
+                input_ports,
+                output_ports,
+            });
+        }
+        Ok(nodes)
+    }
+
+    fn load_edges_sync(
+        &self,
+        conn: &Connection,
+        flow_id: Uuid,
+    ) -> Result<Vec<FlowEdge>, FlowStoreError> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, source_node_id, source_port, target_node_id, target_port FROM flow_edges WHERE flow_id=?1",
+            )
+            .map_err(FlowStoreError::Rusqlite)?;
+        let mut edges = Vec::new();
+        let mut rows = stmt
+            .query(params![flow_id.to_string()])
+            .map_err(FlowStoreError::Rusqlite)?;
+        while let Some(row) = rows.next().map_err(FlowStoreError::Rusqlite)? {
+            let edge_id_str: String = row.get(0).map_err(FlowStoreError::Rusqlite)?;
+            let source_id_str: String = row.get(1).map_err(FlowStoreError::Rusqlite)?;
+            let source_port: String = row.get(2).map_err(FlowStoreError::Rusqlite)?;
+            let target_id_str: String = row.get(3).map_err(FlowStoreError::Rusqlite)?;
+            let target_port: String = row.get(4).map_err(FlowStoreError::Rusqlite)?;
+
+            edges.push(FlowEdge {
+                source_node_id: Uuid::parse_str(&source_id_str)
+                    .unwrap_or_else(|_| Uuid::new_v4()),
+                source_port,
+                target_node_id: Uuid::parse_str(&target_id_str)
+                    .unwrap_or_else(|_| Uuid::new_v4()),
+                target_port,
+            });
+        }
+        Ok(edges)
+    }
+}
+
+/// Errors from FlowStore operations.
+#[derive(Debug)]
+pub enum FlowStoreError {
+    Rusqlite(rusqlite::Error),
+    Json(serde_json::Error),
+}
+
+impl std::fmt::Display for FlowStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FlowStoreError::Rusqlite(e) => write!(f, "FlowStore: {}", e),
+            FlowStoreError::Json(e) => write!(f, "FlowStore: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for FlowStoreError {}
+
+impl From<rusqlite::Error> for FlowStoreError {
+    fn from(e: rusqlite::Error) -> Self {
+        FlowStoreError::Rusqlite(e)
+    }
+}
+
+impl From<serde_json::Error> for FlowStoreError {
+    fn from(e: serde_json::Error) -> Self {
+        FlowStoreError::Json(e)
+    }
+}
