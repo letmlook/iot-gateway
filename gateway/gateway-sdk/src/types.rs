@@ -146,6 +146,27 @@ impl DataValue {
             DataValue::Bytes(_) => DataType::Bytes,
         }
     }
+
+    /// Create DataValue from serde_json::Value
+    pub fn from_json(v: serde_json::Value) -> Self {
+        match v {
+            serde_json::Value::Null => DataValue::String("null".to_string()),
+            serde_json::Value::Bool(b) => DataValue::Bool(b),
+            serde_json::Value::Number(n) => {
+                if let Some(f) = n.as_f64() {
+                    DataValue::Float64(f)
+                } else if let Some(i) = n.as_i64() {
+                    DataValue::Int64(i)
+                } else if let Some(u) = n.as_u64() {
+                    DataValue::UInt64(u)
+                } else {
+                    DataValue::String(n.to_string())
+                }
+            }
+            serde_json::Value::String(s) => DataValue::String(s),
+            _ => DataValue::String(v.to_string()),
+        }
+    }
 }
 
 /// 点位（Tag）唯一标识

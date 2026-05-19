@@ -15,5 +15,5 @@ uuid = { version = "1", features = ["v4", "serde"] }
 rhai = { version = "1", features = ["sync"] }
 jsonpath-rust = "0.6"
 chrono = { version = "0.4", features = ["serde"] }
-tokio = { version = "1", features = ["sync", "rt", "macros"] }
+tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
 petgraph = "0.6"

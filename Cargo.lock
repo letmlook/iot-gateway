@@ -1608,6 +1608,42 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 
 [[package]]
+name = "plugin-bacnet"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "gateway-sdk",
+ "once_cell",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "plugin-http"
+version = "0.1.0"
+dependencies = [
+ "gateway-sdk",
+ "once_cell",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "plugin-kafka"
+version = "0.1.0"
+dependencies = [
+ "gateway-sdk",
+ "once_cell",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "plugin-modbus-rtu"
 version = "0.1.0"
 dependencies = [
@@ -1658,6 +1694,20 @@ dependencies = [
  "async-trait",
  "gateway-sdk",
  "opcua",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "plugin-s7"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "gateway-sdk",
+ "once_cell",
  "serde",
  "serde_json",
  "tokio",

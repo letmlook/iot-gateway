@@ -68,6 +68,14 @@ impl OperatorRegistry {
         use crate::operators::round;
         use crate::operators::change;
         use crate::operators::range;
+        use crate::operators::batch;
+        use crate::operators::split;
+        use crate::operators::join;
+        use crate::operators::dedup;
+        use crate::operators::script;
+        use crate::operators::throttle;
+        use crate::operators::convert;
+        use crate::operators::log;
 
         self.register(
             "filter",
@@ -262,6 +270,126 @@ impl OperatorRegistry {
                 description_en: Some("Linear transformation: map a value from an input range to an output range"),
             },
             || Box::new(range::RangeOperator::new(&gateway_sdk::PluginConfig::new())),
+        );
+
+        self.register(
+            "batch",
+            gateway_sdk::PluginMeta {
+                name: "batch",
+                kind: gateway_sdk::PluginKind::Operator,
+                description: Some("Collect data into batches"),
+                version: "0.1.0",
+                name_zh: Some("批量处理"),
+                name_en: Some("Batch"),
+                description_zh: Some("将数据收集到批次，达到批次大小或超时时间时输出"),
+                description_en: Some("Collect data into batches — emit when size threshold or time window reached"),
+            },
+            || Box::new(batch::BatchOperator::new(&gateway_sdk::PluginConfig::new())),
+        );
+
+        self.register(
+            "split",
+            gateway_sdk::PluginMeta {
+                name: "split",
+                kind: gateway_sdk::PluginKind::Operator,
+                description: Some("Split string by delimiter or array field into individual items"),
+                version: "0.1.0",
+                name_zh: Some("数据拆分"),
+                name_en: Some("Split"),
+                description_zh: Some("按分隔符拆分字符串或数组字段为单独的数据项"),
+                description_en: Some("Split a string by delimiter or array field into individual output items"),
+            },
+            || Box::new(split::SplitOperator::new(&gateway_sdk::PluginConfig::new())),
+        );
+
+        self.register(
+            "join",
+            gateway_sdk::PluginMeta {
+                name: "join",
+                kind: gateway_sdk::PluginKind::Operator,
+                description: Some("Join multiple data items into an array/batch"),
+                version: "0.1.0",
+                name_zh: Some("数据合并"),
+                name_en: Some("Join"),
+                description_zh: Some("将多个数据项合并为一个数组或批次"),
+                description_en: Some("Join multiple incoming data items into a single array/batch output"),
+            },
+            || Box::new(join::JoinOperator::new(&gateway_sdk::PluginConfig::new())),
+        );
+
+        self.register(
+            "dedup",
+            gateway_sdk::PluginMeta {
+                name: "dedup",
+                kind: gateway_sdk::PluginKind::Operator,
+                description: Some("Filter duplicate consecutive data — only pass when value changes"),
+                version: "0.1.0",
+                name_zh: Some("去重过滤"),
+                name_en: Some("Dedup"),
+                description_zh: Some("过滤连续重复的数据，只在值发生变化时传递"),
+                description_en: Some("Filter duplicate consecutive data — only pass when the key value changes"),
+            },
+            || Box::new(dedup::DedupOperator::new(&gateway_sdk::PluginConfig::new())),
+        );
+
+        self.register(
+            "script",
+            gateway_sdk::PluginMeta {
+                name: "script",
+                kind: gateway_sdk::PluginKind::Operator,
+                description: Some("Execute JavaScript-like scripting (rhai engine)"),
+                version: "0.1.0",
+                name_zh: Some("脚本执行"),
+                name_en: Some("Script"),
+                description_zh: Some("使用脚本语言执行自定义数据处理逻辑"),
+                description_en: Some("Execute custom data processing logic using a scripting language"),
+            },
+            || Box::new(script::ScriptOperator::new(&gateway_sdk::PluginConfig::new())),
+        );
+
+        self.register(
+            "throttle",
+            gateway_sdk::PluginMeta {
+                name: "throttle",
+                kind: gateway_sdk::PluginKind::Operator,
+                description: Some("Limit data flow rate — pass one item every N milliseconds"),
+                version: "0.1.0",
+                name_zh: Some("速率限制"),
+                name_en: Some("Throttle"),
+                description_zh: Some("限制数据流速率，每隔指定毫秒才通过一个数据项"),
+                description_en: Some("Throttle data flow — only pass one item every N milliseconds"),
+            },
+            || Box::new(throttle::ThrottleOperator::new(&gateway_sdk::PluginConfig::new())),
+        );
+
+        self.register(
+            "convert",
+            gateway_sdk::PluginMeta {
+                name: "convert",
+                kind: gateway_sdk::PluginKind::Operator,
+                description: Some("Type conversion — int↔float↔string↔bool"),
+                version: "0.1.0",
+                name_zh: Some("类型转换"),
+                name_en: Some("Convert"),
+                description_zh: Some("数据类型转换：整数、浮点、字符串、布尔之间的转换"),
+                description_en: Some("Convert data types — int↔float↔string↔bool"),
+            },
+            || Box::new(convert::ConvertOperator::new(&gateway_sdk::PluginConfig::new())),
+        );
+
+        self.register(
+            "log",
+            gateway_sdk::PluginMeta {
+                name: "log",
+                kind: gateway_sdk::PluginKind::Operator,
+                description: Some("Log data for debugging — does not modify data"),
+                version: "0.1.0",
+                name_zh: Some("数据日志"),
+                name_en: Some("Log"),
+                description_zh: Some("记录数据日志用于调试，不修改数据本身"),
+                description_en: Some("Log data payload for debugging — passes data through unchanged"),
+            },
+            || Box::new(log::LogOperator::new(&gateway_sdk::PluginConfig::new())),
         );
     }
 }
