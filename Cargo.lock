@@ -1924,6 +1924,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "plugin-omron-fins"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "gateway-sdk",
+ "once_cell",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "plugin-opcua"
 version = "0.1.0"
 dependencies = [
@@ -1935,6 +1948,19 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "plugin-profinet"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "gateway-sdk",
+ "once_cell",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1962,6 +1988,19 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "plugin-snmp"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "gateway-sdk",
+ "once_cell",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

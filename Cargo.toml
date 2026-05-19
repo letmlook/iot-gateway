@@ -21,4 +21,7 @@ members = [
     "gateway/gateway-plugins/plugin-mitsubishi-mc",
     "gateway/gateway-plugins/plugin-influxdb",
     "gateway/gateway-plugins/plugin-tdengine",
+    "gateway/gateway-plugins/plugin-profinet",
+    "gateway/gateway-plugins/plugin-snmp",
+    "gateway/gateway-plugins/plugin-omron-fins",
 ]
