@@ -600,6 +600,422 @@ CREATE TABLE nodes (
 
 ---
 
+## 九-附录：开发前调研详情
+
+### A. 前端技术栈选型
+
+#### 选型结论：**VueFlow**（已确认）
+
+| 候选方案 | Stars | 优点 | 缺点 | 结论 |
+|---------|-------|------|------|------|
+| **VueFlow** | ~3k | Vue3 原生、API 简洁、TS 好、自定义节点、minimap/controls 内置 | 相对较新 | ✅ 选用 |
+| Node-RED | 18k | 成熟、拖拽好 | jQuery 技术栈、Vue 集成成本高 | ❌ 放弃 |
+| G6 (AntV) | 13k | 功能强大 | 学习曲线陡峭、Vue 集成工作量大 | ❌ 放弃 |
+| 自研 Canvas | — | 完全可控 | 工作量大、BUG 多、周期长 | ❌ 放弃 |
+
+**VueFlow 核心能力：**
+- 拖拽节点到画布
+- 自定义节点类型（South/Operator/North 三种外观）
+- 边连接（source/target）
+- MiniMap + Controls
+- 双击节点打开配置面板
+- 节点位置持久化（保存 Flow 时存储坐标）
+
+**与现有技术栈匹配：**
+- 现有前端：Vue3 + Element Plus + vue-router + vite
+- VueFlow 直接支持 Vue3，Element Plus 表单组件可直接用于配置面板
+- 无需更换技术栈
+
+**安装命令（Phase 1 执行）：**
+```bash
+npm install @vue-flow/core @vue-flow/background @vue-flow/controls @vue-flow/minimap
+```
+
+---
+
+### B. 插件 FFI 加载机制（现有架构分析）
+
+#### 现状：South/North 插件
+
+- **加载方式**：通过 `libloading` 加载 `.so` 动态库（C ABI）
+- **跨边界数据传递**：全部以 JSON 字符串传递
+- **符号约定**：每个方法对应一个 C 符号（如 `gateway_south_plugin_open`）
+- **宿主侧适配器**：`SouthSoAdapter` / `NorthSoAdapter` 实现 `SouthPlugin` / `NorthPlugin` trait，将 FFI 调用转发给 `.so`
+- **内存管理**：插件分配字符串 → 宿主复制 → 调用 `gateway_plugin_free_string` 释放
+
+#### Operator 插件加载策略
+
+**两种方案对比：**
+
+| 方案 | 实现方式 | 优点 | 缺点 |
+|------|---------|------|------|
+| **方案A：内置（推荐）** | Operator 作为 `gateway-flow` crate 内部模块（`src/operators/filter.rs` 等） | 无 FFI 开销、类型安全、调试简单、共享 `gateway-sdk` | 每次新增算子需编译整个 crate |
+| **方案B：.so 插件化** | 同 South/North，通过 `libloading` 加载 `OperatorSoAdapter` | 完全解耦、插件可独立发布 | FFI 复杂、表达式引擎需跨边界传递 |
+
+**推荐方案A（内置）** 理由：
+- Operator 逻辑相对简单（无设备连接、无协议解析）
+- 算子表达式求值（rhai）可直接内嵌 Rust
+- 内置算子共享 `gateway-flow` 依赖树，无额外加载复杂度
+- Phase 1 阶段算子数量有限（5个），编译开销可接受
+- 未来算子超过 10 个时可平滑迁移到方案B
+
+**FFI 符号设计（如果未来需要外部 Operator）：**
+```rust
+// 追加到 gateway-sdk/src/ffi.rs
+pub const SYM_OPERATOR_CREATE: &[u8] = b"gateway_operator_plugin_create";
+pub const SYM_OPERATOR_DESTROY: &[u8] = b"gateway_operator_plugin_destroy";
+pub const SYM_OPERATOR_META: &[u8] = b"gateway_operator_plugin_meta";
+pub const SYM_OPERATOR_INIT: &[u8] = b"gateway_operator_plugin_init";
+pub const SYM_OPERATOR_UNINIT: &[u8] = b"gateway_operator_plugin_uninit";
+pub const SYM_OPERATOR_PROCESS: &[u8] = b"gateway_operator_plugin_process";
+pub const SYM_OPERATOR_PROCESS_BATCH: &[u8] = b"gateway_operator_plugin_process_batch";
+pub const SYM_OPERATOR_CONFIG_SCHEMA: &[u8] = b"gateway_operator_plugin_config_schema";
+```
+
+---
+
+### C. 数据库 Schema 详细设计
+
+#### 设计原则
+- 复用现有 `groups` / `tags` / `subscriptions` 表（不变）
+- 新增 `flows` / `flow_nodes` 表存储 Flow 定义
+- Node 粒度：South 和 Operator 节点存储在 `flow_nodes`，North 节点同样
+- 运行时状态（running/paused）存内存，不落库
+
+#### 完整 Schema
+
+```sql
+-- ========== Flow 定义表 ==========
+CREATE TABLE flows (
+    id          TEXT PRIMARY KEY,           -- UUID
+    name        TEXT NOT NULL,
+    description TEXT,
+    definition  TEXT NOT NULL,              -- JSON: nodes[] + edges[]
+    version     INTEGER DEFAULT 1,
+    enabled     INTEGER DEFAULT 0,          -- 0=禁用, 1=启用
+    status      TEXT DEFAULT 'draft',       -- draft/validated/running/paused/failed
+    created_at  TEXT NOT NULL,              -- ISO8601
+    updated_at  TEXT NOT NULL
+);
+
+-- ========== Flow 节点配置表 ==========
+CREATE TABLE flow_nodes (
+    id          TEXT PRIMARY KEY,           -- UUID
+    flow_id     TEXT NOT NULL,
+    kind        TEXT NOT NULL,              -- south / operator / north
+    plugin_name TEXT NOT NULL,              -- 插件名（sim, modbus-tcp, filter, mqtt...）
+    name        TEXT NOT NULL,
+    position_x  REAL,                       -- 画布 X 坐标（前端用）
+    position_y  REAL,                       -- 画布 Y 坐标
+    config      TEXT NOT NULL DEFAULT '{}', -- JSON: 插件配置
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE
+);
+
+-- ========== 保留现有表（不变）==========
+-- groups: South 设备点位分组
+-- tags: South 设备具体点位
+-- subscriptions: North 订阅关系
+
+-- ========== 索引 ==========
+CREATE INDEX idx_flow_nodes_flow_id ON flow_nodes(flow_id);
+CREATE INDEX idx_flows_status ON flows(status);
+```
+
+#### 迁移策略
+- Phase 1 先用 SQLite，Flow 表结构独立，不影响现有表
+- Phase 4 如需换 PostgreSQL，迁移脚本只操作 `flows` / `flow_nodes`
+
+---
+
+### D. Flow Orchestrator API 详细设计
+
+#### REST API 设计
+
+| Method | Path | 说明 |
+|--------|------|------|
+| `GET` | `/api/flows` | 列出所有 Flow |
+| `POST` | `/api/flows` | 创建 Flow（含 nodes + edges） |
+| `GET` | `/api/flows/:id` | 获取单个 Flow 详情 |
+| `PUT` | `/api/flows/:id` | 更新 Flow 定义 |
+| `DELETE` | `/api/flows/:id` | 删除 Flow |
+| `POST` | `/api/flows/:id/deploy` | 部署 Flow（draft → running） |
+| `POST` | `/api/flows/:id/pause` | 暂停 Flow（running → paused） |
+| `POST` | `/api/flows/:id/stop` | 停止 Flow（running/paused → stopped） |
+| `GET` | `/api/flows/:id/status` | 获取 Flow 运行状态 |
+| `GET` | `/api/flows/:id/nodes/:node_id/metrics` | 节点级 metrics |
+
+#### 请求/响应示例
+
+**POST /api/flows** — 创建 Flow
+```json
+// Request
+{
+  "name": "Modbus → Filter → MQTT",
+  "description": "PLC 数据清洗后上传云端",
+  "nodes": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440001",
+      "name": "PLC-1",
+      "plugin": "modbus-tcp",
+      "kind": "south",
+      "position_x": 100,
+      "position_y": 200,
+      "config": {
+        "host": "192.168.1.100",
+        "port": 502,
+        "slave_id": 1
+      }
+    },
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440002",
+      "name": "温度过滤",
+      "plugin": "filter",
+      "kind": "operator",
+      "position_x": 350,
+      "position_y": 200,
+      "config": {
+        "condition": "temperature > 100",
+        "pass": true
+      }
+    },
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440003",
+      "name": "云端上传",
+      "plugin": "mqtt",
+      "kind": "north",
+      "position_x": 600,
+      "position_y": 200,
+      "config": {
+        "broker": "mqtt://broker.emqx.io:1883",
+        "topic": "plant/${tags.location}/${tags.device_id}"
+      }
+    }
+  ],
+  "edges": [
+    {"from": "550e8400-e29b-41d4-a716-446655440001", "to": "550e8400-e29b-41d4-a716-446655440002"},
+    {"from": "550e8400-e29b-41d4-a716-446655440002", "to": "550e8400-e29b-41d4-a716-446655440003"}
+  ]
+}
+
+// Response 201
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "name": "Modbus → Filter → MQTT",
+  "status": "draft",
+  ...
+}
+```
+
+**POST /api/flows/:id/deploy** — 部署
+```json
+// Response 200
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "running",
+  "deployed_at": "2026-05-19T10:30:00Z"
+}
+```
+
+#### WebSocket 实时事件（未来扩展）
+
+```json
+// 节点数据事件（Flow 运行中）
+{
+  "type": "node_data",
+  "flow_id": "550e8400-...",
+  "node_id": "550e8400-...",
+  "timestamp": 1716106200000,
+  "tags": {"temperature": {"type": "float64", "value": 85.5}}
+}
+
+// 节点状态变更
+{
+  "type": "node_status",
+  "flow_id": "550e8400-...",
+  "node_id": "550e8400-...",
+  "status": "error",
+  "message": "连接超时"
+}
+```
+
+---
+
+### E. OperatorPlugin 完整接口设计
+
+#### 核心接口
+
+```rust
+#[async_trait]
+pub trait OperatorPlugin: Send + Sync {
+    fn meta(&self) -> PluginMeta;
+
+    /// 配置 Schema（JSON Schema，用于前端表单生成）
+    fn config_schema(&self) -> Option<ConfigSchema> { None }
+
+    /// 插件级初始化（可选）
+    async fn init(&self, config: PluginConfig) -> PluginResult<()> {
+        let _ = config;
+        Ok(())
+    }
+
+    /// 插件级反初始化（可选）
+    async fn uninit(&self) -> PluginResult<()> { Ok(()) }
+
+    /// 处理单条 PipelineData
+    async fn process(&self, data: PipelineData) -> PluginResult<PipelineData>;
+
+    /// 批处理（默认逐条）
+    async fn process_batch(&self, batch: Vec<PipelineData>) -> PluginResult<Vec<PipelineData>> {
+        let mut results = Vec::with_capacity(batch.len());
+        for d in batch {
+            results.push(self.process(d).await?);
+        }
+        Ok(results)
+    }
+
+    /// 可选：重置算子内部状态（如 aggregate 的滑动窗口状态）
+    async fn reset(&self) -> PluginResult<()> { Ok(()) }
+}
+```
+
+#### PipelineData 类型（完整定义）
+
+```rust
+use std::collections::HashMap;
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipelineData {
+    /// Flow 实例 ID
+    pub flow_id: Uuid,
+    /// 当前节点 ID
+    pub node_id: Uuid,
+    /// 数据来源节点 ID（链路追踪）
+    pub source_node_id: Uuid,
+    /// 标签数据
+    pub tags: HashMap<String, DataValue>,
+    /// 原始时间戳（毫秒）
+    pub timestamp: i64,
+    /// 上下文元数据（来源设备、位置等）
+    pub metadata: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value")]
+pub enum DataValue {
+    Bool(bool),
+    Int8(i8), Int16(i16), Int32(i32), Int64(i64),
+    UInt8(u8), UInt16(u16), UInt32(u32), UInt64(u64),
+    Float32(f32), Float64(f64),
+    String(String),
+    Bytes(Vec<u8>),
+    Null,
+}
+```
+
+#### Operator 状态管理设计
+
+**有状态算子（aggregate、buffer、cache）** 需要在算子实例生命周期内保持状态：
+
+```rust
+// 算子实例状态（每个节点独享）
+pub struct OperatorInstance {
+    plugin_name: String,
+    config: PluginConfig,
+    // 有状态算子的内部状态
+    state: OperatorState,
+}
+
+pub enum OperatorState {
+    Filter(()),                    // 无状态
+    Transform(()),                 // 无状态
+    Aggregate(AggregateState),      // 有状态
+    Buffer(BufferState),            // 有状态
+    Cache(CacheState),              // 有状态
+    Router(RouterState),            // 有状态
+}
+
+pub struct AggregateState {
+    /// tag_name → 窗口数据
+    windows: HashMap<String, Vec<(i64, f64)>>,
+    /// tag_name → 上次触发时间
+    last_trigger: HashMap<String, i64>,
+    window_ms: i64,
+    aggregation: AggregationType,
+}
+
+pub struct BufferState {
+    queue: VecDeque<PipelineData>,
+    batch_size: usize,
+    flush_interval_ms: u64,
+}
+```
+
+**状态生命周期：**
+- 随 Flow 实例创建而创建
+- Flow 暂停/停止时状态保留（内存）
+- Flow 删除时释放
+- 不落库（Phase 1），未来可扩展状态快照到 SQLite
+
+---
+
+### F. Phase 1 详细实施任务（最终版）
+
+#### Stage 1: gateway-sdk 扩展（5 任务）
+
+| # | 任务 | 产出 |
+|---|------|------|
+| 1 | 新增 `PipelineData` + `DataValue` 类型到 `src/pipeline.rs` | 跨节点数据传递标准格式 |
+| 2 | 新增 `OperatorPlugin` trait 到 `src/plugin.rs` | 算子插件标准接口 |
+| 3 | 扩展 `PluginKind::Operator` 枚举 | 类型系统支持三层插件 |
+| 4 | 更新 `PluginConfig` 类型（现有 `HashMap` 已够用，确认即可） | 配置传递标准化 |
+| 5 | 更新 `meta_to_ffi()` 支持 `Operator` | FFI 符号导出兼容 |
+
+#### Stage 2: gateway-flow crate（6 任务）
+
+| # | 任务 | 产出 |
+|---|------|------|
+| 6 | 创建 crate + 添加到 workspace | `gateway-flow` 独立 crate |
+| 7 | 实现 `Flow` 结构 + DAG 验证 + 拓扑排序 | Flow 定义与校验 |
+| 8 | 实现 `PluginRegistry` 三层注册表 | South/North/Operator 插件管理 |
+| 9 | 实现 `FlowExecutor` DAG 执行骨架 | 拓扑顺序执行节点 |
+| 10 | 创建 `operators/mod.rs` + `operators/filter.rs` 骨架 | 算子模块结构 |
+| 11 | 添加 `rhai` 依赖，验证 filter 表达式求值 | 表达式引擎集成 |
+
+#### Stage 3: 5 个内置算子（5 任务）
+
+| # | 任务 | 产出 |
+|---|------|------|
+| 12 | 完成 `filter` 算子（条件表达式，rhai） | 过滤数据 |
+| 13 | 实现 `transform` 算子（类型转换、缩放） | 数据转换 |
+| 14 | 实现 `aggregate` 算子（时间窗口聚合） | 统计聚合 |
+| 15 | 实现 `router` 算子（条件路由） | 分支分发 |
+| 16 | 实现 `buffer` 算子（批量缓冲） | 攒批输出 |
+
+#### Stage 4: gateway-server Flow API（4 任务）
+
+| # | 任务 | 产出 |
+|---|------|------|
+| 17 | 创建 `flows` / `flow_nodes` SQLite 表 | 持久化存储 |
+| 18 | 实现 Flow CRUD REST 处理器 | `/api/flows` 系列接口 |
+| 19 | 实现 Flow deploy/pause/stop 生命周期 API | 部署控制接口 |
+| 20 | 将 `gateway-flow` 集成到 `AppState` | 运行时 FlowExecutor 管理 |
+
+#### Stage 5: 前端 VueFlow 集成（4 任务）
+
+| # | 任务 | 产出 |
+|---|------|------|
+| 21 | 安装 VueFlow 依赖 | `@vue-flow/core` 等 |
+| 22 | 创建 `FlowList.vue` 列表页 | 流程列表 |
+| 23 | 创建 `FlowEditor.vue` 编辑器（拖拽画布） | 可视化编排 |
+| 24 | 创建自定义节点组件（South/Operator/North 三种外观） | 节点样式区分 |
+
+**Phase 1 总计：24 个任务，预计 4-6 周完成。**
+
+---
+
 ## 十、向后兼容性
 
 **完全破坏性，不保留旧代码。**
@@ -608,4 +1024,4 @@ CREATE TABLE nodes (
 
 ---
 
-*文档状态：待用户确认后进入实施阶段*
+*文档状态：调研完成，Phase 1 实施计划已就绪（24 任务）*
