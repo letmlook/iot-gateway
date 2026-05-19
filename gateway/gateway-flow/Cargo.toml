@@ -1,0 +1,17 @@
+[package]
+name = "gateway-flow"
+version = "0.1.0"
+edition = "2021"
+description = "Flow orchestration: DAG execution, node registry, built-in operators"
+
+[dependencies]
+gateway-sdk = { path = "../gateway-sdk" }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1", features = ["sync", "rt", "macros"] }
+petgraph = "0.6"
