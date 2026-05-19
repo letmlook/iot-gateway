@@ -61,6 +61,8 @@ impl OperatorRegistry {
         use crate::operators::aggregate;
         use crate::operators::router;
         use crate::operators::buffer;
+        use crate::operators::json_path;
+        use crate::operators::deadband;
 
         self.register(
             "filter",
@@ -150,6 +152,36 @@ impl OperatorRegistry {
                 description_en: Some("Alarm rule engine with threshold, rate-of-change, and state-change rules"),
             },
             || Box::new(alarm::AlarmOperator::new(&gateway_sdk::PluginConfig::new())),
+        );
+
+        self.register(
+            "json-path",
+            gateway_sdk::PluginMeta {
+                name: "json-path",
+                kind: gateway_sdk::PluginKind::Operator,
+                description: Some("Extract values from JSON using JSONPath"),
+                version: "0.1.0",
+                name_zh: Some("JSON路径提取"),
+                name_en: Some("JSON Path"),
+                description_zh: Some("使用JSONPath从JSON数据中提取字段值"),
+                description_en: Some("Extract values from JSON data using JSONPath expressions"),
+            },
+            || Box::new(json_path::JsonPathOperator::new(&gateway_sdk::PluginConfig::new())),
+        );
+
+        self.register(
+            "deadband",
+            gateway_sdk::PluginMeta {
+                name: "deadband",
+                kind: gateway_sdk::PluginKind::Operator,
+                description: Some("Filter data based on deadband threshold"),
+                version: "0.1.0",
+                name_zh: Some("死区过滤"),
+                name_en: Some("Deadband"),
+                description_zh: Some("当数据变化量超过死区阈值时才会传递数据"),
+                description_en: Some("Only pass data when value change exceeds deadband threshold"),
+            },
+            || Box::new(deadband::DeadbandOperator::new(&gateway_sdk::PluginConfig::new())),
         );
     }
 }
