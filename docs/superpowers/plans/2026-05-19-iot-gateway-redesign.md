@@ -1,8 +1,8 @@
 # IoT 网关破坏性重构：最终形态设计
 
-> 文档版本：v1.1
+> 文档版本：v1.2
 > 日期：2026-05-19
-> 更新：2026-05-19 Phase 1 实现完成
+> 更新：2026-05-19 Phase 1/2/3/4 实现完成
 > 目标：不考虑兼容，完全重新设计，实现可视化物联网数据流编排平台
 
 ---
@@ -1078,7 +1078,222 @@ pub struct BufferState {
 
 ---
 
-## 十、向后兼容性
+## Phase 2 实现状态 ✅
+
+✅ **已完成**
+
+### 协议插件补全
+
+#### South 插件（14个）
+| # | 插件 | 说明 |
+|---|------|------|
+| S01 | modbus-rtu | 串口 Modbus RTU ✅ 原有 |
+| S02 | modbus-tcp | Modbus TCP ✅ 原有 |
+| S03 | mqtt | MQTT 客户端 ✅ 原有 |
+| S04 | opcua | OPC-UA ✅ 原有 |
+| S05 | sim | 模拟数据 ✅ 原有 |
+| S06 | virb | 虚拟设备 ✅ 原有 |
+| S07 | bacnet | BACnet 楼宇自动化 ✅ |
+| S08 | s7 | 西门子 S7 PLC ✅ |
+| S09 | dl-t645 | DL/T645 电表 ✅ |
+| S10 | iec61850 | IEC61850 变电站 ✅ |
+| S11 | ethernet-ip | EtherNet/IP ✅ |
+| S12 | mitsubishi-mc | 三菱 MC 协议 ✅ |
+| S13 | profinet | PROFINET 工业以太网 ✅ |
+| S14 | snmp | SNMP 网络监控 ✅ |
+| S15 | omron-fins | Omron FINS PLC ✅ |
+
+#### North 插件（8个）
+| # | 插件 | 说明 |
+|---|------|------|
+| N01 | mqtt | MQTT Broker ✅ 原有 |
+| N02 | http | HTTP Webhook ✅ |
+| N03 | kafka | Kafka Producer ✅ |
+| N04 | influxdb | InfluxDB 时序库 ✅ |
+| N05 | tdengine | TDengine 时序库 ✅ |
+| N06 | websocket | WebSocket 推送 ✅ |
+| N07 | grpc | gRPC 推送 ✅ |
+| N08 | sparkplug | Sparkplug B (MQTT格式) ✅ |
+
+#### 高级算子（21个）
+| # | 算子 | 说明 |
+|---|------|------|
+| O01 | filter | 条件过滤 ✅ |
+| O02 | transform | 字段变换 ✅ |
+| O03 | aggregate | 时间窗口聚合 ✅ |
+| O04 | router | 条件路由 ✅ |
+| O05 | buffer | 缓冲批处理 ✅ |
+| O06 | alarm | 告警规则引擎 ✅ |
+| O07 | json-path | JSON 字段提取 ✅ |
+| O08 | deadband | 死区过滤 ✅ |
+| O09 | formula | rhai 表达式计算 ✅ |
+| O10 | clamp | 限幅 ✅ |
+| O11 | round | 四舍五入 ✅ |
+| O12 | change | 变化检测 ✅ |
+| O13 | range | 范围映射 ✅ |
+| O14 | batch | 批量处理 ✅ |
+| O15 | split | 字符串分割 ✅ |
+| O16 | join | 字符串合并 ✅ |
+| O17 | dedup | 去重 ✅ |
+| O18 | script | rhai 脚本算子 ✅ |
+| O19 | throttle | 限流 ✅ |
+| O20 | convert | 类型转换 ✅ |
+| O21 | log | 日志输出 ✅ |
+| O22 | xml-path | XML XPath 提取 ✅ |
+| O23 | script-python | Python 脚本（stub） ✅ |
+
+### 基础设施
+- [x] `SouthAddress` 统一地址枚举（ModbusAddr/BACnetAddr/S7Addr/IEC61850Addr/GenericAddr）
+- [x] `AddressScheme` trait
+- [x] `/flows/operators` API（算子发现）
+- [x] `/plugins` API（插件发现）
+
+### Phase 2 Git 提交记录
+```
+a71e24d feat(gateway-plugins): add DL/T645, IEC61850, EtherNet/IP, Mitsubishi MC...
+cdc7b6c feat(gateway-plugins): add WebSocket, gRPC, and Sparkplug B north...
+91b1d94 feat(gateway-plugins): add PROFINET, SNMP, and Omron FINS south...
+cba3f93 feat(gateway-plugins): add EtherNet/IP and Mitsubishi MC south protocol...
+28d9292 feat(gateway-flow): add batch/split/join/dedup/script/throttle/convert/log...
+babc9ea feat(gateway-plugins): add HTTP webhook and Kafka north protocol plugins
+```
+
+---
+
+## Phase 3 实现状态 ✅
+
+✅ **已完成**
+
+### 前端完善
+
+#### B1: 节点选择面板
+- [x] 算子从 `GET /flows/operators` API 动态加载
+- [x] South/Operator/North 三分类可折叠面板（el-collapse）
+- [x] Hover 显示 description_zh 说明
+- [x] Emoji 图标：🔌 South / ⚙️ Operator / 📤 North
+
+#### B2: 属性配置面板
+- [x] South 节点：`api.pluginSouthSchema()` 动态表单
+- [x] Operator 节点：21种算子配置字段完整覆盖
+- [x] North 节点：`api.pluginNorthSchema()` 动态表单
+- [x] el-tabs 多标签页布局
+
+#### B3: 部署管理
+- [x] FlowList 生命周期按钮（deploy/start/pause/stop/delete）
+- [x] FlowEditor 工具栏状态联动
+- [x] 部署后每3秒轮询状态，共5次（15秒窗口）
+
+#### B4: 数据预览面板
+- [x] FlowEditor 底部可折叠面板
+- [x] 选中节点显示输入/输出数据占位
+- [x] 最近5条消息列表
+- [x] 每2秒自动刷新
+
+#### C1: South 点位管理
+- [x] 属性面板「点位」Tab
+- [x] `api.groups(nodeId)` 加载分组
+- [x] `api.tags(nodeId)` 加载点位
+- [x] el-table 展示（名称/地址/类型/访问模式）
+- [x] 刷新按钮
+
+#### C2: North 订阅管理
+- [x] 属性面板「订阅」Tab
+- [x] 当前 Flow 中 South/Operator 节点列表
+- [x] 勾选订阅节点
+- [x] `api.setSubscriptions()` 保存
+
+### 剩余算子
+
+#### A1: xml-path 算子
+- [x] 基于 regex 的 XPath-like 提取
+- [x] 配置：source_field, expressions, namespaces
+
+#### A2: script-python 算子
+- [x] rhai 引擎执行 Python 语法
+- [x] 配置：script, input_fields, output_fields, timeout_ms
+- [x] 内置函数：len/abs/round/min/max/floor/ceil/sqrt/pow/log/sin/cos/tan/str/int/float
+
+### Phase 3 Git 提交记录
+```
+679e8e1 feat: add xml-path and script-python operators + enhance FlowEditor...
+```
+
+---
+
+## Phase 4 实现状态 ✅
+
+✅ **核心已完成**
+
+### D3: Flow 热重载
+- [x] `POST /flows/:id/reload`
+- [x] 停止运行中的 Flow 实例
+- [x] 重新解析 Flow 定义并验证
+- [x] 状态重置为 draft
+
+### D4: Prometheus 监控
+- [x] `GET /metrics` — Prometheus text exposition 格式
+- [x] `GET /health` — 健康检查 + timestamp
+- [x] 指标：gateway_flows_running / gateway_flows_total / gateway_nodes_processed_total / gateway_errors_total
+
+### D2: Flow 版本历史
+- [x] `version_history` JSON 数组列（保留最近10个快照）
+- [x] `GET /flows/:id/versions` — 列出版本历史
+- [x] `POST /flows/:id/rollback/:version` — 回滚到指定版本
+- [x] `update_flow` 自动保存快照
+
+### D5: 配置导入/导出
+- [x] `GET /flows/export` — 导出 Flow JSON（支持 `?ids=` 选择性导出）
+- [x] `POST /flows/import` — 导入（`force: true` 覆盖同名）
+- [x] ExportResponse 版本时间戳元数据
+
+### D6: SQLite 备份/恢复
+- [x] `POST /admin/sqlite-backup` — 时间戳文件备份
+- [x] `GET /admin/sqlite-backup` — 下载最新备份
+- [x] `POST /admin/sqlite-restore` — 从备份路径恢复
+
+### Phase 4 Git 提交记录
+```
+cab48c0 feat(gateway-server): add D3 hot reload, D4 Prometheus metrics, D2 version history, D5 import/export, D6 backup/restore
+```
+
+---
+
+## Phase 5: WebSocket 实时可视化（规划中）
+
+### 目标
+Flow 运行数据实时推送，前端 WebSocket 订阅。
+
+### 方案
+```
+gateway-server              Web 前端
+     │                           │
+  FlowRuntime ──────────────────┼── WebSocket /ws/flows/:id/live
+     │                           │   {"type": "node_data", "node_id": "...", "tags": {...}}
+     └───────────────────────────┘
+```
+
+### API 设计
+| Method | Path | 说明 |
+|--------|------|------|
+| `WS` | `/ws/flows/:id/live` | 订阅 Flow 实时数据 |
+| `GET` | `/flows/:id/live/summary` | 获取当前 Flow 运行快照 |
+
+### WebSocket 事件
+```json
+{ "type": "node_data", "flow_id": "...", "node_id": "...", "timestamp": 1234567890, "tags": {...} }
+{ "type": "node_status", "flow_id": "...", "node_id": "...", "status": "running|error", "message": "..." }
+{ "type": "flow_status", "flow_id": "...", "status": "running|paused|stopped", "nodes_total": 5 }
+```
+
+### 前端 DataMonitor 增强
+- 实时曲线图（基于 ECharts）
+- 节点状态指示（绿色=运行/红色=错误/灰色=停止）
+- 消息速率仪表盘
+- 告警事件列表
+
+---
+
+## 向后兼容性
 
 **完全破坏性，不保留旧代码。**
 
@@ -1086,4 +1301,4 @@ pub struct BufferState {
 
 ---
 
-*文档状态：调研完成，Phase 1 实施计划已就绪（24 任务）*
+*文档状态：v1.2 — Phase 1/2/3/4 全部实现完成，Phase 5 WebSocket 实时可视化规划中*
