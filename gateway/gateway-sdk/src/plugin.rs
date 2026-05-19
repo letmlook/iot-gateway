@@ -3,7 +3,7 @@
 use crate::error::{PluginError, PluginResult};
 use crate::messages::{GroupData, GroupSubscription};
 use crate::schema::{ConfigSchema, TagSchema};
-use crate::types::{Group, GroupId, NodeId, Tag, TagId};
+use crate::types::{Group, GroupId, NodeId, PipelineData, Tag, TagId};
 use crate::types::PluginConfig;
 use async_trait::async_trait;
 use serde::Serialize;
@@ -201,4 +201,33 @@ pub trait NorthPlugin: Send + Sync {
 
     /// 核心推送 GroupData（来自已订阅的南向 Group）。
     async fn on_group_data(&self, node_id: NodeId, data: Arc<GroupData>) -> PluginResult<()>;
+}
+
+/// 数据处理算子 Trait（过滤、转换、聚合等）。
+/// 内置算子和未来外部 .so 算子插件均实现此 Trait。
+#[async_trait]
+pub trait Operable: Send + Sync {
+    fn meta(&self) -> PluginMeta;
+
+    /// 配置 Schema（可选）— 用于 UI 表单生成和校验。
+    fn config_schema(&self) -> Option<ConfigSchema> {
+        None
+    }
+
+    // ---------- 生命周期 ----------
+
+    /// 流程部署时调用 — 创建 per-instance 状态。
+    async fn open(&self, node_id: NodeId, config: PluginConfig) -> PluginResult<()>;
+
+    /// 流程停止时调用 — 释放打开的资源。
+    async fn close(&self, node_id: NodeId) -> PluginResult<()>;
+
+    // ---------- 核心处理 ----------
+
+    /// 处理一个 PipelineData，返回零个或多个输出 PipelineData。
+    /// 零输出 = 数据被丢弃（如过滤条件不满足）。
+    async fn process(&self, node_id: NodeId, data: PipelineData) -> PluginResult<Vec<PipelineData>>;
+
+    /// 重置算子状态（如清空聚合缓冲、滑动窗口）。
+    async fn reset(&self, node_id: NodeId) -> PluginResult<()>;
 }

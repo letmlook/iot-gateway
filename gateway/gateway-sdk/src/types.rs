@@ -1,5 +1,6 @@
 //! 本系统核心类型：Tag、Group、Node、DataValue 等。
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -275,4 +276,38 @@ pub enum NodeKind {
 
 /// 插件配置（JSON）。各插件自行解析。
 pub type PluginConfig = HashMap<String, serde_json::Value>;
+
+/// Pipeline 数据单元，流经 South → Operator → North。
+/// node_id: 源节点（South 或 Operator）
+/// payload: 字段名 → 值 的映射（灵活，Operator 可添加/转换字段）
+/// metadata: 元数据键值对（如 "source_group" → "group_temp", "quality" → "good"）
+/// ts: 事件/采集时间戳
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipelineData {
+    pub node_id: NodeId,
+    pub payload: HashMap<String, DataValue>,
+    pub metadata: HashMap<String, String>,
+    pub ts: DateTime<Utc>,
+}
+
+impl PipelineData {
+    pub fn new(node_id: NodeId) -> Self {
+        Self {
+            node_id,
+            payload: HashMap::new(),
+            metadata: HashMap::new(),
+            ts: Utc::now(),
+        }
+    }
+
+    pub fn with_payload(mut self, payload: HashMap<String, DataValue>) -> Self {
+        self.payload = payload;
+        self
+    }
+
+    pub fn with_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.metadata.insert(key.into(), value.into());
+        self
+    }
+}
 
