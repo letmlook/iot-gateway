@@ -1,8 +1,70 @@
 # IoT 网关破坏性重构：最终形态设计
 
-> 文档版本：v1.0
+> 文档版本：v1.1
 > 日期：2026-05-19
+> 更新：2026-05-19 Phase 1 实现完成
 > 目标：不考虑兼容，完全重新设计，实现可视化物联网数据流编排平台
+
+---
+
+## Phase 1 实现状态
+
+✅ **已完成**（分支：`redesign/v1-flow-orchestration`）
+
+### Stage 1 — gateway-sdk 扩展
+- [x] `PipelineData` 类型 + `Operable` trait
+- [x] `PluginKind::Operator` 变体
+- [x] `OperatorPlugin` trait（process/reset/state）
+- [x] `OperatorMetrics` 指标类型
+- [x] FFI 符号（供未来外部算子.so）
+
+### Stage 2 — gateway-flow crate
+- [x] 创建 `gateway-flow` crate（含 flow-core + flow-derive）
+- [x] `NodeKind::Operator` 变体
+- [x] `Flow` 结构体（nodes + edges + metadata）
+- [x] DAG 环检测 + port 类型匹配验证
+- [x] `OperatorRegistry` 插件注册表
+- [x] `FlowRuntime` DAG 执行引擎
+
+### Stage 3 — 5 个内置算子
+- [x] `filter`（条件过滤）
+- [x] `transform`（字段变换，rhai）
+- [x] `aggregate`（时间窗口聚合）
+- [x] `router`（条件多路路由）
+- [x] `buffer`（缓冲批处理）
+
+### Stage 4 — gateway-server 集成
+- [x] flows + flow_nodes + flow_edges 建表 DDL
+- [x] Flow CRUD REST API（list/create/get/update/delete）
+- [x] Flow 生命周期（deploy/start/pause/stop/metrics）
+- [x] gateway-flow 集成到 AppState
+
+### Stage 5 — VueFlow 前端
+- [x] vue-flow 安装（@vue-flow/core/background/controls/minimap）
+- [x] Flow API 方法（api.js）
+- [x] Flow 路由（/flows, /flows/new, /flows/:id）
+- [x] `FlowList.vue`（列表 + 生命周期操作）
+- [x] `FlowEditor.vue`（拖拽画布 + 属性面板 + 节点面板）
+
+### Git 提交记录
+```
+e1445c3 chore(gateway-server): add gateway-flow dependency
+471dad8 feat(web): VueFlow FlowList + FlowEditor
+74bf0f4 feat(gateway-server): Flow CRUD REST API + lifecycle
+72744c9 feat(gateway-flow): buffer operator
+d1ba34c feat(gateway-flow): router operator
+7768938 feat(gateway-flow): aggregate operator
+570c927 feat(gateway-flow): transform operator
+db69b3e feat(gateway-flow): FlowRuntime
+775b731 feat(gateway-flow): DAG validation
+20efc0f feat(gateway-flow): create crate
+e9c715f feat(gateway-sdk): OperatorPlugin + FFI symbols
+d9969b9 feat(gateway-sdk): PipelineData + Operable
+```
+
+---
+
+## 一、设计愿景
 
 ---
 
