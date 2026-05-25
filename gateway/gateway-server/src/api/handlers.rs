@@ -474,6 +474,92 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     }))
 }
 
+/// Dashboard overview stats: nodes, flows, tags, system resource usage.
+pub async fn dashboard_stats(State(state): State<AppState>) -> Json<serde_json::Value> {
+    use std::time::Duration;
+
+    let nodes = state.manager.nodes_list();
+    let south_nodes = nodes.iter().filter(|n| n.kind() == gateway_sdk::NodeKind::South).count();
+    let north_nodes = nodes.iter().filter(|n| n.kind() == gateway_sdk::NodeKind::North).count();
+    let running_nodes = nodes.iter().filter(|n| n.state == gateway_sdk::NodeState::Running).count();
+    let stopped_nodes = nodes.len() - running_nodes;
+
+    let total_flows = {
+        let path = state.flow_store.db_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = rusqlite::Connection::open(&path).ok();
+            conn.and_then(|c| c.query_row(
+                "SELECT COUNT(*) FROM flows", [], |row| row.get::<_, i64>(0)
+            ).ok()).map(|c| c as usize).unwrap_or(0)
+        }).await.unwrap_or(0)
+    };
+    let running_flows = 0;
+    let stopped_flows = 0;
+    let draft_flows = total_flows;
+
+    let (south_count, north_count) = (
+        state.manager.south_plugins().len(),
+        state.manager.north_plugins().len(),
+    );
+
+    let df = state.manager.data_flow_snapshot();
+    let uptime_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        .saturating_sub(state.started_at.timestamp() as u64);
+
+    let has_license = state.feature_manager.has_license();
+    let raw_features = state.feature_manager.granted_features();
+    let features: Vec<String> = if raw_features.iter().any(|f| f == "all_plugins") {
+        let mut all_plugins: Vec<String> = state.manager.south_plugins()
+            .into_iter().map(|p| p.name).collect();
+        all_plugins.extend(state.manager.north_plugins().into_iter().map(|p| p.name));
+        all_plugins.sort(); all_plugins.dedup(); all_plugins
+    } else {
+        raw_features.iter().filter_map(|f| {
+            if let Some(name) = f.strip_prefix("plugin:") { Some(name.to_string()) }
+            else if f != "all_plugins" { Some(f.clone()) } else { None }
+        }).collect()
+    };
+
+    Json(serde_json::json!({
+        "nodes": {
+            "total": nodes.len(),
+            "south": south_nodes,
+            "north": north_nodes,
+            "running": running_nodes,
+            "stopped": stopped_nodes,
+        },
+        "flows": {
+            "total": total_flows,
+            "running": running_flows,
+            "stopped": stopped_flows,
+            "draft": draft_flows,
+        },
+        "plugins": {
+            "south": south_count,
+            "north": north_count,
+        },
+        "data_flow": {
+            "south_published": df.south_published,
+            "bus_no_subscribers": df.bus_no_subscribers,
+            "north_received": df.north_received,
+            "north_filtered": df.north_filtered,
+            "north_forwarded": df.north_forwarded,
+            "north_on_group_data_ok": df.north_on_group_data_ok,
+            "north_on_group_data_err": df.north_on_group_data_err,
+        },
+        "license": {
+            "has_license": has_license,
+            "features": features,
+        },
+        "system": {
+            "uptime_secs": uptime_secs,
+        }
+    }))
+}
+
 /// 默认备份/恢复密码（未填写时使用，保证文件仍为加密不可直接查看）
 const DEFAULT_BACKUP_SECRET: &str = "gateway-backup";
 
@@ -895,12 +981,24 @@ pub async fn update_node(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<UpdateNodeReq>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let nid = parse_node_id(&id)?;
     state.manager.node_update(nid, req.name).map_err(ApiError::bad_request)?;
     state.sync_node_log_names();
     state.persist().await;
-    Ok(StatusCode::NO_CONTENT)
+
+    let node = state.manager.node_get(nid).ok_or_else(|| ApiError::not_found("node not found"))?;
+    let mut j = serde_json::to_value(&node).map_err(|e| ApiError::internal(e.to_string()))?;
+    if let Some(obj) = j.as_object_mut() {
+        if node.kind() == NodeKind::North {
+            if let Some(plugin) = state.manager.north_plugin(&node.config.plugin_name) {
+                if let Some(conn) = plugin.connection_status(nid).await {
+                    obj.insert("connected".into(), serde_json::json!(conn));
+                }
+            }
+        }
+    }
+    Ok(Json(j))
 }
 
 /// 获取节点插件配置（仅 config）。

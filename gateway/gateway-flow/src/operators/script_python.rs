@@ -1,47 +1,34 @@
-//! Script Python operator: execute Python-like scripting using rhai.
-//! Note: This is a stub implementation using rhai with Python-like syntax.
-//! Real Python execution can be added later with pyoxidizer.
+//! Script Python operator: execute Python code via subprocess (python3 -c).
+//!
+//! Configuration fields:
+//! - script: Python code to execute
+//! - input_fields: Vec<String> - names of input variables to inject
+//! - output_fields: Vec<String> - names of output variables to extract
+//! - timeout_ms: u64 - execution timeout in milliseconds (default 1000)
 
 use async_trait::async_trait;
-use gateway_sdk::{Operable, PipelineData, PluginConfig, PluginMeta, PluginResult, DataValue, NodeId};
-use rhai::{Engine, Dynamic};
+use gateway_sdk::{
+    Operable, PipelineData, PluginConfig, PluginMeta, PluginResult, PluginError, PluginErrorCode,
+    DataValue, NodeId,
+};
+use std::collections::HashMap;
+use std::process::Stdio;
+use std::time::Duration;
+use tokio::process::Command;
+use tokio::io::AsyncReadExt;
+use tokio::time::timeout;
 
 pub struct ScriptPythonOperator {
-    engine: Engine,
     script: String,
     input_fields: Vec<String>,
     output_fields: Vec<String>,
+    timeout_ms: u64,
 }
 
 impl ScriptPythonOperator {
     pub fn new(config: &PluginConfig) -> Self {
-        let mut engine = Engine::new();
-
-        // Register common Python-like builtins
-        engine.register_fn("len", |s: &str| s.len() as i64);
-        engine.register_fn("abs", |x: i64| x.abs() as i64);
-        engine.register_fn("abs", |x: f64| x.abs());
-        engine.register_fn("round", |x: f64, d: i64| {
-            let m = 10_f64.powi(d as i32);
-            (x * m).round() / m
-        });
-        engine.register_fn("min", |a: i64, b: i64| a.min(b));
-        engine.register_fn("max", |a: i64, b: i64| a.max(b));
-        engine.register_fn("floor", |x: f64| x.floor() as i64);
-        engine.register_fn("ceil", |x: f64| x.ceil() as i64);
-        engine.register_fn("sqrt", |x: f64| x.sqrt());
-        engine.register_fn("pow", |x: f64, y: f64| x.powf(y));
-        engine.register_fn("log", |x: f64| x.ln());
-        engine.register_fn("log10", |x: f64| x.log10());
-        engine.register_fn("sin", |x: f64| x.sin());
-        engine.register_fn("cos", |x: f64| x.cos());
-        engine.register_fn("tan", |x: f64| x.tan());
-        engine.register_fn("str", |x: i64| x.to_string());
-        engine.register_fn("str", |x: f64| x.to_string());
-        engine.register_fn("int", |x: f64| x as i64);
-        engine.register_fn("float", |x: i64| x as f64);
-
-        let script = config.get("script")
+        let script = config
+            .get("script")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
@@ -50,7 +37,9 @@ impl ScriptPythonOperator {
             .get("input_fields")
             .and_then(|v| v.as_array())
             .map(|arr| {
-                arr.iter().filter_map(|item| item.as_str().map(|s| s.to_string())).collect()
+                arr.iter()
+                    .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                    .collect()
             })
             .unwrap_or_default();
 
@@ -58,44 +47,156 @@ impl ScriptPythonOperator {
             .get("output_fields")
             .and_then(|v| v.as_array())
             .map(|arr| {
-                arr.iter().filter_map(|item| item.as_str().map(|s| s.to_string())).collect()
+                arr.iter()
+                    .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                    .collect()
             })
             .unwrap_or_default();
 
-        Self { engine, script, input_fields, output_fields }
-    }
-}
+        let timeout_ms = config
+            .get("timeout_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1000);
 
-fn data_value_to_rhai(v: &DataValue) -> Dynamic {
-    match v {
-        DataValue::Bool(b) => Dynamic::from(*b),
-        DataValue::Int64(i) => Dynamic::from(*i),
-        DataValue::Float64(f) => Dynamic::from(*f),
-        DataValue::String(s) => Dynamic::from(s.clone()),
-        _ => Dynamic::from(0i64),
+        Self { script, input_fields, output_fields, timeout_ms }
     }
-}
 
-fn rhai_to_data_value(v: Dynamic) -> DataValue {
-    if v.is::<bool>() { DataValue::Bool(v.cast()) }
-    else if v.is::<i64>() { DataValue::Int64(v.cast()) }
-    else if v.is::<f64>() { DataValue::Float64(v.cast()) }
-    else if v.is::<String>() { DataValue::String(v.cast()) }
-    else { DataValue::Int64(0) }
+    fn build_python_code(&self, input: &HashMap<String, DataValue>) -> String {
+        let mut lines = Vec::new();
+
+        for field in &self.input_fields {
+            if let Some(val) = input.get(field) {
+                let py_val = Self::data_value_to_python(val);
+                lines.push(format!("{} = {}", field, py_val));
+            }
+        }
+
+        if !self.script.is_empty() {
+            lines.push(self.script.clone());
+        }
+
+        if !self.output_fields.is_empty() {
+            let items: Vec<String> = self.output_fields.iter()
+                .map(|f| format!("'{}': {{{}}}", f, f))
+                .collect();
+            lines.push(format!("import json; print(json.dumps({{{}}}))", items.join(", ")));
+        } else {
+            lines.push("print('ok')".to_string());
+        }
+
+        lines.join("\n")
+    }
+
+    fn data_value_to_python(val: &DataValue) -> String {
+        match val {
+            DataValue::Bool(v) => v.to_string(),
+            DataValue::Int8(v) => v.to_string(),
+            DataValue::Int16(v) => v.to_string(),
+            DataValue::Int32(v) => v.to_string(),
+            DataValue::Int64(v) => v.to_string(),
+            DataValue::UInt8(v) => v.to_string(),
+            DataValue::UInt16(v) => v.to_string(),
+            DataValue::UInt32(v) => v.to_string(),
+            DataValue::UInt64(v) => v.to_string(),
+            DataValue::Float32(v) => v.to_string(),
+            DataValue::Float64(v) => v.to_string(),
+            DataValue::String(v) => format!("\"{}\"", v.replace('\\', "\\\\").replace('"', ".")),
+            DataValue::Bytes(v) => format!("bytes([{}])", v.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(", ")),
+        }
+    }
+
+    async fn execute_script(&self, code: String) -> PluginResult<HashMap<String, DataValue>> {
+        let mut child = Command::new("python3")
+            .arg("-c")
+            .arg(&code)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| PluginError::msg(format!("failed to spawn python3: {}", e)))?;
+
+        let dur = Duration::from_millis(self.timeout_ms);
+
+        let result = timeout(dur, async {
+            let mut stdout_buf = vec![];
+            child.stdout.take().unwrap().read_to_end(&mut stdout_buf).await.map_err(PluginError::Io)?;
+            let status = child.wait().await.map_err(PluginError::Io)?;
+            Ok((status, stdout_buf)) as Result<(std::process::ExitStatus, Vec<u8>), PluginError>
+        }).await;
+
+        match result {
+            Ok(Ok((status, stdout_bytes))) => {
+                if status.success() {
+                    let stdout = String::from_utf8_lossy(&stdout_bytes);
+                    let trimmed = stdout.trim();
+                    if trimmed.is_empty() || trimmed == "{}" || trimmed == "'ok'" {
+                        return Ok(HashMap::new());
+                    }
+                    let json_str = if trimmed.starts_with('\'') && trimmed.ends_with('\'') {
+                        &trimmed[1..trimmed.len()-1]
+                    } else {
+                        trimmed
+                    };
+                    if let Ok(map) = serde_json::from_str::<HashMap<String, serde_json::Value>>(json_str) {
+                        let mut result_map = HashMap::new();
+                        for (k, v) in map {
+                            result_map.insert(k, Self::json_to_data_value(v));
+                        }
+                        return Ok(result_map);
+                    }
+                    Ok(HashMap::new())
+                } else {
+                    Err(PluginError::WithCode {
+                        code: PluginErrorCode::Unknown,
+                        message: "python script failed".to_string(),
+                    })
+                }
+            }
+            Ok(Err(e)) => Err(e),
+            Err(_) => {
+                let _ = child.kill().await;
+                Err(PluginError::WithCode {
+                    code: PluginErrorCode::Timeout,
+                    message: "python execution timed out".to_string(),
+                })
+            }
+        }
+    }
+
+    fn json_to_data_value(v: serde_json::Value) -> DataValue {
+        use serde_json::Value;
+        match v {
+            Value::Null => DataValue::String("null".to_string()),
+            Value::Bool(b) => DataValue::Bool(b),
+            Value::Number(ref n) => {
+                if let Some(f) = n.as_f64() {
+                    DataValue::Float64(f)
+                } else if let Some(i) = n.as_i64() {
+                    DataValue::Int64(i)
+                } else if let Some(u) = n.as_u64() {
+                    DataValue::UInt64(u)
+                } else {
+                    DataValue::String(v.to_string())
+                }
+            }
+            Value::String(s) => DataValue::String(s),
+            Value::Array(_) | Value::Object(_) => DataValue::String(v.to_string()),
+        }
+    }
 }
 
 #[async_trait]
 impl Operable for ScriptPythonOperator {
     fn meta(&self) -> PluginMeta {
         PluginMeta {
-            name: "script-python",
+            name: "script-python".into(),
             kind: gateway_sdk::PluginKind::Operator,
-            description: Some("Execute Python-like scripting (rhai engine)"),
-            version: "0.1.0",
-            name_zh: Some("Python脚本"),
-            name_en: Some("Python Script"),
-            description_zh: Some("使用类Python语法执行脚本处理数据"),
-            description_en: Some("Execute Python-like scripts for custom data processing using rhai"),
+            description: Some("Execute Python script (subprocess mode)".into()),
+            version: "0.1.0".into(),
+            name_zh: Some("Python脚本".into()),
+            name_en: Some("Python Script".into()),
+            description_zh: Some("通过 subprocess 执行 Python 代码片段".into()),
+            description_en: Some("Execute Python code snippets via subprocess".into()),
         }
     }
 
@@ -107,37 +208,18 @@ impl Operable for ScriptPythonOperator {
         Ok(())
     }
 
-    async fn process(&self, _node_id: NodeId, mut data: PipelineData) -> PluginResult<Vec<PipelineData>> {
-        if self.script.is_empty() {
-            return Ok(vec![data]);
-        }
+    async fn process(&self, _node_id: NodeId, data: PipelineData) -> PluginResult<Vec<PipelineData>> {
+        let code = self.build_python_code(&data.payload);
+        let result = self.execute_script(code).await?;
 
-        // Inject input fields as rhai variables
-        let mut scope = rhai::Scope::new();
-        for field in &self.input_fields {
-            if let Some(value) = data.payload.get(field) {
-                scope.push(field.as_str(), data_value_to_rhai(value));
+        let mut output = PipelineData::new(_node_id);
+        for field in &self.output_fields {
+            if let Some(val) = result.get(field) {
+                output.payload.insert(field.clone(), val.clone());
             }
         }
 
-        // Execute script - result is stored in `result` variable or last expression
-        let script_with_result = format!("let result = {}; result", self.script);
-
-        match self.engine.eval_with_scope::<Dynamic>(&mut scope, &script_with_result) {
-            Ok(val) => {
-                if !self.output_fields.is_empty() {
-                    // Use first output field for result
-                    if let Some(field) = self.output_fields.first() {
-                        data.payload.insert(field.clone(), rhai_to_data_value(val));
-                    }
-                }
-            }
-            Err(_) => {
-                // Script error - pass through unchanged
-            }
-        }
-
-        Ok(vec![data])
+        Ok(vec![output])
     }
 
     async fn reset(&self, _node_id: NodeId) -> PluginResult<()> {
@@ -145,6 +227,21 @@ impl Operable for ScriptPythonOperator {
     }
 }
 
-pub fn create_script_python_operator(config: &PluginConfig) -> Box<dyn Operable> {
-    Box::new(ScriptPythonOperator::new(config))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_basic_script() {
+        let mut config = PluginConfig::new();
+        config.insert("script".to_string(), serde_json::json!("x = 10\ny = 20\nresult = x + y"));
+        config.insert("input_fields".to_string(), serde_json::json!([]));
+        config.insert("output_fields".to_string(), serde_json::json!(["result"]));
+
+        let op = ScriptPythonOperator::new(&config);
+        let input = PipelineData::new(NodeId::new());
+
+        let result = op.process(NodeId::new(), input).await;
+        assert!(result.is_ok(), "script execution failed: {:?}", result);
+    }
 }

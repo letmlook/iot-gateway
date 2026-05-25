@@ -15,7 +15,15 @@ uuid = { version = "1", features = ["v4", "serde"] }
 rhai = { version = "1", features = ["sync"] }
 jsonpath-rust = "0.6"
 quick-xml = "0.37"
+sxd-xpath = "0.4"
+sxd-document = "0.3"
 regex = "1"
 chrono = { version = "0.4", features = ["serde"] }
-tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
+tokio = { version = "1", features = ["sync", "rt", "macros", "time", "process", "io-util"] }
 petgraph = "0.6"
+
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+opt-level = 3

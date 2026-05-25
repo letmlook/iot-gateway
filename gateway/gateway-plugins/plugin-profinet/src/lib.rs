@@ -13,244 +13,438 @@
 //! This stub implementation provides realistic data quality indicators and
 //! validates address formats without requiring elevated privileges.
 
-use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_void};
-use std::sync::Mutex;
+#[cfg(feature = "ffi")]
+mod ffi;
 
-static CONN: once_cell::sync::Lazy<Mutex<Option<ProfinetState>>> =
-    once_cell::sync::Lazy::new(|| Mutex::new(None));
+use gateway_sdk::{
+    ConfigSchema, DataValue, Group, GroupId, NodeId, ParamAttribute, ParamSchema, ParamType,
+    PluginConfig, PluginError, PluginMeta, PluginResult, Tag, TagAttr, TagId, TagSchema,
+};
+use gateway_sdk::log;
+use gateway_sdk::types::PluginKind;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock as AsyncRwLock;
 
-struct ProfinetState {
-    host: String,
-    device_name: String,
-    api: u32,
-    slot: u16,
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+pub struct ProfinetState {
+    pub host: String,
+    pub device_name: String,
+    pub api: u32,
+    pub slot: u16,
     /// Last seen quality — "good" if we've received valid data, "bad" otherwise
     quality: String,
     /// Incrementing sequence number to simulate live data
     seq: u64,
 }
 
-fn result_to_json(v: serde_json::Value) -> *mut c_char {
-    CString::new(v.to_string()).unwrap().into_raw()
+impl ProfinetState {
+    pub fn new(host: String, device_name: String, api: u32, slot: u16) -> Self {
+        Self {
+            host,
+            device_name,
+            api,
+            slot,
+            quality: "good".to_string(),
+            seq: 0,
+        }
+    }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn south_create() -> *mut c_void {
-    Box::into_raw(Box::new(())) as *mut c_void
+// ---------------------------------------------------------------------------
+// Plugin
+// ---------------------------------------------------------------------------
+
+pub struct ProfinetPlugin {
+    pub state: Arc<AsyncRwLock<HashMap<NodeId, ProfinetState>>>,
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn south_destroy(handle: *mut c_void) {
-    drop(unsafe { Box::from_raw(handle as *mut ()) });
+impl Default for ProfinetPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn south_meta() -> *mut c_char {
-    let meta = serde_json::json!({
-        "name": "profinet",
-        "kind": "south",
-        "description": "PROFINET industrial Ethernet protocol (PNIO)",
-        "version": "0.1.0",
-        "name_zh": "Profinet",
-        "name_en": "PROFINET",
-        "description_zh": "PROFINET工业以太网协议，通过PNIO访问IO设备数据",
-        "description_en": "PROFINET protocol — access IO device data via PNIO (raw Ethernet DCP requires CAP_NET_RAW)"
-    });
-    CString::new(meta.to_string()).unwrap().into_raw()
+impl ProfinetPlugin {
+    pub fn new() -> Self {
+        Self {
+            state: Arc::new(AsyncRwLock::new(HashMap::new())),
+        }
+    }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn south_free_string(s: *mut c_char) {
-    if !s.is_null() { drop(unsafe { CString::from_raw(s) }); }
+// ---------------------------------------------------------------------------
+// Address parsing
+// ---------------------------------------------------------------------------
+
+/// Valid PROFINET address formats:
+/// - Named: `:I` (input), `:Q` or `:O` (output)
+/// - Slot/subslot/index: `"1/1/0x0001"` or `"1/1/0x0001:I"`
+fn parse_profinet_address(addr: &str) -> Option<ProfinetAddress> {
+    let addr = addr.trim();
+    if addr == ":I" {
+        return Some(ProfinetAddress::DigitalInput);
+    }
+    if addr == ":Q" || addr == ":O" {
+        return Some(ProfinetAddress::DigitalOutput);
+    }
+    // slot/subslot/index format
+    let parts: Vec<&str> = addr.split('/').collect();
+    if parts.len() >= 3 {
+        let slot: u16 = parts[0].parse().ok()?;
+        let subslot: u16 = parts[1].parse().ok()?;
+        let idx_hex = parts[2].trim_start_matches("0x");
+        let idx: u16 = u16::from_str_radix(idx_hex, 16).ok()?;
+        if addr.ends_with(":Q") || addr.ends_with(":O") {
+            Some(ProfinetAddress::SlotOutput { slot, subslot, idx })
+        } else if addr.ends_with(":I") {
+            Some(ProfinetAddress::SlotInput { slot, subslot, idx })
+        } else {
+            Some(ProfinetAddress::Slot { slot, subslot, idx })
+        }
+    } else {
+        None
+    }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn south_open(_handle: *mut c_void, config_json: *const c_char) -> *mut c_char {
-    let config = if config_json.is_null() { return result_to_json(serde_json::json!({"error": "null"})); };
-    let config_str = unsafe { CStr::from_ptr(config_json) }.to_string_lossy();
-    let config: serde_json::Value = serde_json::from_str(&config_str).unwrap_or_default();
-
-    let host = config.get("host").and_then(|v| v.as_str()).unwrap_or("192.168.1.10").to_string();
-    let device_name = config.get("device_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let api = config.get("api").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-    let slot = config.get("slot").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
-
-    let mut guard = CONN.lock().unwrap();
-    *guard = Some(ProfinetState {
-        host: host.clone(),
-        device_name,
-        api,
-        slot,
-        quality: "good".to_string(),
-        seq: 0,
-    });
-
-    result_to_json(serde_json::json!({
-        "status": "connected",
-        "host": host,
-        "api": api,
-        "slot": slot,
-        "note": "PROFINET stub mode — real implementation requires CAP_NET_RAW and raw Ethernet frames (ETH_P_PROFINET). Use profidcp crate + socket(AF_PACKET) for DCP discovery."
-    }))
+enum ProfinetAddress {
+    DigitalInput,
+    DigitalOutput,
+    Slot { slot: u16, subslot: u16, idx: u16 },
+    SlotInput { slot: u16, subslot: u16, idx: u16 },
+    SlotOutput { slot: u16, subslot: u16, idx: u16 },
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn south_close(_handle: *mut c_void, _node_id: *const c_char) -> *mut c_char {
-    let mut guard = CONN.lock().unwrap();
-    *guard = None;
-    result_to_json(serde_json::json!({ "status": "disconnected" }))
+// ---------------------------------------------------------------------------
+// Default groups / tags
+// ---------------------------------------------------------------------------
+
+fn default_group() -> Group {
+    Group {
+        id: GroupId::new(),
+        name: "default".to_string(),
+        interval_ms: 1000,
+        description: Some("Default polling group".to_string()),
+    }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn south_init(_handle: *mut c_void, _config_json: *const c_char) -> *mut c_char {
-    result_to_json(serde_json::json!({}))
+fn default_tags(group_id: GroupId) -> Vec<Tag> {
+    vec![
+        Tag {
+            id: TagId::new(),
+            name: "digital_out_1".to_string(),
+            address: "1/1/0x0001:Q".to_string(),
+            attr: TagAttr::ReadWrite,
+            data_type: Some("bool".to_string()),
+            description: Some("Digital output 1".to_string()),
+            group_id,
+        },
+        Tag {
+            id: TagId::new(),
+            name: "digital_in_1".to_string(),
+            address: "1/1/0x0002:I".to_string(),
+            attr: TagAttr::Read,
+            data_type: Some("bool".to_string()),
+            description: Some("Digital input 1".to_string()),
+            group_id,
+        },
+        Tag {
+            id: TagId::new(),
+            name: "analog_1".to_string(),
+            address: "2/1/0x0003".to_string(),
+            attr: TagAttr::Read,
+            data_type: Some("int16".to_string()),
+            description: Some("Analog channel 1".to_string()),
+            group_id,
+        },
+        Tag {
+            id: TagId::new(),
+            name: "digital_out_2".to_string(),
+            address: "1/1/0x0004:Q".to_string(),
+            attr: TagAttr::ReadWrite,
+            data_type: Some("bool".to_string()),
+            description: Some("Digital output 2".to_string()),
+            group_id,
+        },
+        Tag {
+            id: TagId::new(),
+            name: "digital_in_2".to_string(),
+            address: "1/1/0x0005:I".to_string(),
+            attr: TagAttr::Read,
+            data_type: Some("bool".to_string()),
+            description: Some("Digital input 2".to_string()),
+            group_id,
+        },
+    ]
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn south_uninit(_handle: *mut c_void, _node_id: *const c_char) -> *mut c_char {
-    result_to_json(serde_json::json!({}))
-}
+// ---------------------------------------------------------------------------
+// SouthPlugin implementation
+// ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub unsafe extern "C" fn south_start(_handle: *mut c_void, _config_json: *const c_char) -> *mut c_char {
-    result_to_json(serde_json::json!({}))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn south_stop(_handle: *mut c_void, _node_id: *const c_char) -> *mut c_char {
-    result_to_json(serde_json::json!({}))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn south_poll_group(_handle: *mut c_void, _node_id: *const c_char, group_json: *const c_char) -> *mut c_char {
-    let mut guard = CONN.lock().unwrap();
-    let state = match guard.as_mut() {
-        Some(s) => s,
-        None => return result_to_json(serde_json::json!({"error": "not connected"})),
-    };
-
-    let group = if group_json.is_null() { return result_to_json(serde_json::json!({"error": "null"})); };
-    let group_str = unsafe { CStr::from_ptr(group_json) }.to_string_lossy();
-    let group: serde_json::Value = serde_json::from_str(&group_str).unwrap_or_default();
-
-    state.seq += 1;
-    // Simulate occasional quality fluctuations for realism
-    let quality = if state.seq % 100 == 0 { "uncertain" } else { "good" };
-    state.quality = quality.to_string();
-
-    let timestamp = chrono::Utc::now().to_rfc3339();
-    let mut values = serde_json::Map::new();
-
-    if let Some(tags) = group.get("tags").and_then(|t| t.as_array()) {
-        for tag in tags {
-            let tag_name = tag.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let address = tag.get("address").and_then(|v| v.as_str()).unwrap_or("");
-
-            // Parse PROFINET address format: slot/subslot/index (e.g. "1/1/0x0001") or named (:Q/:I/:O)
-            let value = if address.ends_with(":Q") || address.ends_with(":O") {
-                // Digital output — simulate alternating pattern
-                serde_json::json!(((state.seq % 2) == 0))
-            } else if address.ends_with(":I") {
-                // Digital input — simulate random-ish pattern based on seq
-                serde_json::json!(((state.seq + 17) % 3) != 0)
-            } else if address.contains('/') {
-                // Slot/subslot/index format: "slot/subslot/index"
-                let parts: Vec<&str> = address.trim_end_matches(":Q").trim_end_matches(":I").trim_end_matches(":O").split('/').collect();
-                let slot_num: u16 = parts.get(0).and_then(|s| s.parse().ok()).unwrap_or(1);
-                let subslot: u16 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
-                let idx_hex = parts.get(2).and_then(|s| Some(s.trim_start_matches("0x"))).unwrap_or("0");
-                let idx: u16 = u16::from_str_radix(idx_hex, 16).unwrap_or(0);
-
-                // Generate realistic-looking cyclic data value
-                // Value = base + (slot*10) + (subslot*2) + variation
-                let base = (slot_num as i32) * 100 + (subslot as i32) * 10 + (idx as i32);
-                let variation = ((state.seq.wrapping_add(idx as u64)) % 20) as i32 - 10;
-                serde_json::json!(base + variation)
-            } else {
-                // Unknown format — return null with bad quality
-                values.insert(
-                    tag_name.to_string(),
-                    serde_json::json!({
-                        "value": null,
-                        "type": "unknown",
-                        "quality": "bad",
-                        "timestamp": timestamp,
-                        "error": "unknown PROFINET address format"
-                    }),
-                );
-                continue;
-            };
-
-            let tag_type = if address.ends_with(":Q") || address.ends_with(":O") || address.ends_with(":I") {
-                "bool"
-            } else {
-                "int"
-            };
-
-            values.insert(
-                tag_name.to_string(),
-                serde_json::json!({
-                    "value": value,
-                    "type": tag_type,
-                    "quality": quality,
-                    "timestamp": timestamp
-                }),
-            );
+#[async_trait::async_trait]
+impl gateway_sdk::SouthPlugin for ProfinetPlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            name: "profinet",
+            kind: PluginKind::South,
+            description: Some("PROFINET industrial Ethernet protocol (PNIO)"),
+            version: "0.1.0",
+            name_zh: Some("Profinet"),
+            name_en: Some("PROFINET"),
+            description_zh: Some("PROFINET工业以太网协议，通过PNIO访问IO设备数据"),
+            description_en: Some(
+                "PROFINET protocol — access IO device data via PNIO (raw Ethernet DCP requires CAP_NET_RAW)",
+            ),
         }
     }
 
-    result_to_json(serde_json::json!({ "values": values }))
-}
+    fn config_schema(&self) -> Option<ConfigSchema> {
+        Some(
+            ConfigSchema::new()
+                .param(ParamSchema {
+                    name: "host".to_string(),
+                    description: Some("PLC IP address".to_string()),
+                    name_zh: Some("PLC IP地址".to_string()),
+                    name_en: Some("PLC IP address".to_string()),
+                    description_zh: Some("PROFINET设备的IP地址".to_string()),
+                    description_en: Some("IP address of PROFINET device".to_string()),
+                    attribute: ParamAttribute::Required,
+                    ty: ParamType::String,
+                    default: Some(serde_json::json!("192.168.1.10")),
+                    valid: None,
+                    ..Default::default()
+                })
+                .param(ParamSchema {
+                    name: "device_name".to_string(),
+                    description: Some("PROFINET device name".to_string()),
+                    name_zh: Some("设备名称".to_string()),
+                    name_en: Some("Device name".to_string()),
+                    description_zh: Some("PROFINET设备名称（DCP识别）".to_string()),
+                    description_en: Some("PROFINET device name for DCP discovery".to_string()),
+                    attribute: ParamAttribute::Optional,
+                    ty: ParamType::String,
+                    default: Some(serde_json::json!("")),
+                    valid: None,
+                    ..Default::default()
+                })
+                .param(ParamSchema {
+                    name: "api".to_string(),
+                    description: Some("API index".to_string()),
+                    name_zh: Some("API索引".to_string()),
+                    name_en: Some("API index".to_string()),
+                    description_zh: Some("PROFINET API索引".to_string()),
+                    description_en: Some("PROFINET API index".to_string()),
+                    attribute: ParamAttribute::Optional,
+                    ty: ParamType::Int,
+                    default: Some(serde_json::json!(0)),
+                    valid: None,
+                    ..Default::default()
+                })
+                .param(ParamSchema {
+                    name: "slot".to_string(),
+                    description: Some("Slot number".to_string()),
+                    name_zh: Some("槽号".to_string()),
+                    name_en: Some("Slot number".to_string()),
+                    description_zh: Some("PROFINET模块槽号".to_string()),
+                    description_en: Some("PROFINET module slot number".to_string()),
+                    attribute: ParamAttribute::Optional,
+                    ty: ParamType::Int,
+                    default: Some(serde_json::json!(0)),
+                    valid: None,
+                    ..Default::default()
+                }),
+        )
+    }
 
-#[no_mangle]
-pub unsafe extern "C" fn south_validate_tag(_handle: *mut c_void, _node_id: *const c_char, tag_json: *const c_char) -> *mut c_char {
-    let tag = if tag_json.is_null() { return result_to_json(serde_json::json!({"valid": false})); };
-    let tag_str = unsafe { CStr::from_ptr(tag_json) }.to_string_lossy();
-    // Valid: slot/subslot/index format "1/1/0x0001" or named ":I"/":Q"/":O"
-    let valid = !tag_str.is_empty()
-        && (tag_str.contains('/') || tag_str.ends_with(":I") || tag_str.ends_with(":Q") || tag_str.ends_with(":O"));
-    result_to_json(serde_json::json!({ "valid": valid }))
-}
+    fn tag_schema(&self) -> Option<TagSchema> {
+        Some(TagSchema {
+            data_types: Some(vec![
+                "bool".to_string(),
+                "int16".to_string(),
+                "int32".to_string(),
+                "uint16".to_string(),
+            ]),
+            address_format: Some("slot/subslot/index (e.g. 1/1/0x0001) or :I/:Q/:O".to_string()),
+            address_format_zh: Some("slot/subslot/index（如1/1/0x0001）或 :I/:Q/:O".to_string()),
+            address_format_en: Some("slot/subslot/index (e.g. 1/1/0x0001) or :I/:Q/:O".to_string()),
+        })
+    }
 
-#[no_mangle]
-pub unsafe extern "C" fn south_write_tags(_handle: *mut c_void, _node_id: *const c_char, _write_json: *const c_char) -> *mut c_char {
-    // PROFINET IO write requires established real-time connection (RTC).
-    // Not feasible without raw Ethernet access.
-    result_to_json(serde_json::json!({ "written": 0, "note": "PROFINET write requires raw Ethernet access (CAP_NET_RAW)" }))
-}
+    async fn open(&self, node_id: NodeId, config: PluginConfig) -> PluginResult<()> {
+        log::info(node_id, "open profinet plugin");
 
-#[no_mangle]
-pub unsafe extern "C" fn south_list_groups(_handle: *mut c_void, _node_id: *const c_char) -> *mut c_char {
-    result_to_json(serde_json::json!({
-        "groups": [{ "id": "default", "name": "Default", "interval_ms": 100 }]
-    }))
-}
+        let host = config
+            .get("host")
+            .and_then(|v| v.as_str())
+            .unwrap_or("192.168.1.10")
+            .to_string();
+        let device_name = config
+            .get("device_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let api = config.get("api").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let slot = config.get("slot").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
 
-#[no_mangle]
-pub unsafe extern "C" fn south_list_tags(_handle: *mut c_void, _node_id: *const c_char, _group_id: *const c_char) -> *mut c_char {
-    result_to_json(serde_json::json!({
-        "tags": [
-            { "name": "digital_out_1", "address": "1/1/0x0001:Q", "type": "bool", "access": "readwrite" },
-            { "name": "digital_in_1", "address": "1/1/0x0002:I", "type": "bool", "access": "read" },
-            { "name": "analog_1", "address": "2/1/0x0003", "type": "int", "access": "read" },
-            { "name": "digital_out_2", "address": "1/1/0x0004:Q", "type": "bool", "access": "readwrite" },
-            { "name": "digital_in_2", "address": "1/1/0x0005:I", "type": "bool", "access": "read" }
-        ]
-    }))
-}
+        let state = ProfinetState::new(host.clone(), device_name, api, slot);
 
-#[no_mangle]
-pub unsafe extern "C" fn south_config_schema(_handle: *mut c_void) -> *mut c_char {
-    let schema = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "host": { "type": "string", "default": "192.168.1.10" },
-            "device_name": { "type": "string", "default": "" },
-            "api": { "type": "number", "default": 0 },
-            "slot": { "type": "number", "default": 0 },
-            "note": "PROFINET requires raw Ethernet access (CAP_NET_RAW on Linux). Stub mode provides simulated data."
+        let mut map = self.state.write().await;
+        map.insert(node_id, state);
+
+        log::info(node_id, &format!("profinet opened ({})", host));
+        Ok(())
+    }
+
+    async fn close(&self, node_id: NodeId) -> PluginResult<()> {
+        log::info(node_id, "close profinet");
+        let mut map = self.state.write().await;
+        map.remove(&node_id);
+        Ok(())
+    }
+
+    async fn init(&self, node_id: NodeId) -> PluginResult<()> {
+        log::info(node_id, "init profinet");
+        Ok(())
+    }
+
+    async fn uninit(&self, node_id: NodeId) -> PluginResult<()> {
+        log::info(node_id, "uninit profinet");
+        Ok(())
+    }
+
+    async fn start(&self, node_id: NodeId) -> PluginResult<()> {
+        log::info(node_id, "start profinet");
+        Ok(())
+    }
+
+    async fn stop(&self, node_id: NodeId) -> PluginResult<()> {
+        log::info(node_id, "stop profinet");
+        Ok(())
+    }
+
+    async fn setting(&self, node_id: NodeId, config: PluginConfig) -> PluginResult<()> {
+        log::info(node_id, "setting profinet");
+        let mut map = self.state.write().await;
+        if let Some(state) = map.get_mut(&node_id) {
+            if let Some(host) = config.get("host").and_then(|v| v.as_str()) {
+                state.host = host.to_string();
+            }
+            if let Some(name) = config.get("device_name").and_then(|v| v.as_str()) {
+                state.device_name = name.to_string();
+            }
+            if let Some(v) = config.get("api").and_then(|v| v.as_u64()) {
+                state.api = v as u32;
+            }
+            if let Some(v) = config.get("slot").and_then(|v| v.as_u64()) {
+                state.slot = v as u16;
+            }
         }
-    });
-    CString::new(schema.to_string()).unwrap().into_raw()
+        Ok(())
+    }
+
+    async fn validate_tag(&self, node_id: NodeId, tag: &Tag) -> PluginResult<()> {
+        let _ = node_id;
+        if parse_profinet_address(&tag.address).is_none() {
+            return Err(PluginError::tag_invalid(&format!(
+                "invalid PROFINET address: {} (supported: slot/subslot/index like 1/1/0x0001, or :I/:Q/:O)",
+                tag.address
+            )));
+        }
+        Ok(())
+    }
+
+    async fn poll_group(
+        &self,
+        node_id: NodeId,
+        _group_id: GroupId,
+        tags: &[Tag],
+    ) -> PluginResult<Vec<(TagId, DataValue)>> {
+        let mut map = self.state.write().await;
+        let state = map.get_mut(&node_id).ok_or_else(|| {
+            PluginError::msg("node not open")
+        })?;
+
+        state.seq += 1;
+        // Simulate occasional quality fluctuations for realism
+        let quality = if state.seq % 100 == 0 {
+            "uncertain"
+        } else {
+            "good"
+        };
+        state.quality = quality.to_string();
+
+        let mut results = Vec::with_capacity(tags.len());
+
+        for tag in tags {
+            let value = match parse_profinet_address(&tag.address) {
+                Some(ProfinetAddress::DigitalOutput) => {
+                    // Alternating pattern
+                    DataValue::Bool((state.seq % 2) == 0)
+                }
+                Some(ProfinetAddress::DigitalInput) => {
+                    // Pseudo-random pattern
+                    DataValue::Bool(((state.seq + 17) % 3) != 0)
+                }
+                Some(ProfinetAddress::Slot { slot, subslot, idx }) => {
+                    // Generate realistic-looking cyclic data value
+                    let base = (slot as i32) * 100 + (subslot as i32) * 10 + (idx as i32);
+                    let variation = ((state.seq.wrapping_add(idx as u64)) % 20) as i32 - 10;
+                    DataValue::Int16((base + variation) as i16)
+                }
+                Some(ProfinetAddress::SlotInput { slot, subslot, idx }) => {
+                    let base = (slot as i32) * 100 + (subslot as i32) * 10 + (idx as i32);
+                    let variation = ((state.seq.wrapping_add(idx as u64)) % 20) as i32 - 10;
+                    DataValue::Int16((base + variation) as i16)
+                }
+                Some(ProfinetAddress::SlotOutput { slot, subslot, idx }) => {
+                    let base = (slot as i32) * 100 + (subslot as i32) * 10 + (idx as i32);
+                    let variation = ((state.seq.wrapping_add(idx as u64)) % 20) as i32 - 10;
+                    DataValue::Int16((base + variation) as i16)
+                }
+                None => {
+                    DataValue::String("unknown address".to_string())
+                }
+            };
+
+            results.push((tag.id, value));
+        }
+
+        Ok(results)
+    }
+
+    async fn write_tags(
+        &self,
+        node_id: NodeId,
+        values: &[(Tag, DataValue)],
+    ) -> PluginResult<()> {
+        let _ = node_id;
+        let _ = values;
+        // PROFINET IO write requires established real-time connection (RTC).
+        // Not feasible without raw Ethernet access.
+        Err(PluginError::not_supported(
+            "PROFINET write requires raw Ethernet access (CAP_NET_RAW)",
+        ))
+    }
+
+    async fn list_groups(&self, node_id: NodeId) -> PluginResult<Vec<Group>> {
+        let map = self.state.read().await;
+        if map.contains_key(&node_id) {
+            Ok(vec![default_group()])
+        } else {
+            Err(PluginError::msg("node not open"))
+        }
+    }
+
+    async fn list_tags(&self, node_id: NodeId, group_id: GroupId) -> PluginResult<Vec<Tag>> {
+        let map = self.state.read().await;
+        if map.contains_key(&node_id) {
+            Ok(default_tags(group_id))
+        } else {
+            Err(PluginError::msg("node not open"))
+        }
+    }
 }

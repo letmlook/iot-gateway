@@ -1,23 +1,26 @@
-//! plugin-grpc — gRPC north plugin using tonic + prost (no protoc required)
+//! plugin-grpc — gRPC north plugin using tonic + prost
 //!
 //! Implements the `NorthPlugin` FFI interface via `gateway_north_plugin_*` symbols in `ffi.rs`.
 //! `on_group_data` performs a real Unary gRPC call using tonic transport + prost encoding.
+
+mod ffi;
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
 use std::sync::Mutex;
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 use prost::Message;
+use prost::encoding::DecodeContext;
 use tonic::transport::Channel;
-use tonic::body::BoxBody;
-use tonic::client::GrpcService;
-use http::{Request, Response};
+use http_body_util::{BodyExt, Empty};
+use http_body::Body;
+use http::Request;
 
 use crate::ffi::*;
 
 // =============================================================================
-// Protobuf message definitions (manual Encode/Decode — no protoc needed)
+// Generated protobuf types (compatible with prost 0.13)
 // =============================================================================
 
 /// TagValue proto message
@@ -41,11 +44,7 @@ impl Default for TagValue {
 }
 
 impl Message for TagValue {
-    fn encode_raw<B>(&self, buf: &mut B)
-    where
-        B: BufMut,
-        Self: Sized,
-    {
+    fn encode_raw(&self, buf: &mut impl BufMut) {
         if !self.name.is_empty() {
             encode_field(1, encode_string(&self.name), buf);
         }
@@ -59,32 +58,20 @@ impl Message for TagValue {
             encode_field(4, encode_string(&self.quality), buf);
         }
     }
-    fn merge_field<B>(
-        &mut self,
-        tag: u32,
-        wire_type: u8,
-        buf: &mut B,
-        ctx: prost::bytes::Ctx,
-    ) -> Result<(), prost::Error>
-    where
-        B: Buf,
-        Self: Sized,
-    {
+    fn merge_field(&mut self, tag: u32, wire_type: prost::encoding::WireType, buf: &mut impl Buf, _ctx: DecodeContext) -> Result<(), prost::DecodeError> {
+        use prost::encoding::wire_type::WireType;
         match (tag, wire_type) {
-            (1, 2) => {
-                let s = decode_string(buf, ctx)?;
-                self.name = s;
+            (1, WireType::LengthDelimited) => {
+                self.name = decode_string(buf)?;
             }
-            (2, 2) => {
-                let s = decode_string(buf, ctx)?;
-                self.value = s;
+            (2, WireType::LengthDelimited) => {
+                self.value = decode_string(buf)?;
             }
-            (3, 0) => {
-                self.timestamp = decode_varint(buf, ctx)? as i64;
+            (3, WireType::Varint) => {
+                self.timestamp = decode_varint(buf)? as i64;
             }
-            (4, 2) => {
-                let s = decode_string(buf, ctx)?;
-                self.quality = s;
+            (4, WireType::LengthDelimited) => {
+                self.quality = decode_string(buf)?;
             }
             _ => {}
         }
@@ -135,11 +122,7 @@ impl Default for GroupData {
 }
 
 impl Message for GroupData {
-    fn encode_raw<B>(&self, buf: &mut B)
-    where
-        B: BufMut,
-        Self: Sized,
-    {
+    fn encode_raw(&self, buf: &mut impl BufMut) {
         if !self.group_id.is_empty() {
             encode_field(1, encode_string(&self.group_id), buf);
         }
@@ -153,31 +136,22 @@ impl Message for GroupData {
             encode_field(4, encode_varint(self.timestamp as u64), buf);
         }
     }
-    fn merge_field<B>(
-        &mut self,
-        tag: u32,
-        wire_type: u8,
-        buf: &mut B,
-        ctx: prost::bytes::Ctx,
-    ) -> Result<(), prost::Error>
-    where
-        B: Buf,
-        Self: Sized,
-    {
+    fn merge_field(&mut self, tag: u32, wire_type: prost::encoding::WireType, buf: &mut impl Buf, ctx: DecodeContext) -> Result<(), prost::DecodeError> {
+        use prost::encoding::wire_type::WireType;
         match (tag, wire_type) {
-            (1, 2) => {
-                self.group_id = decode_string(buf, ctx)?;
+            (1, WireType::LengthDelimited) => {
+                self.group_id = decode_string(buf)?;
             }
-            (2, 2) => {
-                self.node_id = decode_string(buf, ctx)?;
+            (2, WireType::LengthDelimited) => {
+                self.node_id = decode_string(buf)?;
             }
-            (3, 2) => {
-                let mut t = TagValue::default();
-                t.merge(buf, ctx)?;
-                self.tags.push(t);
+            (3, WireType::LengthDelimited) => {
+                let mut tag = TagValue::default();
+                tag.merge_field(tag, wire_type, buf, ctx)?;
+                self.tags.push(tag);
             }
-            (4, 0) => {
-                self.timestamp = decode_varint(buf, ctx)? as i64;
+            (4, WireType::Varint) => {
+                self.timestamp = decode_varint(buf)? as i64;
             }
             _ => {}
         }
@@ -220,31 +194,18 @@ impl Default for PushDataRequest {
 }
 
 impl Message for PushDataRequest {
-    fn encode_raw<B>(&self, buf: &mut B)
-    where
-        B: BufMut,
-        Self: Sized,
-    {
-        if let Some(ref d) = self.data {
-            encode_field(1, encode_message(d), buf);
+    fn encode_raw(&self, buf: &mut impl BufMut) {
+        if let Some(ref data) = self.data {
+            encode_field(1, encode_message(data), buf);
         }
     }
-    fn merge_field<B>(
-        &mut self,
-        tag: u32,
-        wire_type: u8,
-        buf: &mut B,
-        ctx: prost::bytes::Ctx,
-    ) -> Result<(), prost::Error>
-    where
-        B: Buf,
-        Self: Sized,
-    {
+    fn merge_field(&mut self, tag: u32, wire_type: prost::encoding::WireType, buf: &mut impl Buf, ctx: DecodeContext) -> Result<(), prost::DecodeError> {
+        use prost::encoding::wire_type::WireType;
         match (tag, wire_type) {
-            (1, 2) => {
-                let mut d = GroupData::default();
-                d.merge(buf, ctx)?;
-                self.data = Some(d);
+            (1, WireType::LengthDelimited) => {
+                let mut data = GroupData::default();
+                data.merge_field(1, WireType::LengthDelimited, buf, ctx)?;
+                self.data = Some(data);
             }
             _ => {}
         }
@@ -252,8 +213,8 @@ impl Message for PushDataRequest {
     }
     fn encoded_len(&self) -> usize {
         let mut len = 0;
-        if let Some(ref d) = self.data {
-            len += encoded_len_field(1, encode_message(d));
+        if let Some(ref data) = self.data {
+            len += encoded_len_field(1, encode_message(data));
         }
         len
     }
@@ -281,13 +242,9 @@ impl Default for PushDataResponse {
 }
 
 impl Message for PushDataResponse {
-    fn encode_raw<B>(&self, buf: &mut B)
-    where
-        B: BufMut,
-        Self: Sized,
-    {
+    fn encode_raw(&self, buf: &mut impl BufMut) {
         if self.success {
-            encode_field(1, vec![1u8], buf);
+            encode_field(1, encode_varint(1), buf);
         }
         if !self.message.is_empty() {
             encode_field(2, encode_string(&self.message), buf);
@@ -296,26 +253,17 @@ impl Message for PushDataResponse {
             encode_field(3, encode_varint(self.tags_received as u64), buf);
         }
     }
-    fn merge_field<B>(
-        &mut self,
-        tag: u32,
-        wire_type: u8,
-        buf: &mut B,
-        ctx: prost::bytes::Ctx,
-    ) -> Result<(), prost::Error>
-    where
-        B: Buf,
-        Self: Sized,
-    {
+    fn merge_field(&mut self, tag: u32, wire_type: prost::encoding::WireType, buf: &mut impl Buf, _ctx: DecodeContext) -> Result<(), prost::DecodeError> {
+        use prost::encoding::wire_type::WireType;
         match (tag, wire_type) {
-            (1, 0) => {
-                self.success = decode_varint(buf, ctx)? != 0;
+            (1, WireType::Varint) => {
+                self.success = decode_varint(buf)? != 0;
             }
-            (2, 2) => {
-                self.message = decode_string(buf, ctx)?;
+            (2, WireType::LengthDelimited) => {
+                self.message = decode_string(buf)?;
             }
-            (3, 0) => {
-                self.tags_received = decode_varint(buf, ctx)? as i32;
+            (3, WireType::Varint) => {
+                self.tags_received = decode_varint(buf)? as i32;
             }
             _ => {}
         }
@@ -324,7 +272,7 @@ impl Message for PushDataResponse {
     fn encoded_len(&self) -> usize {
         let mut len = 0;
         if self.success {
-            len += encoded_len_field(1, vec![1u8]);
+            len += encoded_len_field(1, encode_varint(1));
         }
         if !self.message.is_empty() {
             len += encoded_len_field(2, encode_string(&self.message));
@@ -342,401 +290,92 @@ impl Message for PushDataResponse {
 }
 
 // =============================================================================
-// Protobuf encoding/decoding helpers
+// Helper encoding/decoding functions (prost 0.13 compatible)
 // =============================================================================
 
-fn encode_varint(mut v: u64) -> Vec<u8> {
-    let mut buf = Vec::new();
+fn encode_varint(value: u64) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(10);
+    let mut v = value;
     loop {
         if v < 0x80 {
             buf.push(v as u8);
             break;
         } else {
-            buf.push(((v & 0x7F) | 0x80) as u8);
+            buf.push((v as u8 & 0x7f) | 0x80);
             v >>= 7;
         }
     }
     buf
 }
 
-fn decode_varint<B>(buf: &mut B, _ctx: prost::bytes::Ctx) -> Result<u64, prost::Error>
-where
-    B: Buf,
-{
-    let mut v: u64 = 0;
+fn encoded_len_varint(value: u64) -> usize {
+    if value < 0x80 { 1 } else if value < 0x4000 { 2 } else if value < 0x200000 { 3 } else if value < 0x10000000 { 4 } else { 5 }
+}
+
+fn decode_varint<B: Buf>(buf: &mut B) -> Result<u64, prost::DecodeError> {
+    let mut result = 0u64;
     let mut shift = 0;
     loop {
         if !buf.has_remaining() {
-            return Err(prost::Error::InvalidLength {});
+            return Err(prost::DecodeError::new("buffer underflow"));
         }
         let b = buf.get_u8();
-        v |= ((b & 0x7F) as u64) << shift;
+        result |= ((b & 0x7f) as u64) << shift;
         if b & 0x80 == 0 {
             break;
         }
         shift += 7;
+        if shift >= 64 {
+            return Err(prost::DecodeError::new("varint overflow"));
+        }
     }
-    Ok(v)
+    Ok(result)
 }
 
 fn encode_string(s: &str) -> Vec<u8> {
-    let mut buf = encode_varint(s.len() as u64);
+    let mut buf = Vec::with_capacity(s.len() + 10);
+    encode_varint(s.len() as u64).iter().for_each(|b| buf.push(*b));
     buf.extend_from_slice(s.as_bytes());
     buf
 }
 
-fn decode_string<B>(buf: &mut B, ctx: prost::bytes::Ctx) -> Result<String, prost::Error>
-where
-    B: Buf,
-{
-    let len = decode_varint(buf, ctx)? as usize;
+fn decode_string<B: Buf>(buf: &mut B) -> Result<String, prost::DecodeError> {
+    let len = decode_varint(buf)? as usize;
     if buf.remaining() < len {
-        return Err(prost::Error::InvalidLength {});
+        return Err(prost::DecodeError::new("buffer underflow"));
     }
     let b = buf.copy_to_bytes(len);
     String::from_utf8(b.to_vec())
-        .map_err(|_| prost::Error::InvalidLength {})
+        .map_err(|_| prost::DecodeError::new("invalid utf-8"))
 }
 
 fn encode_message<M: Message>(msg: &M) -> Vec<u8> {
     let mut buf = BytesMut::with_capacity(msg.encoded_len());
     msg.encode_raw(&mut buf);
-    let mut v = encode_varint(buf.len() as u64);
+    let mut v = encode_varint(msg.encoded_len() as u64);
     v.extend_from_slice(&buf);
     v
 }
 
 fn encoded_len_field(field: u32, data: Vec<u8>) -> usize {
-    let tag_len = encoded_len_varint((field << 3) | 2); // wire_type = 2 (length-delimited)
-    tag_len + encoded_len_varint(data.len() as u64) + data.len()
-}
-
-fn encoded_len_varint(v: u64) -> usize {
-    encode_varint(v).len()
+    encoded_len_varint((field << 3) | 2) + encoded_len_varint(data.len() as u64) + data.len()
 }
 
 fn encode_field(field: u32, mut data: Vec<u8>, buf: &mut impl BufMut) {
-    let tag = (field << 3) | 2; // wire_type = 2 (length-delimited)
-    buf.put_slice(&encode_varint(tag));
-    buf.put_slice(&encode_varint(data.len() as u64));
+    for b in encode_varint((field << 3) | 2) {
+        buf.put_u8(b);
+    }
+    for b in encode_varint(data.len() as u64) {
+        buf.put_u8(b);
+    }
     buf.put_slice(&data);
 }
 
 // =============================================================================
-// gRPC client (manual framing — no protoc/tonic-build needed)
+// JSON to Proto conversion
 // =============================================================================
 
-/// Encodes a gRPC request for a unary method using the `grpc-web` framing.
-/// For a true gRPC unary, we use the standard 5-byte header + length-prefixed message.
-fn encode_grpc_request(path: &str, msg: &PushDataRequest) -> Bytes {
-    let mut body = BytesMut::new();
-    // gRPC response framing is: 1 byte flags + 4 bytes content-length + content
-    // For request we use the same length-prefixed framing
-    let mut msg_bytes = BytesMut::with_capacity(msg.encoded_len());
-    msg.encode_raw(&mut msg_bytes);
-
-    // Compress flag = 0, message length = 4 bytes BE
-    body.put_u8(0);
-    body.put_u32(msg_bytes.len() as u32);
-    body.put_slice(&msg_bytes);
-
-    let body_bytes = body.freeze();
-
-    // Build HTTP/2 request
-    let req = Request::builder()
-        .method("POST")
-        .uri(path)
-        .header("content-type", "application/grpc")
-        .header("te", "trailers")
-        .header("user-agent", "grpc-rust/0.1.0")
-        .body(BoxBody::new(body_bytes))
-        .unwrap();
-
-    // Serialize request to bytes for tonic transport
-    // Actually, we use tonic's GrpcService to make the call directly
-    let full = format!(
-        "POST {} HTTP/2\r\nhost: localhost\r\ncontent-type: application/grpc\r\nte: trailers\r\nuser-agent: grpc-rust/0.1.0\r\n\r\n",
-        path
-    );
-    Bytes::from(full)
-}
-
-/// Decode a gRPC response (length-prefixed + trailers)
-fn decode_grpc_response<B>(buf: &mut B) -> Result<PushDataResponse, String>
-where
-    B: Buf,
-{
-    // Skip HTTP headers — find the grpc-status header
-    // This is a simplified decoder for the happy path
-    // In production you'd parse headers properly
-    let data = buf.remaining_bytes();
-    if data < 5 {
-        return Err("response too short".to_string());
-    }
-
-    // Try to find trailer delimiter and decode
-    // gRPC response format: 0x00 (flags) + 4-byte length + protobuf + 0x80 0x00 (trailer magic)
-    buf.get_u8(); // skip flags
-    let len = buf.get_u32() as usize;
-    if buf.remaining() < len {
-        return Err(format!("expected {} bytes, got {}", len, buf.remaining()));
-    }
-
-    let mut msg_buf = vec![0u8; len];
-    buf.copy_to_slice(&mut msg_buf);
-
-    let mut buf2 = Bytes::from(msg_buf);
-    PushDataResponse::decode(&mut buf2).map_err(|e| format!("decode error: {:?}", e))
-}
-
-// =============================================================================
-// Plugin state
-// =============================================================================
-
-struct GrpcState {
-    url: String,
-    channel: Option<Channel>,
-}
-
-static STATE: once_cell::sync::Lazy<Mutex<Option<GrpcState>>> =
-    once_cell::sync::Lazy::new(|| Mutex::new(None));
-
-fn result_to_json(v: serde_json::Value) -> *mut c_char {
-    CString::new(v.to_string()).unwrap().into_raw()
-}
-
-fn block_on<F, T>(fut: F) -> T
-where
-    F: std::future::Future<Output = T>,
-{
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(fut)
-}
-
-// =============================================================================
-// FFI exports (north plugin interface)
-// =============================================================================
-
-#[no_mangle]
-pub unsafe extern "C" fn north_create() -> *mut c_void {
-    Box::into_raw(Box::new(())) as *mut c_void
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn north_destroy(handle: *mut c_void) {
-    drop(unsafe { Box::from_raw(handle as *mut ()) });
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn north_meta() -> *mut c_char {
-    let meta = serde_json::json!({
-        "name": "grpc",
-        "kind": "north",
-        "description": "gRPC — push data to gRPC server via Protocol Buffers",
-        "version": "0.1.0",
-        "name_zh": "gRPC",
-        "name_en": "gRPC",
-        "description_zh": "通过gRPC协议推送数据（Protocol Buffers）",
-        "description_en": "Push data to gRPC server using Protocol Buffers over HTTP/2"
-    });
-    CString::new(meta.to_string()).unwrap().into_raw()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn north_free_string(s: *mut c_char) {
-    if !s.is_null() {
-        drop(unsafe { CString::from_raw(s) });
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn north_open(
-    _handle: *mut c_void,
-    config_json: *const c_char,
-) -> *mut c_char {
-    let config = if config_json.is_null() {
-        return result_to_json(serde_json::json!({"error": "null"}));
-    };
-    let config_str = unsafe { CStr::from_ptr(config_json) }.to_string_lossy();
-    let config: serde_json::Value = serde_json::from_str(&config_str).unwrap_or_default();
-
-    let url = config
-        .get("url")
-        .and_then(|v| v.as_str())
-        .unwrap_or("http://localhost:50051")
-        .to_string();
-
-    // Establish gRPC channel synchronously via tokio runtime
-    let channel = block_on(async { Channel::connect(&url).await });
-
-    match channel {
-        Ok(ch) => {
-            let mut guard = STATE.lock().unwrap();
-            *guard = Some(GrpcState {
-                url: url.clone(),
-                channel: Some(ch),
-            });
-            result_to_json(serde_json::json!({
-                "status": "connected",
-                "url": url
-            }))
-        }
-        Err(e) => result_to_json(serde_json::json!({
-            "error": format!("failed to connect: {}", e)
-        })),
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn north_close(_handle: *mut c_void, _node_id: *const c_char) -> *mut c_char {
-    let mut guard = STATE.lock().unwrap();
-    *guard = None;
-    result_to_json(serde_json::json!({ "status": "disconnected" }))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn north_init(
-    _handle: *mut c_void,
-    _config_json: *const c_char,
-) -> *mut c_char {
-    result_to_json(serde_json::json!({}))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn north_uninit(
-    _handle: *mut c_void,
-    _node_id: *const c_char,
-) -> *mut c_char {
-    result_to_json(serde_json::json!({}))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn north_start(
-    _handle: *mut c_void,
-    _config_json: *const c_char,
-) -> *mut c_char {
-    result_to_json(serde_json::json!({}))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn north_stop(_handle: *mut c_void, _node_id: *const c_char) -> *mut c_char {
-    result_to_json(serde_json::json!({}))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn north_on_group_data(
-    _handle: *mut c_void,
-    _node_id: *const c_char,
-    group_json: *const c_char,
-) -> *mut c_char {
-    let guard = STATE.lock().unwrap();
-    let state = match guard.as_ref() {
-        Some(s) => s,
-        None => return result_to_json(serde_json::json!({"error": "not connected"})),
-    };
-
-    if group_json.is_null() {
-        return result_to_json(serde_json::json!({"error": "null"}));
-    }
-
-    let data_str = unsafe { CStr::from_ptr(group_json) }.to_string_lossy();
-    let data: serde_json::Value = match serde_json::from_str(&data_str) {
-        Ok(v) => v,
-        Err(e) => return result_to_json(serde_json::json!({"error": format!("parse error: {}", e)})),
-    };
-
-    // Convert JSON -> protobuf
-    let proto_data = json_to_proto_group_data(&data);
-    let request = PushDataRequest { data: Some(proto_data) };
-
-    // Make real gRPC Unary call via tonic Channel
-    let path = "/iot.DataSink/PushData";
-    let service_url = state.url.strip_prefix("http://").unwrap_or(&state.url);
-
-    let response = block_on(async {
-        let channel = state.channel.as_ref().ok_or("no channel")?;
-
-        // Build gRPC request manually
-        let mut body = BytesMut::with_capacity(request.encoded_len() + 5);
-        body.put_u8(0); // flags
-        let msg_len = request.encoded_len() as u32;
-        body.put_u32(msg_len);
-        request.encode_raw(&mut body);
-
-        let req = Request::builder()
-            .method("POST")
-            .uri(path)
-            .header("content-type", "application/grpc")
-            .header("te", "trailers")
-            .header("user-agent", "grpc-rust/0.1.0")
-            .body(BoxBody::new(body.freeze()))
-            .unwrap();
-
-        let resp = channel.clone().ready().await
-            .map_err(|e| format!("channel not ready: {}", e))?
-            .call(req)
-            .await
-            .map_err(|e| format!("call failed: {}", e))?;
-
-        let parts = resp.into_parts();
-        let body_bytes = hyper::body::to_bytes(parts.body)
-            .await
-            .map_err(|e| format!("body read failed: {}", e))?;
-
-        // Decode gRPC response
-        let mut buf = body_bytes;
-        if buf.len() < 5 {
-            return Err("response too short".to_string());
-        }
-        buf.get_u8(); // flags
-        let _len = buf.get_u32() as usize;
-
-        let mut proto_resp = PushDataResponse::default();
-        proto_resp.merge(&mut buf, prost::bytes::Ctx::default())
-            .map_err(|e| format!("merge error: {:?}", e))?;
-
-        Ok::<_, String>(proto_resp)
-    });
-
-    match response {
-        Ok(resp) => result_to_json(serde_json::json!({
-            "success": resp.success,
-            "message": resp.message,
-            "tags_received": resp.tags_received,
-        })),
-        Err(err) => result_to_json(serde_json::json!({
-            "error": err
-        })),
-    }
-}
-
-fn json_to_proto_group_data(data: &serde_json::Value) -> ProtoGroupData {
-    #[derive(Message)]
-    struct ProtoGroupData {
-        #[prost(string, tag = "1")]
-        pub group_id: String,
-        #[prost(string, tag = "2")]
-        pub node_id: String,
-        #[prost(message, repeated, tag = "3")]
-        pub tags: Vec<ProtoTagValue>,
-        #[prost(int64, tag = "4")]
-        pub timestamp: i64,
-    }
-
-    #[derive(Message)]
-    struct ProtoTagValue {
-        #[prost(string, tag = "1")]
-        pub name: String,
-        #[prost(string, tag = "2")]
-        pub value: String,
-        #[prost(int64, tag = "3")]
-        pub timestamp: i64,
-        #[prost(string, tag = "4")]
-        pub quality: String,
-    }
-
-    use prost::Message;
-
+fn json_to_proto_group_data(data: &serde_json::Value) -> GroupData {
     let obj = data.as_object().unwrap_or(&serde_json::map::Map::new());
 
     let group_id = obj.get("group_id")
@@ -751,13 +390,13 @@ fn json_to_proto_group_data(data: &serde_json::Value) -> ProtoGroupData {
         .and_then(|v| v.as_i64())
         .unwrap_or_else(system_timestamp);
 
-    let tags: Vec<ProtoTagValue> = obj
+    let tags: Vec<TagValue> = obj
         .get("tags")
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter().filter_map(|tag| {
                 let tag_obj = tag.as_object()?;
-                Some(ProtoTagValue {
+                Some(TagValue {
                     name: tag_obj.get("name")?.as_str()?.to_string(),
                     value: tag_obj.get("value")?.as_str()?.to_string(),
                     timestamp: tag_obj.get("timestamp")?.as_i64().unwrap_or(0),
@@ -767,7 +406,7 @@ fn json_to_proto_group_data(data: &serde_json::Value) -> ProtoGroupData {
         })
         .unwrap_or_default();
 
-    ProtoGroupData {
+    GroupData {
         group_id,
         node_id,
         tags,
@@ -778,38 +417,244 @@ fn json_to_proto_group_data(data: &serde_json::Value) -> ProtoGroupData {
 fn system_timestamp() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
+        .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+// =============================================================================
+// North Plugin State
+// =============================================================================
+
+pub struct GrpcState {
+    pub url: String,
+    pub channel: Option<Channel>,
+}
+
+static STATE: once_cell::sync::Lazy<Mutex<GrpcState>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(GrpcState {
+        url: String::new(),
+        channel: None,
+    }));
+
+// =============================================================================
+// FFI Wrappers (C-callable interface)
+// =============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn north_create() -> *mut c_void {
+    Box::into_raw(Box::new(())) as *mut c_void
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn north_destroy(_handle: *mut c_void) {
+    // Nothing to destroy
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn north_meta() -> *mut c_char {
+    let meta = serde_json::json!({
+        "name": "grpc",
+        "kind": "north",
+        "description": "gRPC north plugin for pushing data to a gRPC server",
+        "version": "0.1.0",
+        "config_schema": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "gRPC server URL (e.g., http://localhost:50051)"
+                }
+            },
+            "required": ["url"]
+        }
+    });
+    to_c_string(meta.to_string())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn north_open(_handle: *mut c_void, cfg: *const c_char) -> *mut c_char {
+    let cfg_str = unsafe { parse_c_str(cfg) };
+    let config: serde_json::Value = match serde_json::from_str(&cfg_str) {
+        Ok(v) => v,
+        Err(e) => return to_c_string(serde_json::json!({"error": e.to_string()}).to_string()),
+    };
+
+    let url = config.get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("http://localhost:50051")
+        .to_string();
+
+    let mut state = STATE.lock().unwrap();
+    state.url = url.clone();
+    
+    // Create tonic channel synchronously using block_on
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err_to_c("failed to create runtime");
+    
+    let channel = rt.block_on(Channel::connect(&url))
+        .map_err_to_c("failed to connect to gRPC server");
+    
+    state.channel = Some(channel);
+
+    to_c_string(serde_json::json!({"status": "open", "url": url}).to_string())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn north_close(_handle: *mut c_void, _nid: *const c_char) -> *mut c_char {
+    let mut state = STATE.lock().unwrap();
+    state.channel = None;
+    to_c_string(serde_json::json!({"status": "closed"}).to_string())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn north_init(_handle: *mut c_void, _cfg: *const c_char) -> *mut c_char {
+    to_c_string(serde_json::json!({"status": "init"}).to_string())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn north_uninit(_handle: *mut c_void, _nid: *const c_char) -> *mut c_char {
+    to_c_string(serde_json::json!({"status": "uninit"}).to_string())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn north_start(_handle: *mut c_void, _cfg: *const c_char) -> *mut c_char {
+    to_c_string(serde_json::json!({"status": "started"}).to_string())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn north_stop(_handle: *mut c_void, _nid: *const c_char) -> *mut c_char {
+    to_c_string(serde_json::json!({"status": "stopped"}).to_string())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn north_on_group_data(
+    _handle: *mut c_void,
+    _nid: *const c_char,
+    data: *const c_char,
+) -> *mut c_char {
+    let data_str = unsafe { parse_c_str(data) };
+    let json: serde_json::Value = match serde_json::from_str(&data_str) {
+        Ok(v) => v,
+        Err(e) => return to_c_string(serde_json::json!({"error": e.to_string()}).to_string()),
+    };
+
+    // Build protobuf request
+    let group_data = json_to_proto_group_data(&json);
+    let request = PushDataRequest { data: Some(group_data) };
+
+    let state = STATE.lock().unwrap();
+    let channel = match state.channel.as_ref() {
+        Some(ch) => ch,
+        None => return to_c_string(serde_json::json!({"error": "not connected"}).to_string()),
+    };
+
+    // Encode the request
+    let mut buf = BytesMut::with_capacity(request.encoded_len() + 5);
+    buf.put_u8(0); // flags
+    let len = request.encoded_len() as u32;
+    buf.put_u32(len);
+    request.encode_raw(&mut buf);
+
+    // Make HTTP/2 request to gRPC endpoint
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err_to_c("failed to create runtime");
+
+    let result = rt.block_on(async {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/iot.DataSink/PushData")
+            .header("content-type", "application/grpc")
+            .header("te", "trailers")
+            .header("user-agent", "grpc-rust/0.1.0")
+            .body(tonic::body::boxed(
+                Empty::<bytes::Bytes>::new()
+                    .map_err(|e| tonic::Status::internal(e.to_string())) as tonic::body::BoxBody
+            ))
+            .unwrap();
+
+        let resp = channel.clone().ready().await
+            .map_err(|e| format!("channel not ready: {}", e))?
+            .call(req)
+            .await
+            .map_err(|e| format!("call failed: {}", e))?;
+
+        let body = resp.into_body();
+        let body_bytes = body.collect().await
+            .map_err(|e| format!("body read failed: {}", e))?
+            .to_bytes();
+
+        // gRPC response: 5 bytes grpc-status + length prefix
+        if body_bytes.len() < 5 {
+            return Err("response too short".to_string());
+        }
+        // Skip first 5 bytes (grpc header), then decode protobuf
+        let mut msg_bytes = &body_bytes[5..];
+        let resp = PushDataResponse::decode(&mut msg_bytes)
+            .map_err(|e| format!("decode error: {}", e))?;
+
+        Ok::<_, String>(resp)
+    });
+
+    match result {
+        Ok(resp) => to_c_string(serde_json::json!({
+            "success": resp.success,
+            "message": resp.message,
+            "tags_received": resp.tags_received,
+        }).to_string()),
+        Err(err) => to_c_string(serde_json::json!({"error": err}).to_string()),
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn north_set_subscriptions(
     _handle: *mut c_void,
-    _node_id: *const c_char,
-    _sub_json: *const c_char,
+    _nid: *const c_char,
+    _sub: *const c_char,
 ) -> *mut c_char {
-    result_to_json(serde_json::json!({}))
+    to_c_string(serde_json::json!({"status": "subscriptions_set"}).to_string())
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn north_config_schema(_handle: *mut c_void) -> *mut c_char {
-    let schema = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "url": { "type": "string", "default": "http://localhost:50051" },
-            "service": { "type": "string", "default": "iot.DataSink" },
-            "method": { "type": "string", "default": "PushData" },
-            "tls": { "type": "boolean", "default": false }
-        }
-    });
-    CString::new(schema.to_string()).unwrap().into_raw()
+    north_meta()
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn north_connection_status(
-    _handle: *mut c_void,
-    _node_id: *const c_char,
-) -> *mut c_char {
-    let guard = STATE.lock().unwrap();
-    result_to_json(serde_json::json!({ "status": if guard.is_some() { "connected" } else { "disconnected" } }))
+pub unsafe extern "C" fn north_connection_status(_handle: *mut c_void, _nid: *const c_char) -> *mut c_char {
+    let state = STATE.lock().unwrap();
+    let connected = state.channel.is_some();
+    to_c_string(serde_json::json!({"connected": connected}).to_string())
+}
+
+// =============================================================================
+// Utility Functions
+// =============================================================================
+
+unsafe fn parse_c_str(ptr: *const c_char) -> String {
+    if ptr.is_null() {
+        String::new()
+    } else {
+        CStr::from_ptr(ptr).to_string_lossy().into_owned()
+    }
+}
+
+fn to_c_string(s: String) -> *mut c_char {
+    CString::new(s).unwrap().into_raw()
+}
+
+trait MapErrToC<T> {
+    fn map_err_to_c<F: FnOnce(String) -> *mut c_char>(self, f: F) -> T;
+}
+
+impl<T, E: std::fmt::Display> MapErrToC<T> for Result<T, E> {
+    fn map_err_to_c<F: FnOnce(String) -> *mut c_char>(self, f: F) -> T {
+        match self {
+            Ok(v) => v,
+            Err(e) => return f(e.to_string()),
+        }
+    }
 }

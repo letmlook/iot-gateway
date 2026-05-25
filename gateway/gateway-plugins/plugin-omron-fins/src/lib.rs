@@ -1,108 +1,202 @@
-use std::ffi::{CStr, CString};
-use std::net::UdpSocket;
-use std::sync::Mutex;
+//! Omron FINS over TCP south plugin.
+//! Implements SouthPlugin trait for CP/CJ/NJ series PLCs.
+
+#[cfg(feature = "ffi")]
+mod ffi;
+
+use gateway_sdk::{
+    ConfigSchema, DataValue, Group, GroupId, NodeId, ParamAttribute, ParamSchema, ParamType,
+    PluginConfig, PluginError, PluginMeta, PluginResult, Tag, TagAttr, TagId, TagSchema,
+};
+use gateway_sdk::log;
+use gateway_sdk::types::PluginKind;
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::sync::Arc;
 use std::time::Duration;
-use std::os::raw::{c_char, c_void};
+use tokio::sync::RwLock as AsyncRwLock;
 
-static CONN: once_cell::sync::Lazy<Mutex<Option<FINSState>>> =
-    once_cell::sync::Lazy::new(|| Mutex::new(None));
+// ---------------------------------------------------------------------------
+// Area codes
+// ---------------------------------------------------------------------------
+/// Memory area codes for FINS protocol.
+const AREA_DM: u8 = 0x82;
+const AREA_CIO: u8 = 0x30;
+const AREA_W: u8 = 0x31;
+const AREA_HR: u8 = 0x02;
+const AREA_AR: u8 = 0x03;
 
-struct FINSState {
-    host: String,
-    port: u16,
-    local_net: u8,
-    local_node: u8,
-    remote_net: u8,
-    remote_node: u8,
-    remote_unit: u8,
-    socket: Option<UdpSocket>,
-    sid: u8,
+// ---------------------------------------------------------------------------
+// FINS TCP state per node
+// ---------------------------------------------------------------------------
+pub struct OmronFinsState {
+    pub host: String,
+    pub port: u16,
+    pub local_net: u8,
+    pub local_unit: u8,
+    pub local_node: u8,
+    pub remote_net: u8,
+    pub remote_unit: u8,
+    pub remote_node: u8,
+    pub socket: Option<TcpStream>,
+    pub connected: bool,
+    /// SID increments on each request (FINS over TCP only)
+    pub sid: u8,
 }
 
-impl FINSState {
-    /// Build a FINS UDP socket connected to the remote host/port.
+impl OmronFinsState {
+    /// Connect TCP socket to PLC.
     fn connect(&mut self) -> std::io::Result<()> {
-        let addr_str = format!("{}:{}", self.host, self.port);
-        let sock = UdpSocket::bind("0.0.0.0:0")?;
-        sock.set_read_timeout(Some(Duration::from_secs(2)))?;
-        sock.set_write_timeout(Some(Duration::from_secs(2)))?;
-        sock.connect(&addr_str)?;
-        self.socket = Some(sock);
+        let addr = format!("{}:{}", self.host, self.port);
+        let sock = TcpStream::connect_timeout(
+            &addr.parse().unwrap(),
+            Duration::from_secs(5),
+        )?;
+        sock.set_read_timeout(Some(Duration::from_secs(5)))?;
+        sock.set_write_timeout(Some(Duration::from_secs(5)))?;
+        // FINS TCP handshake (C frame)
+        let mut handshake = vec![0u8; 24];
+        // Reserved
+        handshake[0] = 0x46; // 'F'
+        handshake[1] = 0x49; // 'I'
+        handshake[2] = 0x4E; // 'N'
+        handshake[3] = 0x53; // 'S'
+        handshake[4] = 0x00; // length high
+        handshake[5] = 0x00; // length low
+        handshake[6] = 0x00; // reserved
+        handshake[7] = 0x00; // reserved
+        // Client node info (2 bytes)
+        handshake[12] = self.local_net;
+        handshake[13] = self.local_node;
+        // Server node info (2 bytes)
+        handshake[14] = self.remote_net;
+        handshake[15] = self.remote_node;
+        // Connection type: 0 = P2P (2C)
+        handshake[16] = 0x00;
+        // Port numbers (unit is u8, expand to 16-bit BE)
+        handshake[17] = (u16::from(self.local_unit) >> 8) as u8;
+        handshake[18] = (u16::from(self.local_unit) & 0xFF) as u8;
+        handshake[19] = (u16::from(self.remote_unit) >> 8) as u8;
+        handshake[20] = (u16::from(self.remote_unit) & 0xFF) as u8;
+        // Connection ID (0)
+        handshake[21] = 0;
+        handshake[22] = 0;
+        handshake[23] = 0;
+
+        let mut stream = std::net::TcpStream::connect(&addr)?;
+        stream.write_all(&handshake)?;
+        let mut resp = [0u8; 24];
+        stream.read_exact(&mut resp)?;
+        // Response should echo "FINS" + 0
+        if &resp[0..4] != b"FINS" {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid FINS TCP handshake response",
+            ));
+        }
+        self.socket = Some(stream);
+        self.connected = true;
         Ok(())
     }
 
-    /// Send a FINS command and receive response over UDP.
+    /// Disconnect TCP socket.
+    fn disconnect(&mut self) {
+        self.socket = None;
+        self.connected = false;
+    }
+
+    /// Build FINS over TCP frame with 28-byte header.
+    fn build_fins_frame(&mut self, mrc: u8, src: u8, params: &[u8]) -> Vec<u8> {
+        self.sid = self.sid.wrapping_add(1);
+        let len = 28 + params.len();
+        let mut frame = vec![0u8; len];
+
+        // FINS TCP header (28 bytes)
+        frame[0] = 0x46; // 'F'
+        frame[1] = 0x49; // 'I'
+        frame[2] = 0x4E; // 'N'
+        frame[3] = 0x53; // 'S'
+        frame[4] = ((len >> 24) & 0xFF) as u8;
+        frame[5] = ((len >> 16) & 0xFF) as u8;
+        frame[6] = ((len >> 8) & 0xFF) as u8;
+        frame[7] = (len & 0xFF) as u8;
+        // ICF (response bit = 0)
+        frame[8] = 0x80;
+        frame[9] = 0x00; // RSV
+        frame[10] = 0x02; // GCT
+        frame[11] = self.remote_net; // DNA
+        frame[12] = self.remote_node; // DA1
+        frame[13] = self.remote_unit; // DA2
+        frame[14] = self.local_net; // SNA
+        frame[15] = self.local_node; // SA1
+        frame[16] = 0x00; // SA2 (CPU)
+        frame[17] = self.sid; // SID
+        frame[18] = mrc; // MRC
+        frame[19] = src; // SRC
+        frame[20] = 0x00; // Reserved
+        frame[21] = 0x00; // Reserved
+        frame[22] = 0x00; // Reserved
+        frame[23] = 0x00; // Reserved
+        frame[24] = ((params.len() >> 8) & 0xFF) as u8;
+        frame[25] = (params.len() & 0xFF) as u8;
+        frame[26] = 0x00; // Reserved
+        frame[27] = 0x00; // Reserved
+
+        // Copy params after header
+        frame[28..].copy_from_slice(params);
+        frame
+    }
+
+    /// Send FINS command and read response over TCP.
     fn send_fins(&mut self, mrc: u8, src: u8, params: &[u8]) -> std::io::Result<Vec<u8>> {
-        let sock = self.socket.as_ref().ok_or_else(|| {
+        // Build frame first (only mutates sid)
+        let frame = self.build_fins_frame(mrc, src, params);
+
+        let sock = self.socket.as_mut().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::NotConnected, "socket not connected")
         })?;
 
-        self.sid = self.sid.wrapping_add(1);
+        sock.write_all(&frame)?;
 
-        // FINS header (14 bytes) + params
-        let mut frame = vec![0u8; 14 + params.len()];
-        frame[0] = 0x80; // ICF
-        frame[1] = 0x00; // RSV
-        frame[2] = 0x02; // GCT
-        frame[3] = self.remote_net;  // DNA
-        frame[4] = self.remote_node; // DA1
-        frame[5] = self.remote_unit; // DA2
-        frame[6] = self.local_net;   // SNA
-        frame[7] = self.local_node;  // SA1
-        frame[8] = 0x00;             // SA2 (CPU unit)
-        frame[9] = self.sid;        // SID
-        frame[10] = mrc;            // MRC
-        frame[11] = src;            // SRC
-        frame[12..].copy_from_slice(params);
+        // Read response header (28 bytes)
+        let mut header = vec![0u8; 28];
+        sock.read_exact(&mut header)?;
 
-        sock.send_to(&frame, format!("{}:{}", self.host, self.port))?;
+        // Extract data length from header bytes 24-25
+        let data_len = (u16::from(header[24]) << 8) | u16::from(header[25]);
 
-        // FINS response: header (10 bytes) + MRC/SRC (2 bytes) + response code (2 bytes) + data
-        let mut resp = vec![0u8; 256];
-        let (n, _addr) = sock.recv_from(&mut resp)?;
-        resp.truncate(n);
-        Ok(resp)
-    }
-
-    /// Execute FINS memory read (command 0x0401).
-    fn read_memory(&mut self, area: u8, address: u32, bit_offset: u8, word_count: u16) -> std::io::Result<Vec<u16>> {
-        // Encode address per FINS memory area format:
-        // Bit areas (CIO, HR, AR, etc.): header[1 byte] + 3-byte address + bit number
-        // Word areas (DM, WR, etc.): header[1 byte] + 3-byte address + word count
-        let mut params = vec![area]; // area code
-
-        if area == 0x01 || area == 0x02 || area == 0x03 || area == 0x04 || area == 0x05 || area == 0x06 {
-            // Bit-area (CIO=01, W=02, H=03, A=04, DM=85(word-only), WR=89(word-only))
-            // For bit areas: address is 3 bytes (big-endian), then bit number
-            params.push(((address >> 16) & 0xFF) as u8);
-            params.push(((address >> 8) & 0xFF) as u8);
-            params.push((address & 0xFF) as u8);
-            params.push(bit_offset);
-            params.push(0x00); // padding / reserved
-        } else {
-            // Word area: address is 3 bytes big-endian, then word count
-            params.push(((address >> 16) & 0xFF) as u8);
-            params.push(((address >> 8) & 0xFF) as u8);
-            params.push((address & 0xFF) as u8);
-            params.push(((word_count >> 8) & 0xFF) as u8);
-            params.push((word_count & 0xFF) as u8);
+        // Read data payload
+        let mut data = vec![0u8; data_len as usize];
+        if !data.is_empty() {
+            sock.read_exact(&mut data)?;
         }
 
-        let resp = self.send_fins(0x04, 0x01, &params)?;
-
-        // Response: ICF RSV GCT DNA DA1 DA2 SNA SA1 SA2 SID (10 bytes)
-        //           MRC SRC (2 bytes) + response code (2 bytes = 0x0000 success) + data
-        if resp.len() < 14 {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "FINS response too short"));
-        }
-        let response_code = u16::from_be_bytes([resp[12], resp[13]]);
+        // Check response code (bytes 12-13 = response code)
+        let response_code = u16::from_be_bytes([header[12], header[13]]);
         if response_code != 0x0000 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("FINS read error: 0x{:04X}", response_code),
+                format!("FINS error: 0x{:04X}", response_code),
             ));
         }
-        let data = &resp[14..];
+
+        Ok(data)
+    }
+
+    /// Read memory area (command 0x0401).
+    fn read_memory(&mut self, area: u8, address: u32, bit_offset: u8, word_count: u16) -> std::io::Result<Vec<u16>> {
+        let mut params = vec![area];
+        params.push(((address >> 16) & 0xFF) as u8);
+        params.push(((address >> 8) & 0xFF) as u8);
+        params.push((address & 0xFF) as u8);
+        params.push(bit_offset);
+        params.push(0x00); // padding
+        params.push(((word_count >> 8) & 0xFF) as u8);
+        params.push((word_count & 0xFF) as u8);
+
+        let data = self.send_fins(0x04, 0x01, &params)?;
+
         let mut words = Vec::with_capacity(data.len() / 2);
         for chunk in data.chunks(2) {
             if chunk.len() == 2 {
@@ -112,7 +206,7 @@ impl FINSState {
         Ok(words)
     }
 
-    /// Execute FINS memory write (command 0x0802).
+    /// Write memory area (command 0x0802).
     fn write_memory(&mut self, area: u8, address: u32, bit_offset: u8, words: &[u16]) -> std::io::Result<()> {
         let mut params = vec![area];
         params.push(((address >> 16) & 0xFF) as u8);
@@ -126,445 +220,503 @@ impl FINSState {
             params.push((w & 0xFF) as u8);
         }
 
-        let resp = self.send_fins(0x08, 0x02, &params)?;
-
-        if resp.len() < 14 {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "FINS response too short"));
-        }
-        let response_code = u16::from_be_bytes([resp[12], resp[13]]);
-        if response_code != 0x0000 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("FINS write error: 0x{:04X}", response_code),
-            ));
+        let data = self.send_fins(0x08, 0x02, &params)?;
+        if data.len() >= 2 {
+            let response_code = u16::from_be_bytes([data[0], data[1]]);
+            if response_code != 0x0000 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("FINS write error: 0x{:04X}", response_code),
+                ));
+            }
         }
         Ok(())
     }
+}
 
-    /// FINS ping (echo) — sends a simple FINS command and checks for valid response.
-    fn ping(&mut self) -> std::io::Result<bool> {
-        match self.write_memory(0x82, 0, 0, &[0]) {
-            // Try reading CPU unit info area as ping
-            Ok(_) => Ok(true),
-            Err(e) => {
-                // Some PLCs return an error but still respond — treat any valid FINS response as alive
-                if e.kind() == std::io::ErrorKind::Other {
-                    let msg = e.to_string();
-                    if msg.contains("0x0000") || msg.contains("FINS") {
-                        return Ok(true);
-                    }
-                }
-                Err(e)
-            }
+// ---------------------------------------------------------------------------
+// Plugin
+// ---------------------------------------------------------------------------
+pub struct OmronFinsPlugin {
+    pub state: Arc<AsyncRwLock<HashMap<NodeId, OmronFinsState>>>,
+}
+
+impl Default for OmronFinsPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OmronFinsPlugin {
+    pub fn new() -> Self {
+        Self {
+            state: Arc::new(AsyncRwLock::new(HashMap::new())),
         }
     }
 }
 
-/// Convert an Omron address string (e.g. "D100", "CIO0.05", "W200", "H100") into FINS area code + address.
-fn parse_fins_address(addr: &str) -> Option<(u8, u32, u8)> {
-    let addr = addr.trim();
-    if addr.starts_with("D") || addr.starts_with("DM") {
-        // Data Memory (DM / D area) — area code 0x82
-        let num: u32 = addr.trim_start_matches(|c| c == 'D' || c == 'M')
-            .parse()
-            .ok()?;
-        Some((0x82, num, 0))
-    } else if addr.starts_with("W") || addr.starts_with("WR") {
-        // Work area (W / WR) — area code 0x89
-        let num: u32 = addr.trim_start_matches(|c| c == 'W' || c == 'R')
-            .parse()
-            .ok()?;
-        Some((0x89, num, 0))
+// ---------------------------------------------------------------------------
+// Address parsing
+// ---------------------------------------------------------------------------
+/// Parse address string into (area_code, address, bit_offset).
+/// Supports: DM0, D0, CIO10.5, W100, H100, A100, etc.
+fn parse_address(addr: &str) -> Option<(u8, u32, u8)> {
+    let addr = addr.trim().to_uppercase();
+    if addr.starts_with("DM") {
+        let num: u32 = addr.trim_start_matches("DM").parse().ok()?;
+        Some((AREA_DM, num, 0))
+    } else if addr.starts_with("D") {
+        let num: u32 = addr.trim_start_matches('D').parse().ok()?;
+        Some((AREA_DM, num, 0))
     } else if addr.starts_with("CIO") {
-        // CIO area — area code 0xB0
         let parts: Vec<&str> = addr[3..].split('.').collect();
-        let base: u32 = parts.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let base: u32 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
         let bit: u8 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-        Some((0xB0, base, bit))
-    } else if addr.starts_with("H") || addr.starts_with("HR") {
-        // Holding area (H / HR) — area code 0x91
-        let num: u32 = addr.trim_start_matches(|c| c == 'H' || c == 'R')
-            .parse()
-            .ok()?;
-        Some((0x91, num, 0))
-    } else if addr.starts_with("A") || addr.starts_with("AR") {
-        // Auxiliary area (A / AR) — area code 0x93
-        let num: u32 = addr.trim_start_matches(|c| c == 'A' || c == 'R')
-            .parse()
-            .ok()?;
-        Some((0x93, num, 0))
-    } else if addr.starts_with("LR") {
-        // Link relay area — area code 0x99
-        let num: u32 = addr[2..].parse().ok()?;
-        Some((0x99, num, 0))
-    } else if addr.starts_with("TIM") {
-        // Timer area — area code 0x09
-        let num: u32 = addr[3..].parse().ok()?;
-        Some((0x09, num, 0))
-    } else if addr.starts_with("CNT") {
-        // Counter area — area code 0x09 (same as timer, read as PV)
-        let num: u32 = addr[3..].parse().ok()?;
-        Some((0x09, num, 0))
+        Some((AREA_CIO, base, bit))
+    } else if addr.starts_with("W") && !addr.starts_with("WR") {
+        let num: u32 = addr.trim_start_matches('W').parse().ok()?;
+        Some((AREA_W, num, 0))
+    } else if addr.starts_with("WR") {
+        let num: u32 = addr.trim_start_matches("WR").parse().ok()?;
+        Some((AREA_W, num, 0))
+    } else if addr.starts_with("HR") {
+        let num: u32 = addr.trim_start_matches("HR").parse().ok()?;
+        Some((AREA_HR, num, 0))
+    } else if addr.starts_with("H") {
+        let num: u32 = addr.trim_start_matches('H').parse().ok()?;
+        Some((AREA_HR, num, 0))
+    } else if addr.starts_with("AR") {
+        let num: u32 = addr.trim_start_matches("AR").parse().ok()?;
+        Some((AREA_AR, num, 0))
+    } else if addr.starts_with("A") {
+        let num: u32 = addr.trim_start_matches('A').parse().ok()?;
+        Some((AREA_AR, num, 0))
     } else {
         None
     }
 }
 
-fn result_to_json(v: serde_json::Value) -> *mut c_char {
-    CString::new(v.to_string()).unwrap().into_raw()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn south_create() -> *mut c_void {
-    Box::into_raw(Box::new(())) as *mut c_void
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn south_destroy(handle: *mut c_void) {
-    drop(unsafe { Box::from_raw(handle as *mut ()) });
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn south_meta() -> *mut c_char {
-    let meta = serde_json::json!({
-        "name": "omron-fins",
-        "kind": "south",
-        "description": "Omron FINS protocol — CP/CJ/NJ series PLCs",
-        "version": "0.1.0",
-        "name_zh": "Omron FINS",
-        "name_en": "Omron FINS",
-        "description_zh": "Omron FINS协议，支持CP/CJ/NJ系列PLC",
-        "description_en": "Omron FINS protocol — CP/CJ/NJ series PLCs via UDP/TCP"
-    });
-    CString::new(meta.to_string()).unwrap().into_raw()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn south_free_string(s: *mut c_char) {
-    if !s.is_null() {
-        drop(unsafe { CString::from_raw(s) });
+// ---------------------------------------------------------------------------
+// Default groups / tags
+// ---------------------------------------------------------------------------
+fn default_group() -> Group {
+    Group {
+        id: GroupId::new(),
+        name: "default".to_string(),
+        interval_ms: 1000,
+        description: Some("Default polling group".to_string()),
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn south_open(
-    _handle: *mut c_void,
-    config_json: *const c_char,
-) -> *mut c_char {
-    let config = if config_json.is_null() {
-        return result_to_json(serde_json::json!({"error": "null"}));
-    };
-    let config_str = unsafe { CStr::from_ptr(config_json) }.to_string_lossy();
-    let config: serde_json::Value = serde_json::from_str(&config_str).unwrap_or_default();
-
-    let host = config
-        .get("host")
-        .and_then(|v| v.as_str())
-        .unwrap_or("192.168.1.10")
-        .to_string();
-    let port = config.get("port").and_then(|v| v.as_u64()).unwrap_or(9600) as u16;
-    let local_net = config.get("local_net").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
-    let local_node = config.get("local_node").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
-    let remote_net = config.get("remote_net").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
-    let remote_node = config.get("remote_node").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
-    let remote_unit = config.get("remote_unit").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
-
-    let mut state = FINSState {
-        host: host.clone(),
-        port,
-        local_net,
-        local_node,
-        remote_net,
-        remote_node,
-        remote_unit,
-        socket: None,
-        sid: 0,
-    };
-
-    let connect_result = state.connect();
-    let mut guard = CONN.lock().unwrap();
-    *guard = Some(state);
-
-    match connect_result {
-        Ok(()) => result_to_json(serde_json::json!({
-            "status": "connected",
-            "host": host,
-            "port": port,
-            "note": "FINS UDP connected"
-        })),
-        Err(e) => result_to_json(serde_json::json!({
-            "status": "connected (socket error)",
-            "host": host,
-            "port": port,
-            "error": e.to_string()
-        })),
-    }
+fn default_tags(group_id: GroupId) -> Vec<Tag> {
+    vec![
+        Tag {
+            id: TagId::new(),
+            name: "DM0".to_string(),
+            address: "DM0".to_string(),
+            attr: TagAttr::ReadWrite,
+            data_type: Some("int16".to_string()),
+            description: Some("Data Memory 0".to_string()),
+            group_id,
+        },
+        Tag {
+            id: TagId::new(),
+            name: "CIO0".to_string(),
+            address: "CIO0".to_string(),
+            attr: TagAttr::ReadWrite,
+            data_type: Some("int16".to_string()),
+            description: Some("CIO bit 0".to_string()),
+            group_id,
+        },
+    ]
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn south_close(_handle: *mut c_void, _node_id: *const c_char) -> *mut c_char {
-    let mut guard = CONN.lock().unwrap();
-    if let Some(ref mut state) = *guard {
-        if let Some(_sock) = state.socket.take() {
-            // UDP socket — no shutdown needed, just drop
+// ---------------------------------------------------------------------------
+// SouthPlugin implementation
+// ---------------------------------------------------------------------------
+#[async_trait::async_trait]
+impl gateway_sdk::SouthPlugin for OmronFinsPlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            name: "omron-fins",
+            kind: PluginKind::South,
+            description: Some("Omron FINS over TCP — CP/CJ/NJ series PLCs"),
+            version: "0.1.0",
+            name_zh: Some("Omron FINS"),
+            name_en: Some("Omron FINS"),
+            description_zh: Some("Omron FINS协议插件，支持CP/CJ/NJ系列PLC"),
+            description_en: Some("Omron FINS over TCP — CP/CJ/NJ series PLCs"),
         }
     }
-    *guard = None;
-    result_to_json(serde_json::json!({ "status": "disconnected" }))
-}
 
-#[no_mangle]
-pub unsafe extern "C" fn south_init(
-    _handle: *mut c_void,
-    _config_json: *const c_char,
-) -> *mut c_char {
-    result_to_json(serde_json::json!({}))
-}
+    fn config_schema(&self) -> Option<ConfigSchema> {
+        Some(
+            ConfigSchema::new()
+                .param(ParamSchema {
+                    name: "host".to_string(),
+                    description: Some("PLC IP address".to_string()),
+                    name_zh: Some("PLC IP地址".to_string()),
+                    name_en: Some("PLC IP address".to_string()),
+                    description_zh: Some("Omron PLC的IP地址".to_string()),
+                    description_en: Some("IP address of Omron PLC".to_string()),
+                    attribute: ParamAttribute::Required,
+                    ty: ParamType::String,
+                    default: Some(serde_json::json!("192.168.1.10")),
+                    valid: None,
+                    ..Default::default()
+                })
+                .param(ParamSchema {
+                    name: "port".to_string(),
+                    description: Some("FINS TCP port".to_string()),
+                    name_zh: Some("端口".to_string()),
+                    name_en: Some("FINS TCP port".to_string()),
+                    description_zh: Some("FINS TCP端口，默认9600".to_string()),
+                    description_en: Some("FINS TCP port, default 9600".to_string()),
+                    attribute: ParamAttribute::Optional,
+                    ty: ParamType::Int,
+                    default: Some(serde_json::json!(9600)),
+                    valid: None,
+                    ..Default::default()
+                })
+                .param(ParamSchema {
+                    name: "local_net".to_string(),
+                    description: Some("Local network number".to_string()),
+                    name_zh: Some("本地网络号".to_string()),
+                    name_en: Some("Local network number".to_string()),
+                    description_zh: Some("本地FINS网络号".to_string()),
+                    description_en: Some("Local FINS network number".to_string()),
+                    attribute: ParamAttribute::Optional,
+                    ty: ParamType::Int,
+                    default: Some(serde_json::json!(0)),
+                    valid: None,
+                    ..Default::default()
+                })
+                .param(ParamSchema {
+                    name: "local_unit".to_string(),
+                    description: Some("Local unit number".to_string()),
+                    name_zh: Some("本地单元号".to_string()),
+                    name_en: Some("Local unit number".to_string()),
+                    description_zh: Some("本地FINS单元号".to_string()),
+                    description_en: Some("Local FINS unit number".to_string()),
+                    attribute: ParamAttribute::Optional,
+                    ty: ParamType::Int,
+                    default: Some(serde_json::json!(0)),
+                    valid: None,
+                    ..Default::default()
+                })
+                .param(ParamSchema {
+                    name: "local_node".to_string(),
+                    description: Some("Local node number".to_string()),
+                    name_zh: Some("本地节点号".to_string()),
+                    name_en: Some("Local node number".to_string()),
+                    description_zh: Some("本地FINS节点号".to_string()),
+                    description_en: Some("Local FINS node number".to_string()),
+                    attribute: ParamAttribute::Optional,
+                    ty: ParamType::Int,
+                    default: Some(serde_json::json!(0)),
+                    valid: None,
+                    ..Default::default()
+                })
+                .param(ParamSchema {
+                    name: "remote_net".to_string(),
+                    description: Some("Remote network number".to_string()),
+                    name_zh: Some("远程网络号".to_string()),
+                    name_en: Some("Remote network number".to_string()),
+                    description_zh: Some("远程FINS网络号".to_string()),
+                    description_en: Some("Remote FINS network number".to_string()),
+                    attribute: ParamAttribute::Optional,
+                    ty: ParamType::Int,
+                    default: Some(serde_json::json!(0)),
+                    valid: None,
+                    ..Default::default()
+                })
+                .param(ParamSchema {
+                    name: "remote_unit".to_string(),
+                    description: Some("Remote unit number".to_string()),
+                    name_zh: Some("远程单元号".to_string()),
+                    name_en: Some("Remote unit number".to_string()),
+                    description_zh: Some("远程FINS单元号".to_string()),
+                    description_en: Some("Remote FINS unit number".to_string()),
+                    attribute: ParamAttribute::Optional,
+                    ty: ParamType::Int,
+                    default: Some(serde_json::json!(0)),
+                    valid: None,
+                    ..Default::default()
+                })
+                .param(ParamSchema {
+                    name: "remote_node".to_string(),
+                    description: Some("Remote node number".to_string()),
+                    name_zh: Some("远程节点号".to_string()),
+                    name_en: Some("Remote node number".to_string()),
+                    description_zh: Some("远程FINS节点号".to_string()),
+                    description_en: Some("Remote FINS node number".to_string()),
+                    attribute: ParamAttribute::Optional,
+                    ty: ParamType::Int,
+                    default: Some(serde_json::json!(0)),
+                    valid: None,
+                    ..Default::default()
+                }),
+        )
+    }
 
-#[no_mangle]
-pub unsafe extern "C" fn south_uninit(
-    _handle: *mut c_void,
-    _node_id: *const c_char,
-) -> *mut c_char {
-    result_to_json(serde_json::json!({}))
-}
+    fn tag_schema(&self) -> Option<TagSchema> {
+        Some(TagSchema {
+            data_types: Some(vec![
+                "int16".to_string(),
+                "int32".to_string(),
+                "bool".to_string(),
+            ]),
+            address_format: Some("DM0, CIO10.5, W100, H100, AR100 (bit: DM0.5)".to_string()),
+            address_format_zh: Some("DM0, CIO10.5, W100, H100, AR100（位: DM0.5）".to_string()),
+            address_format_en: Some("DM0, CIO10.5, W100, H100, AR100 (bit: DM0.5)".to_string()),
+        })
+    }
 
-#[no_mangle]
-pub unsafe extern "C" fn south_start(
-    _handle: *mut c_void,
-    _config_json: *const c_char,
-) -> *mut c_char {
-    result_to_json(serde_json::json!({}))
-}
+    async fn open(&self, node_id: NodeId, config: PluginConfig) -> PluginResult<()> {
+        log::info(node_id, "open omron-fins plugin");
 
-#[no_mangle]
-pub unsafe extern "C" fn south_stop(_handle: *mut c_void, _node_id: *const c_char) -> *mut c_char {
-    result_to_json(serde_json::json!({}))
-}
+        let host = config
+            .get("host")
+            .and_then(|v| v.as_str())
+            .unwrap_or("192.168.1.10")
+            .to_string();
+        let port = config
+            .get("port")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(9600) as u16;
+        let local_net = config.get("local_net").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+        let local_unit = config.get("local_unit").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+        let local_node = config.get("local_node").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+        let remote_net = config.get("remote_net").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+        let remote_unit = config.get("remote_unit").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+        let remote_node = config.get("remote_node").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
 
-#[no_mangle]
-pub unsafe extern "C" fn south_poll_group(
-    _handle: *mut c_void,
-    _node_id: *const c_char,
-    group_json: *const c_char,
-) -> *mut c_char {
-    let mut guard = CONN.lock().unwrap();
-    let state = match guard.as_mut() {
-        Some(s) => s,
-        None => return result_to_json(serde_json::json!({"error": "not connected"})),
-    };
+        let grp = default_group();
+        let tags = default_tags(grp.id);
 
-    let group = if group_json.is_null() {
-        return result_to_json(serde_json::json!({"error": "null"}));
-    };
-    let group_str = unsafe { CStr::from_ptr(group_json) }.to_string_lossy();
-    let group: serde_json::Value = serde_json::from_str(&group_str).unwrap_or_default();
+        let mut state = OmronFinsState {
+            host: host.clone(),
+            port,
+            local_net,
+            local_unit,
+            local_node,
+            remote_net,
+            remote_unit,
+            remote_node,
+            socket: None,
+            connected: false,
+            sid: 0,
+        };
 
-    let mut values = serde_json::Map::new();
-    if let Some(tags) = group.get("tags").and_then(|t| t.as_array()) {
-        for tag in tags {
-            let tag_name = tag
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let address = tag.get("address").and_then(|v| v.as_str()).unwrap_or("");
+        // Try to connect on open
+        if let Err(e) = state.connect() {
+            log::warn(node_id, &format!("FINS TCP connect failed: {}", e));
+        }
 
-            // Try to parse address and do real FINS read
-            if let Some((area, offset, bit)) = parse_fins_address(address) {
-                let result = if bit > 0 || area == 0xB0 {
-                    // Bit read — read one word and extract bit
-                    match state.read_memory(area, offset, bit, 1) {
-                        Ok(words) if !words.is_empty() => {
-                            let bit_val = (words[0] & (1 << bit)) != 0;
-                            serde_json::json!({
-                                "value": bit_val,
-                                "type": "bit",
-                                "quality": "good",
-                                "timestamp": chrono::Utc::now().to_rfc3339()
-                            })
-                        }
-                        Ok(_) => serde_json::json!({
-                            "value": null,
-                            "type": "bit",
-                            "quality": "bad",
-                            "timestamp": chrono::Utc::now().to_rfc3339(),
-                            "error": "empty response"
-                        }),
-                        Err(e) => serde_json::json!({
-                            "value": null,
-                            "type": "bit",
-                            "quality": "bad",
-                            "timestamp": chrono::Utc::now().to_rfc3339(),
-                            "error": e.to_string()
-                        }),
-                    }
-                } else {
-                    // Word read — try to read 1 word
-                    match state.read_memory(area, offset, 0, 1) {
-                        Ok(words) if !words.is_empty() => {
-                            let tag_type = if area == 0x09 { "counter" } else { "word" };
-                            serde_json::json!({
-                                "value": words[0] as i32,
-                                "type": tag_type,
-                                "quality": "good",
-                                "timestamp": chrono::Utc::now().to_rfc3339()
-                            })
-                        }
-                        Ok(_) => serde_json::json!({
-                            "value": null,
-                            "type": "word",
-                            "quality": "bad",
-                            "timestamp": chrono::Utc::now().to_rfc3339(),
-                            "error": "empty response"
-                        }),
-                        Err(e) => serde_json::json!({
-                            "value": null,
-                            "type": "word",
-                            "quality": "bad",
-                            "timestamp": chrono::Utc::now().to_rfc3339(),
-                            "error": e.to_string()
-                        }),
-                    }
-                };
-                values.insert(tag_name.to_string(), result);
-            } else {
-                // Fallback stub for unknown address format
-                values.insert(
-                    tag_name.to_string(),
-                    serde_json::json!({
-                        "value": null,
-                        "type": "word",
-                        "quality": "bad",
-                        "timestamp": chrono::Utc::now().to_rfc3339(),
-                        "error": "unknown address format"
-                    }),
-                );
+        let mut map = self.state.write().await;
+        map.insert(node_id, state);
+
+        // Store default group and tags in node metadata via config
+        let mut full_config = config.clone();
+        full_config.insert("__groups".to_string(), serde_json::json!(vec![grp]));
+        full_config.insert("__tags".to_string(), serde_json::json!(tags));
+
+        log::info(node_id, &format!("omron-fins opened ({}:{})", host, port));
+        Ok(())
+    }
+
+    async fn close(&self, node_id: NodeId) -> PluginResult<()> {
+        log::info(node_id, "close omron-fins");
+        let mut map = self.state.write().await;
+        if let Some(mut state) = map.remove(&node_id) {
+            state.disconnect();
+        }
+        Ok(())
+    }
+
+    async fn init(&self, node_id: NodeId) -> PluginResult<()> {
+        log::info(node_id, "init omron-fins");
+        Ok(())
+    }
+
+    async fn uninit(&self, node_id: NodeId) -> PluginResult<()> {
+        log::info(node_id, "uninit omron-fins");
+        Ok(())
+    }
+
+    async fn start(&self, node_id: NodeId) -> PluginResult<()> {
+        log::info(node_id, "start omron-fins");
+        let map = self.state.read().await;
+        if let Some(state) = map.get(&node_id) {
+            if !state.connected {
+                return Err(PluginError::msg("PLC not connected"));
             }
         }
+        Ok(())
     }
 
-    result_to_json(serde_json::json!({ "values": values }))
-}
+    async fn stop(&self, node_id: NodeId) -> PluginResult<()> {
+        log::info(node_id, "stop omron-fins");
+        Ok(())
+    }
 
-#[no_mangle]
-pub unsafe extern "C" fn south_validate_tag(
-    _handle: *mut c_void,
-    _node_id: *const c_char,
-    tag_json: *const c_char,
-) -> *mut c_char {
-    let tag = if tag_json.is_null() {
-        return result_to_json(serde_json::json!({"valid": false}));
-    };
-    let tag_str = unsafe { CStr::from_ptr(tag_json) }.to_string_lossy();
-    // Valid: DM100, D100, W100, WR100, CIO0.00, H100, HR100, A0.00, AR0.00, LR0, TIM0, CNT0
-    let valid = !tag_str.is_empty()
-        && (tag_str.starts_with('D')
-            || tag_str.starts_with('W')
-            || tag_str.starts_with("CIO")
-            || tag_str.starts_with('H')
-            || tag_str.starts_with('A')
-            || tag_str.starts_with("LR")
-            || tag_str.starts_with("TIM")
-            || tag_str.starts_with("CNT"));
-    result_to_json(serde_json::json!({ "valid": valid }))
-}
+    async fn setting(&self, node_id: NodeId, config: PluginConfig) -> PluginResult<()> {
+        log::info(node_id, "setting omron-fins");
+        let mut map = self.state.write().await;
+        if let Some(state) = map.get_mut(&node_id) {
+            if let Some(host) = config.get("host").and_then(|v| v.as_str()) {
+                state.host = host.to_string();
+            }
+            if let Some(port) = config.get("port").and_then(|v| v.as_u64()) {
+                state.port = port as u16;
+            }
+            if let Some(v) = config.get("local_net").and_then(|v| v.as_u64()) {
+                state.local_net = v as u8;
+            }
+            if let Some(v) = config.get("local_unit").and_then(|v| v.as_u64()) {
+                state.local_unit = v as u8;
+            }
+            if let Some(v) = config.get("local_node").and_then(|v| v.as_u64()) {
+                state.local_node = v as u8;
+            }
+            if let Some(v) = config.get("remote_net").and_then(|v| v.as_u64()) {
+                state.remote_net = v as u8;
+            }
+            if let Some(v) = config.get("remote_unit").and_then(|v| v.as_u64()) {
+                state.remote_unit = v as u8;
+            }
+            if let Some(v) = config.get("remote_node").and_then(|v| v.as_u64()) {
+                state.remote_node = v as u8;
+            }
+        }
+        Ok(())
+    }
 
-#[no_mangle]
-pub unsafe extern "C" fn south_write_tags(
-    _handle: *mut c_void,
-    _node_id: *const c_char,
-    write_json: *const c_char,
-) -> *mut c_char {
-    let mut guard = CONN.lock().unwrap();
-    let state = match guard.as_mut() {
-        Some(s) => s,
-        None => return result_to_json(serde_json::json!({"written": 0, "error": "not connected"})),
-    };
+    async fn validate_tag(&self, node_id: NodeId, tag: &Tag) -> PluginResult<()> {
+        let _ = node_id;
+        if parse_address(&tag.address).is_none() {
+            return Err(PluginError::tag_invalid(&format!(
+                "invalid FINS address: {} (supported: DM, CIO, W, HR, AR)",
+                tag.address
+            )));
+        }
+        Ok(())
+    }
 
-    let write_str = if write_json.is_null() {
-        return result_to_json(serde_json::json!({"written": 0, "error": "null"}));
-    };
-    let write_str = unsafe { CStr::from_ptr(write_json) }.to_string_lossy();
-    let write_data: serde_json::Value = serde_json::from_str(&write_str).unwrap_or_default();
+    async fn poll_group(
+        &self,
+        node_id: NodeId,
+        _group_id: GroupId,
+        tags: &[Tag],
+    ) -> PluginResult<Vec<(TagId, DataValue)>> {
+        let mut map = self.state.write().await;
+        let state = map.get_mut(&node_id).ok_or_else(|| {
+            PluginError::msg("node not open")
+        })?;
 
-    let mut written = 0u32;
-    if let Some(tags) = write_data.get("tags").and_then(|t| t.as_array()) {
+        if !state.connected {
+            return Err(PluginError::msg("not connected"));
+        }
+
+        let mut results = Vec::with_capacity(tags.len());
+
         for tag in tags {
-            let address = tag.get("address").and_then(|v| v.as_str()).unwrap_or("");
-            let value = tag.get("value");
+            let (area, offset, bit) = match parse_address(&tag.address) {
+                Some(a) => a,
+                None => {
+                    results.push((tag.id, DataValue::String("invalid address".to_string())));
+                    continue;
+                }
+            };
 
-            if let Some((area, offset, bit)) = parse_fins_address(address) {
-                if let Some(val) = value {
-                    let word_val: i32 = val.as_i64().unwrap_or(0) as i32;
-                    let result = if bit > 0 {
-                        // Bit write: read-modify-write
-                        match state.read_memory(area, offset, 0, 1) {
-                            Ok(mut words) if !words.is_empty() => {
-                                let bit_val = val.as_bool().unwrap_or(false);
-                                if bit_val {
-                                    words[0] |= 1 << bit;
-                                } else {
-                                    words[0] &= !(1 << bit);
-                                }
-                                state.write_memory(area, offset, 0, &words)
-                            }
-                            Ok(_) => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "empty read")),
-                            Err(e) => Err(e),
-                        }
-                    } else {
-                        state.write_memory(area, offset, 0, &[word_val as u16])
-                    };
-
-                    if result.is_ok() {
-                        written += 1;
+            let value = if bit > 0 || area == AREA_CIO {
+                // Bit read
+                match state.read_memory(area, offset, bit, 1) {
+                    Ok(words) if !words.is_empty() => {
+                        let bit_val = (words[0] & (1u16 << bit)) != 0;
+                        DataValue::Bool(bit_val)
                     }
+                    Ok(_) => DataValue::String("read error".to_string()),
+                    Err(e) => DataValue::String(format!("err: {}", e)),
+                }
+            } else {
+                // Word read
+                match state.read_memory(area, offset, 0, 1) {
+                    Ok(words) if !words.is_empty() => DataValue::Int16(words[0] as i16),
+                    Ok(_) => DataValue::String("read error".to_string()),
+                    Err(e) => DataValue::String(format!("err: {}", e)),
+                }
+            };
+
+            results.push((tag.id, value));
+        }
+
+        Ok(results)
+    }
+
+    async fn write_tags(
+        &self,
+        node_id: NodeId,
+        values: &[(Tag, DataValue)],
+    ) -> PluginResult<()> {
+        let mut map = self.state.write().await;
+        let state = map.get_mut(&node_id).ok_or_else(|| {
+            PluginError::msg("node not open")
+        })?;
+
+        if !state.connected {
+            return Err(PluginError::msg("not connected"));
+        }
+
+        for (tag, value) in values {
+            let (area, offset, bit) = match parse_address(&tag.address) {
+                Some(a) => a,
+                None => continue,
+            };
+
+            if bit > 0 {
+                // Bit write: read-modify-write
+                match state.read_memory(area, offset, 0, 1) {
+                    Ok(mut words) if !words.is_empty() => {
+                        let bit_val = value.as_bool().unwrap_or(false);
+                        if bit_val {
+                            words[0] |= 1u16 << bit;
+                        } else {
+                            words[0] &= !(1u16 << bit);
+                        }
+                        state.write_memory(area, offset, 0, &words)?;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        log::warn(node_id, &format!("write bit read error: {}", e));
+                    }
+                }
+            } else {
+                // Word write
+                if let Some(val_i64) = value.as_i64() {
+                    state.write_memory(area, offset, 0, &[val_i64 as u16])?;
                 }
             }
         }
+
+        Ok(())
     }
 
-    result_to_json(serde_json::json!({ "written": written }))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn south_list_groups(
-    _handle: *mut c_void,
-    _node_id: *const c_char,
-) -> *mut c_char {
-    result_to_json(serde_json::json!({
-        "groups": [{ "id": "default", "name": "Default", "interval_ms": 1000 }]
-    }))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn south_list_tags(
-    _handle: *mut c_void,
-    _node_id: *const c_char,
-    _group_id: *const c_char,
-) -> *mut c_char {
-    result_to_json(serde_json::json!({
-        "tags": [
-            { "name": "dm100", "address": "D100", "type": "word", "access": "read" },
-            { "name": "wr100", "address": "W100", "type": "word", "access": "read" },
-            { "name": "cio_bit", "address": "CIO0.00", "type": "bit", "access": "read" },
-            { "name": "hr100", "address": "H100", "type": "word", "access": "read" }
-        ]
-    }))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn south_config_schema(_handle: *mut c_void) -> *mut c_char {
-    let schema = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "host": { "type": "string", "default": "192.168.1.10" },
-            "port": { "type": "number", "default": 9600 },
-            "local_net": { "type": "number", "default": 0 },
-            "local_node": { "type": "number", "default": 0 },
-            "remote_net": { "type": "number", "default": 0 },
-            "remote_node": { "type": "number", "default": 0 },
-            "remote_unit": { "type": "number", "default": 0 }
+    async fn list_groups(&self, node_id: NodeId) -> PluginResult<Vec<Group>> {
+        let map = self.state.read().await;
+        if map.contains_key(&node_id) {
+            Ok(vec![default_group()])
+        } else {
+            Err(PluginError::msg("node not open"))
         }
-    });
-    CString::new(schema.to_string()).unwrap().into_raw()
+    }
+
+    async fn list_tags(&self, node_id: NodeId, group_id: GroupId) -> PluginResult<Vec<Tag>> {
+        let map = self.state.read().await;
+        if map.contains_key(&node_id) {
+            Ok(default_tags(group_id))
+        } else {
+            Err(PluginError::msg("node not open"))
+        }
+    }
 }

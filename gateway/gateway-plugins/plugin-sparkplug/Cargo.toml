@@ -2,9 +2,15 @@
 name = "plugin-sparkplug"
 version = "0.1.0"
 edition = "2021"
+description = "北向插件：Sparkplug B over MQTT"
+
+[features]
+default = []
+ffi = []
 
 [dependencies]
 gateway-sdk = { path = "../../gateway-sdk" }
+async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

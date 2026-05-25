@@ -1,4 +1,4 @@
-use super::lib::*;
+use crate::*;
 use std::os::raw::{c_char, c_void};
 #[no_mangle]
 pub unsafe extern "C" fn gateway_north_plugin_create() -> *mut c_void {

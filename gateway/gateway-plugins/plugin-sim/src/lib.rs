@@ -68,8 +68,11 @@ impl SouthPlugin for SimPlugin {
             return Err(PluginError::tag_invalid("tag name required"));
         }
         if let Some(ref dt) = tag.data_type {
-            if !dt.eq_ignore_ascii_case("float64") {
-                return Err(PluginError::tag_invalid("sim only supports float64"));
+            let accepted = ["float64", "f64", "float", "float32", "f32"];
+            if !accepted.iter().any(|&a| dt.eq_ignore_ascii_case(a)) {
+                return Err(PluginError::tag_invalid(
+                    "sim only supports float64 (received: {dt})",
+                ));
             }
         }
         Ok(())

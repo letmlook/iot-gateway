@@ -3,9 +3,14 @@ name = "plugin-snmp"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+ffi = []  # 构建 .so/.dll 时启用
+
 [dependencies]
 gateway-sdk = { path = "../../gateway-sdk" }
-tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
@@ -14,5 +19,7 @@ chrono = "0.4"
 snmp = "0.2"
 
 [lib]
-path = "src/lib.rs"
-crate-type = ["cdylib"]
+crate-type = ["lib", "cdylib"]
+
+[profile.release]
+opt-level = 3

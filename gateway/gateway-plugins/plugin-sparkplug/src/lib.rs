@@ -1,35 +1,22 @@
 //! Sparkplug B north plugin — publishes GroupData to MQTT broker using Sparkplug B payload format.
-//!
-//! Sparkplug B uses a binary encoding for its payloads.
 
-use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_void};
-use std::sync::Mutex;
+#[cfg(feature = "ffi")]
+mod ffi;
+
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use gateway_sdk::schema::{ConfigSchema, ParamAttribute, ParamSchema, ParamType};
+use gateway_sdk::{GroupData, GroupSubscription, NodeId, NorthPlugin, PluginConfig, PluginMeta};
+use gateway_sdk::types::PluginKind;
+use gateway_sdk::PluginResult;
+use tokio::sync::RwLock;
 
-struct SparkplugState {
-    url: String,
-    topic_prefix: String,
-    edge_node_id: String,
-    device_id: String,
-    seq: u64,
-    mqtt_client: Option<rumqttc::AsyncClient>,
-    mqtt_eventloop: Option<rumqttc::EventLoop>,
-    connected: bool,
-}
-
-static STATE: once_cell::sync::Lazy<Mutex<Option<SparkplugState>>> =
-    once_cell::sync::Lazy::new(|| Mutex::new(None));
-
-fn result_to_json(v: serde_json::Value) -> *mut c_char {
-    CString::new(v.to_string()).unwrap().into_raw()
-}
-
-// ---------------------------------------------------------------------------
+// --------------------------------------------------------------------------
 // Sparkplug B binary payload encoding
-// ---------------------------------------------------------------------------
+// --------------------------------------------------------------------------
 
 fn encode_metric_value(value: &serde_json::Value) -> (u8, Vec<u8>) {
     match value {
@@ -69,9 +56,18 @@ fn encode_ddata_payload(ts_ms: i64, metrics: &[(String, serde_json::Value)]) -> 
     buf
 }
 
-// ---------------------------------------------------------------------------
-// MQTT helpers
-// ---------------------------------------------------------------------------
+// --------------------------------------------------------------------------
+// Per-node MQTT state (Send + Sync)
+// --------------------------------------------------------------------------
+
+struct NodeSparkplugState {
+    url: String,
+    topic_prefix: String,
+    edge_node_id: String,
+    device_id: String,
+    seq: u64,
+    connected: bool,
+}
 
 fn parse_mqtt_url(url: &str) -> (String, u16) {
     let inner = url
@@ -85,330 +81,324 @@ fn parse_mqtt_url(url: &str) -> (String, u16) {
     }
 }
 
-fn mqtt_connect(state: &mut SparkplugState) -> std::io::Result<()> {
-    use rumqttc::{AsyncClient, MqttOptions};
-
-    let (host, port) = parse_mqtt_url(&state.url);
-    let client_id = format!("spbc-{}-{}", state.edge_node_id, state.device_id);
-    let mut mqttoptions = MqttOptions::new(client_id, host, port);
-    mqttoptions.set_keep_alive(Duration::from_secs(60));
-
-    let (client, eventloop) = AsyncClient::new(mqttoptions, 256);
-    state.mqtt_client = Some(client);
-    state.mqtt_eventloop = Some(eventloop);
-    state.connected = false;
-    Ok(())
-}
-
-fn mqtt_poll(state: &mut SparkplugState) -> bool {
-    use rumqttc::{Event, Packet};
-
-    if let Some(ref mut el) = state.mqtt_eventloop {
-        match el.poll() {
-            Ok(Event::Incoming(Packet::ConnAck(ack))) => {
-                if ack.code == rumqttc::mqttbytes::v4::ConnectReturnCode::Success {
-                    state.connected = true;
-                }
-            }
-            Ok(Event::Incoming(Packet::Disconnect)) => {
-                state.connected = false;
-            }
-            Err(_) => {
-                state.connected = false;
-            }
-            _ => {}
-        }
-    }
-    state.connected
-}
-
-fn do_mqtt_publish_sync(
-    client: &rumqttc::AsyncClient,
-    topic: &str,
+/// Connect to MQTT and publish a Sparkplug DDATA payload synchronously.
+/// Creates a short-lived connection per call (connection is made, data sent, connection closed).
+fn mqtt_publish_ddata(
+    url: &str,
+    topic_prefix: &str,
+    edge_node_id: &str,
+    device_id: &str,
     payload: Vec<u8>,
-    qos: rumqttc::QoS,
-) -> std::io::Result<()> {
+) -> std::io::Result<(bool, u64)> {
+    use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
+
+    let (host, port) = parse_mqtt_url(url);
+    let client_id = format!("spbc-{}-{}", edge_node_id, device_id);
+    let mut mqttoptions = MqttOptions::new(client_id, host, port);
+    mqttoptions.set_keep_alive(Duration::from_secs(5));
+
+    let (client, mut eventloop) = AsyncClient::new(mqttoptions, 256);
+
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
-    let publish_future = client.publish(topic, qos, false, payload);
-    rt.block_on(publish_future)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
-}
-
-fn mqtt_publish(state: &mut SparkplugState, topic: &str, payload: Vec<u8>) -> std::io::Result<()> {
-    if state.mqtt_client.is_none() {
-        mqtt_connect(state)?;
-    }
-
-    let connected = mqtt_poll(state);
-    if !connected {
-        mqtt_connect(state)?;
-        let _ = mqtt_poll(state);
-    }
-
-    if let Some(ref client) = state.mqtt_client {
-        do_mqtt_publish_sync(client, topic, payload, rumqttc::QoS::AtLeastOnce)
-    } else {
-        Err(std::io::Error::new(std::io::ErrorKind::NotConnected, "no MQTT client"))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Plugin FFI exports
-// ---------------------------------------------------------------------------
-
-#[no_mangle]
-pub unsafe extern "C" fn north_create() -> *mut c_void {
-    Box::into_raw(Box::new(())) as *mut c_void
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn north_destroy(handle: *mut c_void) {
-    drop(unsafe { Box::from_raw(handle as *mut ()) });
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn north_meta() -> *mut c_char {
-    let meta = serde_json::json!({
-        "name": "sparkplug",
-        "kind": "north",
-        "description": "Sparkplug B — MQTT payload format for industrial IoT (Cirrus Link)",
-        "version": "0.1.0",
-        "name_zh": "Sparkplug B",
-        "name_en": "Sparkplug B",
-        "description_zh": "Sparkplug B MQTT payload格式，应用于工业物联网",
-        "description_en": "Sparkplug B payload format over MQTT — industrial IoT standard by Cirrus Link"
+    // Connect and wait for ConnAck
+    let connected = rt.block_on(async {
+        loop {
+            match eventloop.poll().await {
+                Ok(Event::Incoming(Packet::ConnAck(ack))) => {
+                    return ack.code == rumqttc::mqttbytes::v4::ConnectReturnCode::Success;
+                }
+                Ok(Event::Incoming(Packet::Disconnect)) => return false,
+                Err(_) => return false,
+                _ => {}
+            }
+        }
     });
-    CString::new(meta.to_string()).unwrap().into_raw()
-}
 
-#[no_mangle]
-pub unsafe extern "C" fn north_free_string(s: *mut c_char) {
-    if !s.is_null() {
-        drop(unsafe { CString::from_raw(s) });
+    if !connected {
+        return Ok((false, 0));
+    }
+
+    // Publish
+    let topic = format!("{}/{}/DDATA/{}", topic_prefix, edge_node_id, device_id);
+    let publish_result = rt.block_on(client.publish(&topic, QoS::AtLeastOnce, false, payload));
+
+    // Disconnect
+    let _ = rt.block_on(client.disconnect());
+
+    match publish_result {
+        Ok(()) => Ok((true, 1)),
+        Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn north_open(
-    _handle: *mut c_void,
-    config_json: *const c_char,
-) -> *mut c_char {
-    let config = if config_json.is_null() {
-        return result_to_json(serde_json::json!({"error": "null"}));
-    };
-    let config_str = unsafe { CStr::from_ptr(config_json) }.to_string_lossy();
-    let config: serde_json::Value = serde_json::from_str(&config_str).unwrap_or_default();
+// --------------------------------------------------------------------------
+// DataValue to serde_json::Value conversion
+// --------------------------------------------------------------------------
 
-    let url = config
-        .get("url")
-        .and_then(|v| v.as_str())
-        .unwrap_or("mqtt://localhost:1883")
-        .to_string();
-    let topic_prefix = config
-        .get("topic_prefix")
-        .and_then(|v| v.as_str())
-        .unwrap_or("spBv1.0")
-        .to_string();
-    let edge_node_id = config
-        .get("edge_node_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("gateway1")
-        .to_string();
-    let device_id = config
-        .get("device_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("device1")
-        .to_string();
+fn data_value_to_json(v: &gateway_sdk::types::DataValue) -> serde_json::Value {
+    use gateway_sdk::types::DataValue;
+    match v {
+        DataValue::Bool(b) => serde_json::json!(*b),
+        DataValue::Int8(v) => serde_json::json!(*v),
+        DataValue::Int16(v) => serde_json::json!(*v),
+        DataValue::Int32(v) => serde_json::json!(*v),
+        DataValue::Int64(v) => serde_json::json!(*v),
+        DataValue::UInt8(v) => serde_json::json!(*v),
+        DataValue::UInt16(v) => serde_json::json!(*v),
+        DataValue::UInt32(v) => serde_json::json!(*v),
+        DataValue::UInt64(v) => serde_json::json!(*v),
+        DataValue::Float32(v) => serde_json::json!(*v),
+        DataValue::Float64(v) => serde_json::json!(*v),
+        DataValue::String(s) => serde_json::json!(s),
+        DataValue::Bytes(b) => serde_json::json!(b),
+    }
+}
 
-    let mut state = SparkplugState {
-        url: url.clone(),
-        topic_prefix,
-        edge_node_id,
-        device_id,
-        seq: 0,
-        mqtt_client: None,
-        mqtt_eventloop: None,
-        connected: false,
-    };
+// --------------------------------------------------------------------------
+// SparkplugPlugin
+// --------------------------------------------------------------------------
 
-    let connect_result = mqtt_connect(&mut state);
-    let mut guard = STATE.lock().unwrap();
-    *guard = Some(state);
+pub struct SparkplugPlugin {
+    state: Arc<RwLock<SparkplugState>>,
+}
 
-    match connect_result {
-        Ok(()) => {
-            let mut g = guard.as_mut().unwrap();
-            let connected = mqtt_poll(&mut g);
-            result_to_json(serde_json::json!({
-                "status": if connected { "connected" } else { "connecting" },
-                "url": url,
-                "note": "Sparkplug B MQTT initialized"
-            }))
+struct SparkplugState {
+    open_nodes: std::collections::HashSet<NodeId>,
+    subscriptions: HashMap<NodeId, Vec<GroupSubscription>>,
+    nodes: HashMap<NodeId, NodeSparkplugState>,
+}
+
+impl Default for SparkplugPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SparkplugPlugin {
+    pub fn new() -> Self {
+        Self {
+            state: Arc::new(RwLock::new(SparkplugState {
+                open_nodes: std::collections::HashSet::new(),
+                subscriptions: HashMap::new(),
+                nodes: HashMap::new(),
+            })),
         }
-        Err(e) => result_to_json(serde_json::json!({
-            "status": "initialized (connection deferred)",
-            "url": url,
-            "error": e.to_string()
-        })),
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn north_close(_handle: *mut c_void, _node_id: *const c_char) -> *mut c_char {
-    let mut guard = STATE.lock().unwrap();
-    if let Some(ref mut state) = *guard {
-        if let Some(ref client) = state.mqtt_client {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap_or_else(|_| tokio::runtime::Builder::new_current_thread().build().unwrap());
-            let _ = rt.block_on(client.disconnect());
+#[async_trait::async_trait]
+impl NorthPlugin for SparkplugPlugin {
+    fn meta(&self) -> PluginMeta {
+        PluginMeta {
+            name: "sparkplug",
+            kind: PluginKind::North,
+            description: Some("Sparkplug B — MQTT payload format for industrial IoT (Cirrus Link)"),
+            version: "0.1.0",
+            name_zh: Some("Sparkplug B"),
+            name_en: Some("Sparkplug B"),
+            description_zh: Some("Sparkplug B MQTT payload格式，应用于工业物联网"),
+            description_en: Some("Sparkplug B payload format over MQTT — industrial IoT standard by Cirrus Link"),
         }
-        state.mqtt_client = None;
-        state.mqtt_eventloop = None;
-        state.connected = false;
     }
-    *guard = None;
-    result_to_json(serde_json::json!({ "status": "disconnected" }))
-}
 
-#[no_mangle]
-pub unsafe extern "C" fn north_init(
-    _handle: *mut c_void,
-    _config_json: *const c_char,
-) -> *mut c_char {
-    result_to_json(serde_json::json!({}))
-}
+    fn config_schema(&self) -> Option<ConfigSchema> {
+        Some(
+            ConfigSchema::new()
+                .param(ParamSchema {
+                    name: "url".to_string(),
+                    name_zh: Some("服务器地址".to_string()),
+                    name_en: Some("Broker URL".to_string()),
+                    description: Some("MQTT broker URL, e.g. mqtt://localhost:1883".to_string()),
+                    description_zh: Some("MQTT Broker URL，例如 mqtt://localhost:1883".to_string()),
+                    description_en: Some("MQTT broker URL, e.g. mqtt://localhost:1883".to_string()),
+                    attribute: ParamAttribute::Optional,
+                    ty: ParamType::String,
+                    default: Some(serde_json::json!("mqtt://localhost:1883")),
+                    valid: None,
+                    options: None,
+                    depends_on: None,
+                    depends_value: None,
+                    depends_values: None,
+                })
+                .param(ParamSchema {
+                    name: "topic_prefix".to_string(),
+                    name_zh: Some("主题前缀".to_string()),
+                    name_en: Some("Topic Prefix".to_string()),
+                    description: Some("Sparkplug topic prefix".to_string()),
+                    description_zh: Some("Sparkplug 主题前缀".to_string()),
+                    description_en: Some("Sparkplug topic prefix".to_string()),
+                    attribute: ParamAttribute::Optional,
+                    ty: ParamType::String,
+                    default: Some(serde_json::json!("spBv1.0")),
+                    valid: None,
+                    options: None,
+                    depends_on: None,
+                    depends_value: None,
+                    depends_values: None,
+                })
+                .param(ParamSchema {
+                    name: "edge_node_id".to_string(),
+                    name_zh: Some("边缘节点ID".to_string()),
+                    name_en: Some("Edge Node ID".to_string()),
+                    description: Some("Sparkplug edge node identifier".to_string()),
+                    description_zh: Some("Sparkplug 边缘节点标识符".to_string()),
+                    description_en: Some("Sparkplug edge node identifier".to_string()),
+                    attribute: ParamAttribute::Optional,
+                    ty: ParamType::String,
+                    default: Some(serde_json::json!("gateway1")),
+                    valid: None,
+                    options: None,
+                    depends_on: None,
+                    depends_value: None,
+                    depends_values: None,
+                })
+                .param(ParamSchema {
+                    name: "device_id".to_string(),
+                    name_zh: Some("设备ID".to_string()),
+                    name_en: Some("Device ID".to_string()),
+                    description: Some("Sparkplug device identifier".to_string()),
+                    description_zh: Some("Sparkplug 设备标识符".to_string()),
+                    description_en: Some("Sparkplug device identifier".to_string()),
+                    attribute: ParamAttribute::Optional,
+                    ty: ParamType::String,
+                    default: Some(serde_json::json!("device1")),
+                    valid: None,
+                    options: None,
+                    depends_on: None,
+                    depends_value: None,
+                    depends_values: None,
+                }),
+        )
+    }
 
-#[no_mangle]
-pub unsafe extern "C" fn north_uninit(
-    _handle: *mut c_void,
-    _node_id: *const c_char,
-) -> *mut c_char {
-    result_to_json(serde_json::json!({}))
-}
+    async fn open(&self, node_id: NodeId, config: PluginConfig) -> PluginResult<()> {
+        let url = config
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("mqtt://localhost:1883")
+            .to_string();
+        let topic_prefix = config
+            .get("topic_prefix")
+            .and_then(|v| v.as_str())
+            .unwrap_or("spBv1.0")
+            .to_string();
+        let edge_node_id = config
+            .get("edge_node_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("gateway1")
+            .to_string();
+        let device_id = config
+            .get("device_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("device1")
+            .to_string();
 
-#[no_mangle]
-pub unsafe extern "C" fn north_start(
-    _handle: *mut c_void,
-    _config_json: *const c_char,
-) -> *mut c_char {
-    result_to_json(serde_json::json!({}))
-}
+        let node_state = NodeSparkplugState {
+            url,
+            topic_prefix,
+            edge_node_id,
+            device_id,
+            seq: 0,
+            connected: false,
+        };
 
-#[no_mangle]
-pub unsafe extern "C" fn north_stop(_handle: *mut c_void, _node_id: *const c_char) -> *mut c_char {
-    result_to_json(serde_json::json!({}))
-}
+        let mut state = self.state.write().await;
+        state.open_nodes.insert(node_id);
+        state.nodes.insert(node_id, node_state);
 
-#[no_mangle]
-pub unsafe extern "C" fn north_on_group_data(
-    _handle: *mut c_void,
-    _node_id: *const c_char,
-    group_json: *const c_char,
-) -> *mut c_char {
-    let mut guard = STATE.lock().unwrap();
-    let state = match guard.as_mut() {
-        Some(s) => s,
-        None => return result_to_json(serde_json::json!({"error": "not connected"})),
-    };
+        Ok(())
+    }
 
-    let data = if group_json.is_null() {
-        return result_to_json(serde_json::json!({"error": "null"}));
-    };
-    let data_str = unsafe { CStr::from_ptr(group_json) }.to_string_lossy();
-    let data: serde_json::Value = serde_json::from_str(&data_str).unwrap_or_default();
+    async fn close(&self, node_id: NodeId) -> PluginResult<()> {
+        let mut state = self.state.write().await;
+        state.open_nodes.remove(&node_id);
+        state.subscriptions.remove(&node_id);
+        state.nodes.remove(&node_id);
+        Ok(())
+    }
 
-    let timestamp = Utc::now().timestamp_millis();
-    state.seq = state.seq.wrapping_add(1);
+    async fn start(&self, _node_id: NodeId) -> PluginResult<()> {
+        Ok(())
+    }
 
-    let topic = format!(
-        "{}/{}/DDATA/{}",
-        state.topic_prefix, state.edge_node_id, state.device_id
-    );
+    async fn stop(&self, _node_id: NodeId) -> PluginResult<()> {
+        Ok(())
+    }
 
-    let mut metrics: Vec<(String, serde_json::Value)> = Vec::new();
-    if let Some(obj) = data.as_object() {
-        if let Some(tags) = obj.get("tags").and_then(|t| t.as_array()) {
-            for tag in tags {
-                if let (Some(name), Some(value)) = (
-                    tag.get("name").and_then(|v| v.as_str()),
-                    tag.get("value"),
-                ) {
-                    metrics.push((name.to_string(), value.clone()));
+    async fn setting(&self, node_id: NodeId, config: PluginConfig) -> PluginResult<()> {
+        self.close(node_id).await?;
+        self.open(node_id, config).await
+    }
+
+    async fn set_subscriptions(
+        &self,
+        node_id: NodeId,
+        subscriptions: &[GroupSubscription],
+    ) -> PluginResult<()> {
+        let mut state = self.state.write().await;
+        state.subscriptions.insert(node_id, subscriptions.to_vec());
+        Ok(())
+    }
+
+    async fn connection_status(&self, node_id: NodeId) -> Option<serde_json::Value> {
+        let state = self.state.read().await;
+        let node_state = state.nodes.get(&node_id)?;
+        Some(serde_json::json!({
+            "status": if node_state.connected { "connected" } else { "disconnected" },
+            "edge_node_id": node_state.edge_node_id,
+            "device_id": node_state.device_id,
+            "seq": node_state.seq,
+        }))
+    }
+
+    async fn on_group_data(&self, node_id: NodeId, data: Arc<GroupData>) -> PluginResult<()> {
+        let timestamp = Utc::now().timestamp_millis();
+
+        let (url, topic_prefix, edge_node_id, device_id) = {
+            let mut state = self.state.write().await;
+            let node_state = match state.nodes.get_mut(&node_id) {
+                Some(s) => s,
+                None => return Ok(()),
+            };
+            node_state.seq = node_state.seq.wrapping_add(1);
+            (
+                node_state.url.clone(),
+                node_state.topic_prefix.clone(),
+                node_state.edge_node_id.clone(),
+                node_state.device_id.clone(),
+            )
+        };
+
+        // Build metrics from GroupData
+        let mut metrics: Vec<(String, serde_json::Value)> = Vec::new();
+        if let Some(ref tag_names) = data.tag_names {
+            for (tag_id, value) in &data.values {
+                if let Some(name) = tag_names.get(tag_id) {
+                    metrics.push((name.clone(), data_value_to_json(value)));
                 }
             }
         } else {
-            for (k, v) in obj {
-                if k == "timestamp" || k == "node_id" || k == "group_id" {
-                    continue;
-                }
-                metrics.push((k.clone(), v.clone()));
+            for (tag_id, value) in &data.values {
+                metrics.push((format!("{:?}", tag_id), data_value_to_json(value)));
             }
         }
-    }
 
-    let payload = encode_ddata_payload(timestamp, &metrics);
-    let publish_result = mqtt_publish(state, &topic, payload);
+        let payload = encode_ddata_payload(timestamp, &metrics);
 
-    match publish_result {
-        Ok(()) => result_to_json(serde_json::json!({
-            "sent": metrics.len(),
-            "topic": topic,
-            "seq": state.seq,
-            "status": "published"
-        })),
-        Err(e) => result_to_json(serde_json::json!({
-            "sent": 0,
-            "topic": topic,
-            "seq": state.seq,
-            "error": e.to_string(),
-            "status": "publish_failed"
-        })),
-    }
-}
+        // Publish synchronously (creates short-lived connection)
+        let _topic = format!("{}/{}/DDATA/{}", topic_prefix, edge_node_id, device_id);
+        let (connected, _) = mqtt_publish_ddata(&url, &topic_prefix, &edge_node_id, &device_id, payload).unwrap_or((false, 0));
 
-#[no_mangle]
-pub unsafe extern "C" fn north_set_subscriptions(
-    _handle: *mut c_void,
-    _node_id: *const c_char,
-    _sub_json: *const c_char,
-) -> *mut c_char {
-    result_to_json(serde_json::json!({}))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn north_config_schema(_handle: *mut c_void) -> *mut c_char {
-    let schema = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "url": { "type": "string", "default": "mqtt://localhost:1883" },
-            "topic_prefix": { "type": "string", "default": "spBv1.0" },
-            "edge_node_id": { "type": "string", "default": "gateway1" },
-            "device_id": { "type": "string", "default": "device1" }
+        // Update connection status
+        let mut state = self.state.write().await;
+        if let Some(node_state) = state.nodes.get_mut(&node_id) {
+            node_state.connected = connected;
         }
-    });
-    CString::new(schema.to_string()).unwrap().into_raw()
-}
 
-#[no_mangle]
-pub unsafe extern "C" fn north_connection_status(
-    _handle: *mut c_void,
-    _node_id: *const c_char,
-) -> *mut c_char {
-    let guard = STATE.lock().unwrap();
-    let status = match guard.as_ref() {
-        Some(s) => serde_json::json!({
-            "status": if s.connected { "connected" } else { "disconnected" },
-            "edge_node_id": s.edge_node_id,
-            "device_id": s.device_id,
-            "seq": s.seq
-        }),
-        None => serde_json::json!({ "status": "disconnected" }),
-    };
-    result_to_json(status)
+        Ok(())
+    }
 }

@@ -1,87 +1,199 @@
-use super::lib::*;
+//! .so 插件 C ABI 导出，供网关 libloading 动态加载。
+
+use gateway_sdk::ffi::{alloc_c_string, meta_to_ffi, FfiResult};
+use gateway_sdk::{GroupData, GroupSubscription, NodeId, NorthPlugin, PluginConfig};
+use std::ffi::CStr;
 use std::os::raw::{c_char, c_void};
-#[no_mangle]
-pub unsafe extern "C" fn gateway_north_plugin_create() -> *mut c_void {
-    north_create()
+use std::sync::Arc;
+
+fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build runtime")
+        .block_on(f)
 }
+
+fn result_json(r: gateway_sdk::PluginResult<()>) -> *mut c_char {
+    match r {
+        Ok(()) => alloc_c_string(&serde_json::to_string(&FfiResult::success()).unwrap_or_default()),
+        Err(e) => alloc_c_string(&serde_json::to_string(&FfiResult::failure(e.to_string())).unwrap_or_default()),
+    }
+}
+
+fn ptr_from_cstr(ptr: *const c_char) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    unsafe { CStr::from_ptr(ptr).to_str().ok().map(|s| s.to_string()) }
+}
+
+#[no_mangle]
+pub extern "C" fn gateway_north_plugin_create() -> *mut c_void {
+    Box::into_raw(Box::new(super::SparkplugPlugin::new())) as *mut c_void
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn gateway_north_plugin_destroy(handle: *mut c_void) {
-    north_destroy(handle)
+    if handle.is_null() {
+        return;
+    }
+    let _ = Box::from_raw(handle as *mut super::SparkplugPlugin);
 }
+
 #[no_mangle]
-pub unsafe extern "C" fn gateway_north_plugin_meta() -> *mut c_char {
-    north_meta()
+pub unsafe extern "C" fn gateway_north_plugin_meta(handle: *mut c_void) -> *mut c_char {
+    if handle.is_null() {
+        return std::ptr::null_mut();
+    }
+    let p = &*(handle as *const super::SparkplugPlugin);
+    let m = meta_to_ffi(&p.meta());
+    alloc_c_string(&serde_json::to_string(&m).unwrap_or_default())
 }
-#[no_mangle]
-pub unsafe extern "C" fn gateway_north_plugin_free_string(s: *mut c_char) {
-    north_free_string(s)
+
+unsafe fn plugin(handle: *mut c_void) -> &'static mut super::SparkplugPlugin {
+    &mut *(handle as *mut super::SparkplugPlugin)
 }
+
 #[no_mangle]
 pub unsafe extern "C" fn gateway_north_plugin_open(
     handle: *mut c_void,
-    cfg: *const c_char,
+    node_id_json: *const c_char,
+    config_json: *const c_char,
 ) -> *mut c_char {
-    north_open(handle, cfg)
+    let n = ptr_from_cstr(node_id_json).unwrap_or_default();
+    let c = ptr_from_cstr(config_json).unwrap_or_default();
+    let node_id: NodeId = serde_json::from_str(&n).unwrap_or_default();
+    let config: PluginConfig = serde_json::from_str(&c).unwrap_or_default();
+    let p = plugin(handle);
+    result_json(block_on(p.open(node_id, config)))
 }
+
 #[no_mangle]
 pub unsafe extern "C" fn gateway_north_plugin_close(
     handle: *mut c_void,
-    nid: *const c_char,
+    node_id_json: *const c_char,
 ) -> *mut c_char {
-    north_close(handle, nid)
+    let n = ptr_from_cstr(node_id_json).unwrap_or_default();
+    let node_id: NodeId = serde_json::from_str(&n).unwrap_or_default();
+    let p = plugin(handle);
+    result_json(block_on(p.close(node_id)))
 }
+
 #[no_mangle]
 pub unsafe extern "C" fn gateway_north_plugin_init(
     handle: *mut c_void,
-    cfg: *const c_char,
+    node_id_json: *const c_char,
 ) -> *mut c_char {
-    north_init(handle, cfg)
+    let n = ptr_from_cstr(node_id_json).unwrap_or_default();
+    let node_id: NodeId = serde_json::from_str(&n).unwrap_or_default();
+    let p = plugin(handle);
+    result_json(block_on(p.init(node_id)))
 }
+
 #[no_mangle]
 pub unsafe extern "C" fn gateway_north_plugin_uninit(
     handle: *mut c_void,
-    nid: *const c_char,
+    node_id_json: *const c_char,
 ) -> *mut c_char {
-    north_uninit(handle, nid)
+    let n = ptr_from_cstr(node_id_json).unwrap_or_default();
+    let node_id: NodeId = serde_json::from_str(&n).unwrap_or_default();
+    let p = plugin(handle);
+    result_json(block_on(p.uninit(node_id)))
 }
+
 #[no_mangle]
 pub unsafe extern "C" fn gateway_north_plugin_start(
     handle: *mut c_void,
-    cfg: *const c_char,
+    node_id_json: *const c_char,
 ) -> *mut c_char {
-    north_start(handle, cfg)
+    let n = ptr_from_cstr(node_id_json).unwrap_or_default();
+    let node_id: NodeId = serde_json::from_str(&n).unwrap_or_default();
+    let p = plugin(handle);
+    result_json(block_on(p.start(node_id)))
 }
+
 #[no_mangle]
 pub unsafe extern "C" fn gateway_north_plugin_stop(
     handle: *mut c_void,
-    nid: *const c_char,
+    node_id_json: *const c_char,
 ) -> *mut c_char {
-    north_stop(handle, nid)
+    let n = ptr_from_cstr(node_id_json).unwrap_or_default();
+    let node_id: NodeId = serde_json::from_str(&n).unwrap_or_default();
+    let p = plugin(handle);
+    result_json(block_on(p.stop(node_id)))
 }
+
 #[no_mangle]
-pub unsafe extern "C" fn gateway_north_plugin_on_group_data(
+pub unsafe extern "C" fn gateway_north_plugin_setting(
     handle: *mut c_void,
-    nid: *const c_char,
-    data: *const c_char,
+    node_id_json: *const c_char,
+    config_json: *const c_char,
 ) -> *mut c_char {
-    north_on_group_data(handle, nid, data)
+    let n = ptr_from_cstr(node_id_json).unwrap_or_default();
+    let c = ptr_from_cstr(config_json).unwrap_or_default();
+    let node_id: NodeId = serde_json::from_str(&n).unwrap_or_default();
+    let config: PluginConfig = serde_json::from_str(&c).unwrap_or_default();
+    let p = plugin(handle);
+    result_json(block_on(p.setting(node_id, config)))
 }
+
 #[no_mangle]
 pub unsafe extern "C" fn gateway_north_plugin_set_subscriptions(
     handle: *mut c_void,
-    nid: *const c_char,
-    sub: *const c_char,
+    node_id_json: *const c_char,
+    subscriptions_json: *const c_char,
 ) -> *mut c_char {
-    north_set_subscriptions(handle, nid, sub)
+    let n = ptr_from_cstr(node_id_json).unwrap_or_default();
+    let s = ptr_from_cstr(subscriptions_json).unwrap_or_default();
+    let node_id: NodeId = serde_json::from_str(&n).unwrap_or_default();
+    let subs: Vec<GroupSubscription> = serde_json::from_str(&s).unwrap_or_default();
+    let p = plugin(handle);
+    result_json(block_on(p.set_subscriptions(node_id, &subs)))
 }
+
 #[no_mangle]
-pub unsafe extern "C" fn gateway_north_plugin_config_schema(handle: *mut c_void) -> *mut c_char {
-    north_config_schema(handle)
+pub unsafe extern "C" fn gateway_north_plugin_on_group_data(
+    handle: *mut c_void,
+    node_id_json: *const c_char,
+    group_data_json: *const c_char,
+) -> *mut c_char {
+    let n = ptr_from_cstr(node_id_json).unwrap_or_default();
+    let d = ptr_from_cstr(group_data_json).unwrap_or_default();
+    let node_id: NodeId = serde_json::from_str(&n).unwrap_or_default();
+    let data: GroupData = match serde_json::from_str(&d) {
+        Ok(x) => x,
+        Err(_) => return alloc_c_string(&serde_json::to_string(&FfiResult::failure("invalid group_data json")).unwrap_or_default()),
+    };
+    let p = plugin(handle);
+    result_json(block_on(p.on_group_data(node_id, Arc::new(data))))
 }
+
 #[no_mangle]
 pub unsafe extern "C" fn gateway_north_plugin_connection_status(
     handle: *mut c_void,
-    nid: *const c_char,
+    node_id_json: *const c_char,
 ) -> *mut c_char {
-    north_connection_status(handle, nid)
+    if handle.is_null() {
+        return std::ptr::null_mut();
+    }
+    let n = ptr_from_cstr(node_id_json).unwrap_or_default();
+    let node_id: NodeId = serde_json::from_str(&n).unwrap_or_default();
+    let p = plugin(handle);
+    match block_on(p.connection_status(node_id)) {
+        Some(v) => alloc_c_string(&serde_json::to_string(&v).unwrap_or_default()),
+        None => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gateway_north_plugin_config_schema(handle: *mut c_void) -> *mut c_char {
+    if handle.is_null() {
+        return std::ptr::null_mut();
+    }
+    let p = &*(handle as *const super::SparkplugPlugin);
+    match p.config_schema() {
+        Some(s) => alloc_c_string(&serde_json::to_string(&s).unwrap_or_default()),
+        None => std::ptr::null_mut(),
+    }
 }

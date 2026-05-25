@@ -2,18 +2,26 @@
 name = "plugin-dlt645"
 version = "0.1.0"
 edition = "2021"
+description = "DL/T645-2007 电表协议插件：通过 RS-485 串口读取智能电表数据"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+default = ["dlt645-client"]
+dlt645-client = ["dep:tokio-serial"]
+ffi = []
 
 [dependencies]
 gateway-sdk = { path = "../../gateway-sdk" }
 async-trait = "0.1"
-tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "io-util"] }
+tracing = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+tokio-serial = { version = "5", optional = true }
 
-[features]
-ffi = []
-
-[lib]
-path = "src/lib.rs"
-crate-type = ["cdylib"]
+[profile.release]
+opt-level = 3
+lto = true

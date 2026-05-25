@@ -11,6 +11,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::Router;
+use axum::http::StatusCode;
 
 use crate::state::AppState;
 use crate::flow;
@@ -71,6 +72,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/metrics", get(handlers::metrics))
         .route("/data-flow", get(handlers::data_flow))
         .route("/version", get(handlers::version))
+        .route("/dashboard/stats", get(handlers::dashboard_stats))
         .route("/license/machine-id", get(handlers::license_machine_id))
         .route("/license/status", get(handlers::license_status))
         .route("/license/upload", post(handlers::upload_license))
@@ -134,9 +136,16 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/admin/sqlite-backup", post(crate::backup::sqlite_backup))
         .route("/admin/sqlite-backup", get(crate::backup::sqlite_download_latest))
         .route("/admin/sqlite-restore", post(crate::backup::sqlite_restore))
+        // Catch-all: return 404 for any unmatched API route
+        .route("/:path", axum::routing::any(api_not_found))
         .with_state(state.clone())
         .route_layer(middleware::from_fn_with_state(state, auth_middleware))
         .route_layer(middleware::from_fn(request_id_middleware))
+}
+
+/// Catch-all for unmatched API routes → 404 JSON.
+pub async fn api_not_found() -> impl IntoResponse {
+    (StatusCode::NOT_FOUND, r#"{"code":"not_found","message":"endpoint not found"}"#)
 }
 
 /// 前端静态资源或 SPA fallback。使用 config::STATIC_DIR，未设置则 `web/dist`。

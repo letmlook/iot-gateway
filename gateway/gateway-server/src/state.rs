@@ -27,6 +27,8 @@ pub struct AppState {
     pub flow_runtimes: Arc<tokio::sync::RwLock<std::collections::HashMap<Uuid, FlowRuntime>>>,
     /// WebSocket hub for real-time flow monitoring
     pub ws_hub: WsHub,
+    /// Server start time (UTC) for uptime calculation
+    pub started_at: chrono::DateTime<chrono::Utc>,
     _loader: Option<Arc<PluginLoader>>,
 }
 
@@ -41,6 +43,7 @@ impl Clone for AppState {
             flow_store: self.flow_store.clone(),
             flow_runtimes: self.flow_runtimes.clone(),
             ws_hub: self.ws_hub.clone(),
+            started_at: self.started_at,
             _loader: self._loader.clone(),
         }
     }
@@ -67,6 +70,7 @@ impl AppState {
             flow_store,
             flow_runtimes,
             ws_hub,
+            started_at: chrono::Utc::now(),
             _loader: loader.map(Arc::new),
         }
     }

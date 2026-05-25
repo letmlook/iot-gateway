@@ -26,6 +26,7 @@ pub struct FlowSnapshot {
 #[derive(Clone)]
 pub struct FlowStore {
     conn: Arc<Mutex<Connection>>,
+    pub db_path: std::path::PathBuf,
 }
 
 impl FlowStore {
@@ -33,6 +34,7 @@ impl FlowStore {
         let conn = Connection::open(db_path)?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
+            db_path: db_path.to_path_buf(),
         };
         store.init()?;
         Ok(store)
@@ -150,6 +152,15 @@ impl FlowStore {
             flows.push(self.row_to_flow_sync(&conn, row)?);
         }
         Ok(flows)
+    }
+
+    pub async fn flow_count(&self) -> usize {
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "SELECT COUNT(*) FROM flows",
+            [],
+            |row| row.get::<_, i64>(0),
+        ).map(|c| c as usize).unwrap_or(0)
     }
 
     pub async fn update_flow(&self, flow: &Flow) -> Result<(), FlowStoreError> {

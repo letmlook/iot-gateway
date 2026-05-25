@@ -24,13 +24,52 @@ pub async fn list_flows(State(state): State<AppState>) -> Result<Json<serde_json
     Ok(Json(serde_json::json!({ "flows": flows })))
 }
 
+/// Flexible flow creation: accepts either a full Flow or a minimal { name, nodes?, edges? }.
+/// If `id` is absent, auto-generates one (UUID) plus timestamps/status/version.
+#[derive(serde::Deserialize)]
+struct FlowCreate {
+    id: Option<uuid::Uuid>,
+    name: String,
+    #[serde(default)]
+    nodes: Vec<serde_json::Value>,
+    #[serde(default)]
+    edges: Vec<serde_json::Value>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
 pub async fn create_flow(
     State(state): State<AppState>,
-    Json(flow): Json<Flow>,
+    Json(raw): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // Validate flow
-    flow.validate().map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let flow = if raw.get("id").is_some() {
+        // Full Flow submitted — deserialize and use as-is
+        let f: Flow = serde_json::from_value(raw)
+            .map_err(|e| ApiError::bad_request(format!("invalid flow: {e}")))?;
+        f
+    } else {
+        // Minimal name-only (or name+nodes+edges) — auto-generate id/timestamps
+        let create: FlowCreate = serde_json::from_value(raw)
+            .map_err(|e| ApiError::bad_request(format!("invalid flow: {e}")))?;
+        if create.name.trim().is_empty() {
+            return Err(ApiError::bad_request("flow name cannot be empty"));
+        }
+        let now = chrono::Utc::now();
+        Flow {
+            id: Uuid::new_v4(),
+            name: create.name,
+            description: create.description,
+            status: gateway_flow::FlowStatus::Draft,
+            created_at: now,
+            updated_at: now,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            version: 1,
+        }
+    };
 
+    // Note: do NOT call flow.validate() here — a name-only Draft flow has no nodes yet.
+    // Validation (DAG, port types, node counts) is done at deploy time only.
     state.flow_store.create_flow(&flow).await?;
     Ok(Json(serde_json::json!({ "flow": flow })))
 }
