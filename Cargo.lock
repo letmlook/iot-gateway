@@ -767,6 +767,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "argon2",
+ "async-trait",
  "axum",
  "base64 0.21.7",
  "chrono",
@@ -780,6 +781,7 @@ dependencies = [
  "machineid-rs",
  "mime_guess",
  "pkcs8",
+ "plugin-http",
  "plugin-modbus-rtu",
  "plugin-modbus-tcp",
  "plugin-mqtt",
@@ -1872,11 +1874,13 @@ dependencies = [
 name = "plugin-http"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "gateway-sdk",
  "once_cell",
  "reqwest",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
 ]
 

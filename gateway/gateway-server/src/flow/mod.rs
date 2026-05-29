@@ -1,6 +1,8 @@
 //! Flow persistence and management.
 
-pub mod store;
 pub mod handlers;
+pub mod processor;
+pub mod store;
 
-pub use store::{FlowStore, FlowSnapshot};
+pub use processor::FlowGroupDataProcessor;
+pub use store::{FlowSnapshot, FlowStore};

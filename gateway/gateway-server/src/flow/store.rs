@@ -3,7 +3,7 @@
 //! Uses `Arc<tokio::sync::Mutex<Connection>>` to allow thread-safe access from async handlers.
 
 use chrono::{DateTime, Utc};
-use gateway_flow::{Flow, FlowEdge, FlowNode, FlowStatus};
+use gateway_flow::{Flow, FlowBinding, FlowEdge, FlowFailurePolicy, FlowNode, FlowStatus};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -82,9 +82,21 @@ impl FlowStore {
                 target_port TEXT NOT NULL,
                 FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE
             );
-            
+
+            CREATE TABLE IF NOT EXISTS flow_bindings (
+                flow_id TEXT NOT NULL,
+                south_node_id TEXT NOT NULL,
+                group_id TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                failure_policy TEXT NOT NULL DEFAULT 'fail_open',
+                PRIMARY KEY (flow_id, south_node_id, group_id),
+                FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE
+            );
+
             CREATE INDEX IF NOT EXISTS idx_flow_nodes_flow_id ON flow_nodes(flow_id);
             CREATE INDEX IF NOT EXISTS idx_flow_edges_flow_id ON flow_edges(flow_id);
+            CREATE INDEX IF NOT EXISTS idx_flow_bindings_flow_id ON flow_bindings(flow_id);
+            CREATE INDEX IF NOT EXISTS idx_flow_bindings_source ON flow_bindings(south_node_id, group_id);
             ",
         )?;
         Ok(())
@@ -116,6 +128,7 @@ impl FlowStore {
         for edge in &flow.edges {
             Self::upsert_edge_sync(&conn, flow.id, edge)?;
         }
+        Self::replace_bindings_sync(&conn, flow.id, &flow.bindings)?;
         Ok(())
     }
 
@@ -156,17 +169,15 @@ impl FlowStore {
 
     pub async fn flow_count(&self) -> usize {
         let conn = self.conn.lock().await;
-        conn.query_row(
-            "SELECT COUNT(*) FROM flows",
-            [],
-            |row| row.get::<_, i64>(0),
-        ).map(|c| c as usize).unwrap_or(0)
+        conn.query_row("SELECT COUNT(*) FROM flows", [], |row| row.get::<_, i64>(0))
+            .map(|c| c as usize)
+            .unwrap_or(0)
     }
 
     pub async fn update_flow(&self, flow: &Flow) -> Result<(), FlowStoreError> {
         // Save snapshot before updating (ignore errors if flow doesn't exist yet)
         let _ = self.save_flow_snapshot(&flow.id).await;
-        
+
         let conn = self.conn.lock().await;
         conn.execute(
             "UPDATE flows SET name=?2, description=?3, status=?4, version=?5, updated_at=?6 WHERE id=?1",
@@ -199,6 +210,7 @@ impl FlowStore {
         for edge in &flow.edges {
             Self::upsert_edge_sync(&conn, flow.id, edge)?;
         }
+        Self::replace_bindings_sync(&conn, flow.id, &flow.bindings)?;
         Ok(())
     }
 
@@ -228,6 +240,42 @@ impl FlowStore {
         }
     }
 
+    pub async fn list_bindings(&self, flow_id: Uuid) -> Result<Vec<FlowBinding>, FlowStoreError> {
+        let conn = self.conn.lock().await;
+        self.load_bindings_sync(&conn, flow_id)
+    }
+
+    pub async fn replace_bindings(
+        &self,
+        flow_id: Uuid,
+        bindings: &[FlowBinding],
+    ) -> Result<(), FlowStoreError> {
+        let conn = self.conn.lock().await;
+        Self::replace_bindings_sync(&conn, flow_id, bindings)
+    }
+
+    pub async fn enabled_binding_for_source(
+        &self,
+        south_node_id: gateway_sdk::NodeId,
+        group_id: gateway_sdk::GroupId,
+    ) -> Result<Option<FlowBinding>, FlowStoreError> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT flow_id, south_node_id, group_id, enabled, failure_policy FROM flow_bindings
+                 WHERE south_node_id=?1 AND group_id=?2 AND enabled=1 LIMIT 1",
+            )
+            .map_err(FlowStoreError::Rusqlite)?;
+        let mut rows = stmt
+            .query(params![south_node_id.0.to_string(), group_id.0.to_string()])
+            .map_err(FlowStoreError::Rusqlite)?;
+        if let Some(row) = rows.next().map_err(FlowStoreError::Rusqlite)? {
+            Ok(Some(Self::row_to_binding(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub async fn update_flow_status(
         &self,
         id: Uuid,
@@ -248,7 +296,9 @@ impl FlowStore {
 
     /// Save a version snapshot of the flow before major updates.
     pub async fn save_flow_snapshot(&self, id: &Uuid) -> Result<(), FlowStoreError> {
-        let flow = self.get_flow(*id).await?
+        let flow = self
+            .get_flow(*id)
+            .await?
             .ok_or_else(|| FlowStoreError::Rusqlite(rusqlite::Error::QueryReturnedNoRows))?;
 
         let snapshot = FlowSnapshot {
@@ -262,7 +312,7 @@ impl FlowStore {
         };
 
         let mut history: Vec<FlowSnapshot> = self.get_flow_version_history_raw(id).await?;
-        
+
         // Keep only last 10 snapshots
         if history.len() >= 10 {
             history.remove(0);
@@ -281,30 +331,39 @@ impl FlowStore {
     }
 
     /// Get version history for a flow (deserialized).
-    pub async fn get_flow_version_history(&self, id: &Uuid) -> Result<Vec<FlowSnapshot>, FlowStoreError> {
+    pub async fn get_flow_version_history(
+        &self,
+        id: &Uuid,
+    ) -> Result<Vec<FlowSnapshot>, FlowStoreError> {
         self.get_flow_version_history_raw(id).await
     }
 
     /// Internal: get version history raw JSON and parse.
-    async fn get_flow_version_history_raw(&self, id: &Uuid) -> Result<Vec<FlowSnapshot>, FlowStoreError> {
+    async fn get_flow_version_history_raw(
+        &self,
+        id: &Uuid,
+    ) -> Result<Vec<FlowSnapshot>, FlowStoreError> {
         let conn = self.conn.lock().await;
         let mut stmt = conn
             .prepare("SELECT version_history FROM flows WHERE id=?1")
             .map_err(FlowStoreError::Rusqlite)?;
-        
+
         let history_str: String = stmt
             .query_row(params![id.to_string()], |row| row.get(0))
             .map_err(FlowStoreError::Rusqlite)?;
-        
-        let history: Vec<FlowSnapshot> = serde_json::from_str(&history_str)
-            .unwrap_or_default();
+
+        let history: Vec<FlowSnapshot> = serde_json::from_str(&history_str).unwrap_or_default();
         Ok(history)
     }
 
     /// Restore a flow from a snapshot definition.
-    pub async fn restore_from_snapshot(&self, id: &Uuid, snapshot: &FlowSnapshot) -> Result<Flow, FlowStoreError> {
+    pub async fn restore_from_snapshot(
+        &self,
+        id: &Uuid,
+        snapshot: &FlowSnapshot,
+    ) -> Result<Flow, FlowStoreError> {
         let conn = self.conn.lock().await;
-        
+
         // Update flow metadata
         conn.execute(
             "UPDATE flows SET name=?2, description=?3, status=?4, version=?5, updated_at=?6 WHERE id=?1",
@@ -340,7 +399,83 @@ impl FlowStore {
         }
 
         drop(conn);
-        self.get_flow(*id).await?.ok_or_else(|| FlowStoreError::Rusqlite(rusqlite::Error::QueryReturnedNoRows))
+        self.get_flow(*id)
+            .await?
+            .ok_or_else(|| FlowStoreError::Rusqlite(rusqlite::Error::QueryReturnedNoRows))
+    }
+
+    fn replace_bindings_sync(
+        conn: &Connection,
+        flow_id: Uuid,
+        bindings: &[FlowBinding],
+    ) -> Result<(), FlowStoreError> {
+        conn.execute(
+            "DELETE FROM flow_bindings WHERE flow_id=?1",
+            params![flow_id.to_string()],
+        )
+        .map_err(FlowStoreError::Rusqlite)?;
+
+        for binding in bindings {
+            conn.execute(
+                "INSERT INTO flow_bindings (flow_id, south_node_id, group_id, enabled, failure_policy)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    binding.flow_id.to_string(),
+                    binding.south_node_id.0.to_string(),
+                    binding.group_id.0.to_string(),
+                    if binding.enabled { 1_i64 } else { 0_i64 },
+                    serde_json::to_string(&binding.failure_policy)
+                        .unwrap_or_else(|_| "\"fail_open\"".to_string())
+                        .trim_matches('"')
+                        .to_string(),
+                ],
+            )
+            .map_err(FlowStoreError::Rusqlite)?;
+        }
+        Ok(())
+    }
+
+    fn row_to_binding(row: &rusqlite::Row) -> Result<FlowBinding, FlowStoreError> {
+        let flow_id_str: String = row.get(0).map_err(FlowStoreError::Rusqlite)?;
+        let south_node_id_str: String = row.get(1).map_err(FlowStoreError::Rusqlite)?;
+        let group_id_str: String = row.get(2).map_err(FlowStoreError::Rusqlite)?;
+        let enabled: i64 = row.get(3).map_err(FlowStoreError::Rusqlite)?;
+        let failure_policy_str: String = row.get(4).map_err(FlowStoreError::Rusqlite)?;
+        let failure_policy =
+            serde_json::from_str::<FlowFailurePolicy>(&format!("\"{}\"", failure_policy_str))
+                .unwrap_or_default();
+
+        Ok(FlowBinding {
+            flow_id: Uuid::parse_str(&flow_id_str).unwrap_or_else(|_| Uuid::new_v4()),
+            south_node_id: gateway_sdk::NodeId(
+                Uuid::parse_str(&south_node_id_str).unwrap_or_else(|_| Uuid::new_v4()),
+            ),
+            group_id: gateway_sdk::GroupId(
+                Uuid::parse_str(&group_id_str).unwrap_or_else(|_| Uuid::new_v4()),
+            ),
+            enabled: enabled != 0,
+            failure_policy,
+        })
+    }
+
+    fn load_bindings_sync(
+        &self,
+        conn: &Connection,
+        flow_id: Uuid,
+    ) -> Result<Vec<FlowBinding>, FlowStoreError> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT flow_id, south_node_id, group_id, enabled, failure_policy FROM flow_bindings WHERE flow_id=?1",
+            )
+            .map_err(FlowStoreError::Rusqlite)?;
+        let mut rows = stmt
+            .query(params![flow_id.to_string()])
+            .map_err(FlowStoreError::Rusqlite)?;
+        let mut bindings = Vec::new();
+        while let Some(row) = rows.next().map_err(FlowStoreError::Rusqlite)? {
+            bindings.push(Self::row_to_binding(row)?);
+        }
+        Ok(bindings)
     }
 
     fn upsert_node_sync(
@@ -409,8 +544,7 @@ impl FlowStore {
         let created_at_str: String = row.get(6).map_err(FlowStoreError::Rusqlite)?;
         let updated_at_str: String = row.get(7).map_err(FlowStoreError::Rusqlite)?;
 
-        let status: FlowStatus =
-            serde_json::from_str(&status_str).unwrap_or(FlowStatus::Draft);
+        let status: FlowStatus = serde_json::from_str(&status_str).unwrap_or(FlowStatus::Draft);
         let created_at = DateTime::parse_from_rfc3339(&created_at_str)
             .map(|dt| dt.with_timezone(&Utc))
             .unwrap_or_else(|_| Utc::now());
@@ -421,6 +555,7 @@ impl FlowStore {
         // Load nodes and edges
         let nodes = self.load_nodes_sync(conn, id)?;
         let edges = self.load_edges_sync(conn, id)?;
+        let bindings = self.load_bindings_sync(conn, id)?;
 
         Ok(Flow {
             id,
@@ -429,6 +564,7 @@ impl FlowStore {
             status,
             nodes,
             edges,
+            bindings,
             version,
             created_at,
             updated_at,
@@ -453,8 +589,7 @@ impl FlowStore {
             let id_str: String = row.get(0).map_err(FlowStoreError::Rusqlite)?;
             let name: String = row.get(1).map_err(FlowStoreError::Rusqlite)?;
             let kind_str: String = row.get(2).map_err(FlowStoreError::Rusqlite)?;
-            let operator_name: Option<String> =
-                row.get(3).map_err(FlowStoreError::Rusqlite)?;
+            let operator_name: Option<String> = row.get(3).map_err(FlowStoreError::Rusqlite)?;
             let config_str: String = row.get(4).map_err(FlowStoreError::Rusqlite)?;
             let input_ports_str: String = row.get(5).map_err(FlowStoreError::Rusqlite)?;
             let output_ports_str: String = row.get(6).map_err(FlowStoreError::Rusqlite)?;
@@ -504,11 +639,9 @@ impl FlowStore {
             let target_port: String = row.get(4).map_err(FlowStoreError::Rusqlite)?;
 
             edges.push(FlowEdge {
-                source_node_id: Uuid::parse_str(&source_id_str)
-                    .unwrap_or_else(|_| Uuid::new_v4()),
+                source_node_id: Uuid::parse_str(&source_id_str).unwrap_or_else(|_| Uuid::new_v4()),
                 source_port,
-                target_node_id: Uuid::parse_str(&target_id_str)
-                    .unwrap_or_else(|_| Uuid::new_v4()),
+                target_node_id: Uuid::parse_str(&target_id_str).unwrap_or_else(|_| Uuid::new_v4()),
                 target_port,
             });
         }

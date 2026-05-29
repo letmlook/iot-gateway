@@ -10,8 +10,8 @@ use uuid::Uuid;
 use crate::api::ApiError;
 use crate::flow::store::FlowStoreError;
 use crate::state::AppState;
-use gateway_flow::Flow;
-use gateway_sdk::OperatorMetrics;
+use gateway_flow::{Flow, FlowBinding};
+use gateway_sdk::{DataValue, NodeId, OperatorMetrics, PipelineData};
 
 impl From<FlowStoreError> for ApiError {
     fn from(e: FlowStoreError) -> Self {
@@ -19,7 +19,9 @@ impl From<FlowStoreError> for ApiError {
     }
 }
 
-pub async fn list_flows(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+pub async fn list_flows(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let flows = state.flow_store.list_flows().await?;
     Ok(Json(serde_json::json!({ "flows": flows })))
 }
@@ -64,6 +66,7 @@ pub async fn create_flow(
             updated_at: now,
             nodes: Vec::new(),
             edges: Vec::new(),
+            bindings: Vec::new(),
             version: 1,
         }
     };
@@ -109,6 +112,105 @@ pub async fn delete_flow(
     let id = Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("invalid flow id"))?;
     state.flow_store.delete_flow(id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+pub struct SetFlowBindingsRequest {
+    pub bindings: Vec<FlowBinding>,
+}
+
+pub async fn get_flow_bindings(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("invalid flow id"))?;
+    state
+        .flow_store
+        .get_flow(id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("flow not found"))?;
+    let bindings = state.flow_store.list_bindings(id).await?;
+    Ok(Json(serde_json::json!({ "bindings": bindings })))
+}
+
+pub async fn set_flow_bindings(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SetFlowBindingsRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("invalid flow id"))?;
+    state
+        .flow_store
+        .get_flow(id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("flow not found"))?;
+
+    let mut bindings = req.bindings;
+    for binding in &mut bindings {
+        binding.flow_id = id;
+    }
+    state.flow_store.replace_bindings(id, &bindings).await?;
+    Ok(Json(serde_json::json!({ "bindings": bindings })))
+}
+
+#[derive(serde::Deserialize, Default)]
+pub struct FlowPreviewInput {
+    #[serde(default)]
+    pub node_id: Option<Uuid>,
+    #[serde(default)]
+    pub payload: std::collections::HashMap<String, DataValue>,
+    #[serde(default)]
+    pub metadata: std::collections::HashMap<String, String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+pub struct FlowPreviewRequest {
+    #[serde(default)]
+    pub input: FlowPreviewInput,
+}
+
+pub async fn preview_flow(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<FlowPreviewRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("invalid flow id"))?;
+    let flow = state
+        .flow_store
+        .get_flow(id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("flow not found"))?;
+
+    let registry = gateway_flow::OperatorRegistry::new();
+    let mut runtime = gateway_flow::FlowRuntime::new(&flow, registry)
+        .await
+        .map_err(|e| ApiError::bad_request(format!("failed to create preview runtime: {}", e)))?;
+
+    let source_node_id = req
+        .input
+        .node_id
+        .or_else(|| {
+            flow.nodes
+                .iter()
+                .find(|n| n.kind == gateway_flow::NodeKind::South)
+                .map(|n| n.id)
+        })
+        .unwrap_or(flow.id);
+    let mut data = PipelineData::new(NodeId(source_node_id)).with_payload(req.input.payload);
+    data.metadata = req.input.metadata;
+
+    let result = runtime
+        .execute(vec![data])
+        .await
+        .map_err(|e| ApiError::bad_request(format!("flow preview failed: {}", e)))?;
+
+    Ok(Json(serde_json::json!({
+        "flow_id": id,
+        "nodes": result.nodes,
+        "output": result.output,
+        "alarm_events": result.alarm_events,
+        "errors": [],
+    })))
 }
 
 // ---------- Lifecycle ----------
@@ -322,7 +424,8 @@ pub async fn export_flows(
     State(state): State<AppState>,
 ) -> Result<Json<ExportResponse>, ApiError> {
     let flows = if let Some(ids) = &params.ids {
-        let id_list: Vec<Uuid> = ids.split(',')
+        let id_list: Vec<Uuid> = ids
+            .split(',')
             .filter_map(|s| Uuid::parse_str(s.trim()).ok())
             .collect();
         let mut result = Vec::new();
@@ -336,17 +439,20 @@ pub async fn export_flows(
         state.flow_store.list_flows().await?
     };
 
-    let exported_flows: Vec<ExportedFlow> = flows.into_iter().map(|f| {
-        let definition = serde_json::to_string(&f).unwrap_or_default();
-        ExportedFlow {
-            id: f.id.to_string(),
-            name: f.name,
-            description: f.description,
-            definition,
-            status: serde_json::to_string(&f.status).unwrap_or_default(),
-            version: f.version,
-        }
-    }).collect();
+    let exported_flows: Vec<ExportedFlow> = flows
+        .into_iter()
+        .map(|f| {
+            let definition = serde_json::to_string(&f).unwrap_or_default();
+            ExportedFlow {
+                id: f.id.to_string(),
+                name: f.name,
+                description: f.description,
+                definition,
+                status: serde_json::to_string(&f.status).unwrap_or_default(),
+                version: f.version,
+            }
+        })
+        .collect();
 
     Ok(Json(ExportResponse {
         version: "1.0".to_string(),
@@ -401,7 +507,12 @@ pub async fn import_flows(
 
     for flow in body.flows {
         // Check if flow with same name exists
-        let existing = state.flow_store.get_flow_by_name(&flow.name).await.ok().flatten();
+        let existing = state
+            .flow_store
+            .get_flow_by_name(&flow.name)
+            .await
+            .ok()
+            .flatten();
 
         if existing.is_some() && !force {
             skipped += 1;
@@ -420,6 +531,7 @@ pub async fn import_flows(
             description: flow.description,
             nodes: parsed.nodes,
             edges: parsed.edges,
+            bindings: parsed.bindings,
             status: gateway_flow::FlowStatus::Draft,
             version: 1,
             created_at: now,

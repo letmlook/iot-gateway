@@ -3,8 +3,8 @@
 use crate::error::{PluginError, PluginResult};
 use crate::messages::{GroupData, GroupSubscription};
 use crate::schema::{ConfigSchema, TagSchema};
-use crate::types::{Group, GroupId, NodeId, PipelineData, Tag, TagId};
 use crate::types::PluginConfig;
+use crate::types::{Group, GroupId, NodeId, PipelineData, Tag, TagId};
 use async_trait::async_trait;
 use serde::Serialize;
 use std::sync::Arc;
@@ -27,6 +27,33 @@ pub struct PluginMeta {
     pub description_en: Option<&'static str>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginStatus {
+    Ga,
+    Beta,
+    Experimental,
+    Stub,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtocolStack {
+    Real,
+    Simulated,
+    Partial,
+    None,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PluginCapabilities {
+    pub read: bool,
+    pub write: bool,
+    pub publish: bool,
+    pub subscribe: bool,
+    pub browse: bool,
+}
+
 /// 插件列表项（API 返回用），含中英文名称与描述。
 #[derive(Debug, Clone, Serialize)]
 pub struct PluginInfo {
@@ -41,11 +68,16 @@ pub struct PluginInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description_en: Option<String>,
     pub version: String,
+    pub status: PluginStatus,
+    pub protocol_stack: ProtocolStack,
+    pub capabilities: PluginCapabilities,
+    pub known_limits: Vec<String>,
 }
 
 impl PluginInfo {
     /// 从插件键名与 PluginMeta 构建 API 用 PluginInfo。
     pub fn from_meta(name: &str, m: &PluginMeta) -> Self {
+        let (status, protocol_stack, capabilities, known_limits) = classify_plugin(name, m.kind);
         Self {
             name: name.to_string(),
             name_zh: m.name_zh.map(String::from),
@@ -54,7 +86,121 @@ impl PluginInfo {
             description_zh: m.description_zh.map(String::from),
             description_en: m.description_en.map(String::from),
             version: m.version.to_string(),
+            status,
+            protocol_stack,
+            capabilities,
+            known_limits,
         }
+    }
+}
+
+fn classify_plugin(
+    name: &str,
+    kind: crate::types::PluginKind,
+) -> (PluginStatus, ProtocolStack, PluginCapabilities, Vec<String>) {
+    let read_write = PluginCapabilities {
+        read: true,
+        write: true,
+        publish: false,
+        subscribe: false,
+        browse: false,
+    };
+    let publish = PluginCapabilities {
+        read: false,
+        write: false,
+        publish: true,
+        subscribe: false,
+        browse: false,
+    };
+    match (kind, name) {
+        (crate::types::PluginKind::South, "sim") => (
+            PluginStatus::Ga,
+            ProtocolStack::Simulated,
+            PluginCapabilities {
+                write: false,
+                ..read_write
+            },
+            vec!["simulated data source".to_string()],
+        ),
+        (crate::types::PluginKind::South, "modbus-tcp" | "modbus-rtu" | "virb") => (
+            PluginStatus::Beta,
+            ProtocolStack::Real,
+            read_write,
+            Vec::new(),
+        ),
+        (crate::types::PluginKind::South, "opcua") => (
+            PluginStatus::Beta,
+            ProtocolStack::Real,
+            PluginCapabilities {
+                browse: true,
+                ..read_write
+            },
+            Vec::new(),
+        ),
+        (crate::types::PluginKind::North, "mqtt") => {
+            (PluginStatus::Beta, ProtocolStack::Real, publish, Vec::new())
+        }
+        (crate::types::PluginKind::North, "http") => (
+            PluginStatus::Beta,
+            ProtocolStack::Real,
+            publish,
+            vec!["blocking HTTP client; tune timeouts for production workloads".to_string()],
+        ),
+        (crate::types::PluginKind::North, "kafka") => (
+            PluginStatus::Stub,
+            ProtocolStack::Partial,
+            publish,
+            vec!["not yet migrated to built-in NorthPlugin lifecycle".to_string()],
+        ),
+        (crate::types::PluginKind::North, _) => (
+            PluginStatus::Experimental,
+            ProtocolStack::Partial,
+            publish,
+            vec!["experimental north plugin".to_string()],
+        ),
+        (crate::types::PluginKind::South, _) => (
+            PluginStatus::Experimental,
+            ProtocolStack::Simulated,
+            read_write,
+            vec!["experimental or simulated protocol stack".to_string()],
+        ),
+        (crate::types::PluginKind::Operator, _) => (
+            PluginStatus::Experimental,
+            ProtocolStack::None,
+            PluginCapabilities {
+                read: false,
+                write: false,
+                publish: false,
+                subscribe: false,
+                browse: false,
+            },
+            Vec::new(),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_metadata_includes_status_and_capabilities() {
+        let meta = PluginMeta {
+            name: "modbus-tcp",
+            kind: crate::types::PluginKind::South,
+            description: Some("Modbus TCP"),
+            version: "0.1.0",
+            name_zh: None,
+            name_en: None,
+            description_zh: None,
+            description_en: None,
+        };
+        let info = PluginInfo::from_meta("modbus-tcp", &meta);
+        let json = serde_json::to_value(info).unwrap();
+        assert_eq!(json["status"], "beta");
+        assert_eq!(json["protocol_stack"], "real");
+        assert_eq!(json["capabilities"]["read"], true);
+        assert_eq!(json["capabilities"]["write"], true);
     }
 }
 
@@ -226,7 +372,8 @@ pub trait Operable: Send + Sync {
 
     /// 处理一个 PipelineData，返回零个或多个输出 PipelineData。
     /// 零输出 = 数据被丢弃（如过滤条件不满足）。
-    async fn process(&self, node_id: NodeId, data: PipelineData) -> PluginResult<Vec<PipelineData>>;
+    async fn process(&self, node_id: NodeId, data: PipelineData)
+        -> PluginResult<Vec<PipelineData>>;
 
     /// 重置算子状态（如清空聚合缓冲、滑动窗口）。
     async fn reset(&self, node_id: NodeId) -> PluginResult<()>;

@@ -1,12 +1,14 @@
 //! 应用状态：Manager + Config + 可选 PluginLoader + 功能授权 + 用户存储，供 API 与持久化使用。
 
+use crate::alarm::AlarmStore;
+use crate::audit::AuditStore;
 use crate::config::Config;
 use crate::flow::FlowStore;
 use crate::license::FeatureManager;
 use crate::logging::NodeLogNameMap;
 use crate::users::UserStore;
 use crate::websocket::WsHub;
-use gateway_core::{persist_save, PluginLoader, Manager};
+use gateway_core::{persist_save, Manager, PluginLoader};
 use gateway_flow::FlowRuntime;
 use std::sync::Arc;
 use tracing::warn;
@@ -23,6 +25,10 @@ pub struct AppState {
     pub node_log_names: Option<NodeLogNameMap>,
     /// Flow 持久化存储
     pub flow_store: FlowStore,
+    /// Alarm event persistence store
+    pub alarm_store: AlarmStore,
+    /// Audit event persistence store
+    pub audit_store: AuditStore,
     /// 运行中的 Flow 运行时
     pub flow_runtimes: Arc<tokio::sync::RwLock<std::collections::HashMap<Uuid, FlowRuntime>>>,
     /// WebSocket hub for real-time flow monitoring
@@ -41,6 +47,8 @@ impl Clone for AppState {
             user_store: self.user_store.clone(),
             node_log_names: self.node_log_names.clone(),
             flow_store: self.flow_store.clone(),
+            alarm_store: self.alarm_store.clone(),
+            audit_store: self.audit_store.clone(),
             flow_runtimes: self.flow_runtimes.clone(),
             ws_hub: self.ws_hub.clone(),
             started_at: self.started_at,
@@ -58,7 +66,10 @@ impl AppState {
         user_store: Arc<UserStore>,
         node_log_names: Option<NodeLogNameMap>,
         flow_store: FlowStore,
+        alarm_store: AlarmStore,
+        audit_store: AuditStore,
         flow_runtimes: Arc<tokio::sync::RwLock<std::collections::HashMap<Uuid, FlowRuntime>>>,
+
         ws_hub: WsHub,
     ) -> Self {
         Self {
@@ -68,6 +79,8 @@ impl AppState {
             user_store,
             node_log_names,
             flow_store,
+            alarm_store,
+            audit_store,
             flow_runtimes,
             ws_hub,
             started_at: chrono::Utc::now(),

@@ -1,12 +1,9 @@
 //! Buffer operator: buffers data and emits batches.
 
 use async_trait::async_trait;
+use gateway_sdk::{NodeId, Operable, PipelineData, PluginConfig, PluginMeta, PluginResult};
 use std::collections::VecDeque;
 use std::sync::RwLock;
-use gateway_sdk::{
-    Operable, PipelineData, PluginConfig, PluginMeta, PluginResult,
-    NodeId,
-};
 
 /// Buffer flush strategy.
 #[derive(Debug, Clone, Copy)]
@@ -28,7 +25,10 @@ pub struct BufferOperator {
 impl BufferOperator {
     pub fn new(batch_size: usize, timeout_secs: u64) -> Self {
         let flush_strategy = if batch_size > 0 && timeout_secs > 0 {
-            FlushStrategy::Either { count: batch_size, timeout_secs }
+            FlushStrategy::Either {
+                count: batch_size,
+                timeout_secs,
+            }
         } else if batch_size > 0 {
             FlushStrategy::Count(batch_size)
         } else {
@@ -56,21 +56,36 @@ impl Operable for BufferOperator {
             description_en: Some("Buffer data and emit in batches, triggered by count or time"),
         }
     }
-    
+
     async fn open(&self, _node_id: NodeId, _config: PluginConfig) -> PluginResult<()> {
+        self.buffer.write().unwrap().clear();
         Ok(())
     }
-    
+
     async fn close(&self, _node_id: NodeId) -> PluginResult<()> {
         Ok(())
     }
-    
-    async fn process(&self, _node_id: NodeId, data: PipelineData) -> PluginResult<Vec<PipelineData>> {
-        // For Phase 1: just pass through immediately (timing logic in Phase 2)
-        // The DAG executor will handle actual timing/flush in later phases.
-        Ok(vec![data])
+
+    async fn process(
+        &self,
+        _node_id: NodeId,
+        data: PipelineData,
+    ) -> PluginResult<Vec<PipelineData>> {
+        let flush_count = match self.flush_strategy {
+            FlushStrategy::Count(count) => count,
+            FlushStrategy::Either { count, .. } => count,
+            FlushStrategy::TimeoutSecs(_) => self.batch_size,
+        }
+        .max(1);
+
+        let mut buffer = self.buffer.write().unwrap();
+        buffer.push_back(data);
+        if buffer.len() < flush_count {
+            return Ok(Vec::new());
+        }
+        Ok(buffer.drain(..).collect())
     }
-    
+
     async fn reset(&self, _node_id: NodeId) -> PluginResult<()> {
         self.buffer.write().unwrap().clear();
         Ok(())
@@ -80,11 +95,50 @@ impl Operable for BufferOperator {
 /// Create a buffer operator from config.
 /// config expects: { "batch_size": 100, "timeout_secs": 5 }
 pub fn create_buffer_operator(config: &PluginConfig) -> Box<dyn Operable> {
-    let batch_size = config.get("batch_size")
+    let batch_size = config
+        .get("batch_size")
+        .or_else(|| config.get("max_size"))
         .and_then(|v| v.as_u64())
         .unwrap_or(100) as usize;
-    let timeout_secs = config.get("timeout_secs")
+    let timeout_secs = config
+        .get("timeout_secs")
         .and_then(|v| v.as_u64())
         .unwrap_or(5);
     Box::new(BufferOperator::new(batch_size, timeout_secs))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gateway_sdk::DataValue;
+
+    fn sample(seq: i64) -> PipelineData {
+        let mut data = PipelineData::new(NodeId::new());
+        data.payload
+            .insert("seq".to_string(), DataValue::Int64(seq));
+        data
+    }
+
+    #[tokio::test]
+    async fn buffer_flushes_when_max_size_is_reached() {
+        let operator = BufferOperator::new(3, 0);
+        let node_id = NodeId::new();
+
+        assert!(operator
+            .process(node_id, sample(1))
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(operator
+            .process(node_id, sample(2))
+            .await
+            .unwrap()
+            .is_empty());
+
+        let output = operator.process(node_id, sample(3)).await.unwrap();
+        assert_eq!(output.len(), 3);
+        assert_eq!(output[0].payload.get("seq"), Some(&DataValue::Int64(1)));
+        assert_eq!(output[1].payload.get("seq"), Some(&DataValue::Int64(2)));
+        assert_eq!(output[2].payload.get("seq"), Some(&DataValue::Int64(3)));
+    }
 }

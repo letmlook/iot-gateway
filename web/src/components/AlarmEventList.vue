@@ -27,34 +27,59 @@ const events = ref([])
 const levelFilter = ref([])
 const maxEvents = 200
 let pollTimer = null
+let alarmSocket = null
 let lastPoll = 0
 const POLL_INTERVAL = 3000 // 3s
+
+function mergeIncoming(incoming) {
+  const known = new Set(events.value.map(e => e.id).filter(Boolean))
+  const fresh = incoming
+    .filter(e => !e.id || !known.has(e.id))
+    .map(e => ({ ...e, isNew: true }))
+  if (!fresh.length) return
+  events.value.forEach(e => { e.isNew = false })
+  events.value = [...fresh, ...events.value].slice(0, maxEvents)
+  setTimeout(() => {
+    events.value.forEach(e => { e.isNew = false })
+  }, 2000)
+}
 
 // Load alarm events from API
 async function loadEvents() {
   try {
     const data = await api.alarmEvents ? await api.alarmEvents() : { events: [] }
-    // Merge new events, mark as new for highlight
-    const incoming = (data.events || []).map(e => ({
-      ...e,
-      isNew: true
-    }))
-    // Mark existing as not new
-    events.value.forEach(e => { e.isNew = false })
-    // Prepend new ones
-    events.value = [...incoming, ...events.value].slice(0, maxEvents)
-    // After 2s, clear isNew flag
-    setTimeout(() => {
-      events.value.forEach(e => { e.isNew = false })
-    }, 2000)
+    mergeIncoming(data.items || data.events || [])
   } catch (e) {
     console.error('Failed to load alarm events', e)
+  }
+}
+
+function startAlarmSocket() {
+  stopAlarmSocket()
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  alarmSocket = new WebSocket(`${protocol}//${window.location.host}/api/ws/alarms`)
+  alarmSocket.onmessage = (event) => {
+    try {
+      const payload = JSON.parse(event.data)
+      if (payload.event) mergeIncoming([payload.event])
+    } catch (_) {}
+  }
+  alarmSocket.onclose = () => {
+    alarmSocket = null
+  }
+}
+
+function stopAlarmSocket() {
+  if (alarmSocket) {
+    alarmSocket.close()
+    alarmSocket = null
   }
 }
 
 function startPolling() {
   stopPolling()
   loadEvents()
+  startAlarmSocket()
   pollTimer = setInterval(loadEvents, POLL_INTERVAL)
 }
 
@@ -63,6 +88,7 @@ function stopPolling() {
     clearInterval(pollTimer)
     pollTimer = null
   }
+  stopAlarmSocket()
 }
 
 // Filtered events
@@ -96,6 +122,18 @@ function toggleLevel(level) {
   } else {
     levelFilter.value.push(level)
   }
+}
+
+async function ackEvent(event) {
+  if (!event.id || !api.ackAlarmEvent) return
+  const data = await api.ackAlarmEvent(event.id)
+  Object.assign(event, data.event || data)
+}
+
+async function resolveEvent(event) {
+  if (!event.id || !api.resolveAlarmEvent) return
+  const data = await api.resolveAlarmEvent(event.id)
+  Object.assign(event, data.event || data)
 }
 
 // Clear all
@@ -158,9 +196,14 @@ onUnmounted(stopPolling)
               <span class="event-time">{{ formatTime(event.timestamp) }}</span>
             </div>
             <div class="event-message">{{ event.message || event.desc || event.content || '未知告警' }}</div>
-            <div class="event-detail" v-if="event.detail || event.value">
+            <div class="event-detail" v-if="event.detail || event.value || event.status">
               <span v-if="event.detail">{{ event.detail }}</span>
               <span v-if="event.value" class="event-value">值: {{ event.value }}</span>
+              <span v-if="event.status" class="event-status">状态: {{ event.status }}</span>
+            </div>
+            <div class="event-actions" v-if="event.id">
+              <el-button size="small" text :disabled="event.status !== 'active'" @click="ackEvent(event)">确认</el-button>
+              <el-button size="small" text :disabled="event.status === 'resolved'" @click="resolveEvent(event)">解决</el-button>
             </div>
           </div>
         </div>

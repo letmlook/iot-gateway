@@ -1,6 +1,8 @@
 //! 网关服务入口：插件注册（.so 动态加载 + 可选内置）、REST API、前端静态资源、离线授权、用户管理。
 
+mod alarm;
 mod api;
+mod audit;
 mod backup;
 mod config;
 mod flow;
@@ -12,7 +14,7 @@ mod users;
 mod websocket;
 
 use axum::Router;
-use gateway_core::{persist_load, persist_load_json, persist_save, PluginLoader, Manager};
+use gateway_core::{persist_load, persist_load_json, persist_save, Manager, PluginLoader};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -35,14 +37,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // 从 plugins_dir 加载动态库插件（Windows: .dll，Unix: .so）；若无目录或加载后无插件则使用内置
     fn register_builtin_plugins(mgr: &mut gateway_core::Manager) {
-        use plugin_mqtt::MqttPlugin;
+        use plugin_http::HttpPlugin;
         use plugin_modbus_rtu::ModbusRtuPlugin;
         use plugin_modbus_tcp::ModbusTcpPlugin;
+        use plugin_mqtt::MqttPlugin;
         use plugin_sim::SimPlugin;
         mgr.register_south("sim", Arc::new(SimPlugin::new()));
         mgr.register_south("modbus-tcp", Arc::new(ModbusTcpPlugin::new()));
         mgr.register_south("modbus-rtu", Arc::new(ModbusRtuPlugin::new()));
         mgr.register_north("mqtt", Arc::new(MqttPlugin::new()));
+        mgr.register_north("http", Arc::new(HttpPlugin::new()));
     }
 
     if config.plugins_dir.exists() {
@@ -50,11 +54,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             loader_opt = Some(loader);
             // 若目录下未加载到任何插件（如空目录或仅有非插件库），则补充内置插件供管理页展示与使用
             if mgr.south_plugins().is_empty() && mgr.north_plugins().is_empty() {
-                tracing::info!("no plugins loaded from {}, using built-in", config.plugins_dir.display());
+                tracing::info!(
+                    "no plugins loaded from {}, using built-in",
+                    config.plugins_dir.display()
+                );
                 register_builtin_plugins(&mut mgr);
             }
         } else {
-            tracing::warn!("load plugins from {} failed, using built-in", config.plugins_dir.display());
+            tracing::warn!(
+                "load plugins from {} failed, using built-in",
+                config.plugins_dir.display()
+            );
             register_builtin_plugins(&mut mgr);
         }
     } else {
@@ -122,10 +132,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let flow_store = crate::flow::FlowStore::new(&db_path)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    let flow_runtimes: Arc<tokio::sync::RwLock<std::collections::HashMap<uuid::Uuid, gateway_flow::FlowRuntime>>> = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+    let alarm_store = crate::alarm::AlarmStore::new(&db_path)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let audit_store = crate::audit::AuditStore::new(&db_path)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let flow_runtimes: Arc<
+        tokio::sync::RwLock<std::collections::HashMap<uuid::Uuid, gateway_flow::FlowRuntime>>,
+    > = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
     let ws_hub = crate::websocket::WsHub::new();
-    
-    let state = AppState::new(mgr, config.clone(), loader_opt, feature_manager, user_store, node_log_names, flow_store, flow_runtimes, ws_hub);
+    let flow_processor = crate::flow::FlowGroupDataProcessor::new(
+        flow_store.clone(),
+        alarm_store.clone(),
+        flow_runtimes.clone(),
+        ws_hub.clone(),
+    );
+    mgr.set_group_data_processor(Some(Arc::new(flow_processor)))
+        .await;
+
+    let state = AppState::new(
+        mgr,
+        config.clone(),
+        loader_opt,
+        feature_manager,
+        user_store,
+        node_log_names,
+        flow_store,
+        alarm_store,
+        audit_store,
+        flow_runtimes,
+        ws_hub,
+    );
     state.sync_node_log_names();
 
     let app = Router::new()

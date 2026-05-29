@@ -20,29 +20,33 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
+use crate::alarm::AlarmEvent;
+
 /// Global WebSocket hub — manages all live flow WebSocket sessions.
 #[derive(Clone)]
 pub struct WsHub {
     /// flow_id -> broadcast sender for that flow's live channel
     channels: Arc<RwLock<HashMap<Uuid, broadcast::Sender<FlowLiveEvent>>>>,
+    /// global alarm lifecycle broadcast sender
+    alarm_tx: broadcast::Sender<AlarmLiveEvent>,
 }
 
 impl WsHub {
     pub fn new() -> Self {
+        let (alarm_tx, _alarm_rx) = broadcast::channel(256);
         Self {
             channels: Arc::new(RwLock::new(HashMap::new())),
+            alarm_tx,
         }
     }
 
     /// Subscribe to a flow's live events. Returns a receiver.
     pub async fn subscribe(&self, flow_id: Uuid) -> broadcast::Receiver<FlowLiveEvent> {
         let mut channels = self.channels.write().await;
-        let sender = channels
-            .entry(flow_id)
-            .or_insert_with(|| {
-                let (tx, _rx) = broadcast::channel(256);
-                tx
-            });
+        let sender = channels.entry(flow_id).or_insert_with(|| {
+            let (tx, _rx) = broadcast::channel(256);
+            tx
+        });
         sender.subscribe()
     }
 
@@ -52,6 +56,14 @@ impl WsHub {
         if let Some(tx) = channels.get(&flow_id) {
             let _ = tx.send(event);
         }
+    }
+
+    pub fn subscribe_alarms(&self) -> broadcast::Receiver<AlarmLiveEvent> {
+        self.alarm_tx.subscribe()
+    }
+
+    pub async fn broadcast_alarm(&self, event: AlarmLiveEvent) {
+        let _ = self.alarm_tx.send(event);
     }
 
     /// Get a snapshot of the number of active subscribers for a flow.
@@ -79,10 +91,7 @@ pub enum FlowLiveEvent {
         metrics: Vec<gateway_sdk::OperatorMetrics>,
     },
     /// Flow status changed (deployed, running, paused, stopped, error)
-    StatusChange {
-        flow_id: String,
-        status: String,
-    },
+    StatusChange { flow_id: String, status: String },
     /// Node-level event (e.g., error, warning)
     NodeEvent {
         flow_id: String,
@@ -92,9 +101,18 @@ pub enum FlowLiveEvent {
         detail: Option<String>,
     },
     /// Heartbeat / keepalive
-    Ping {
-        ts: String,
-    },
+    Ping { ts: String },
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "type")]
+pub enum AlarmLiveEvent {
+    #[serde(rename = "alarm.created")]
+    Created { event: AlarmEvent },
+    #[serde(rename = "alarm.acknowledged")]
+    Acknowledged { event: AlarmEvent },
+    #[serde(rename = "alarm.resolved")]
+    Resolved { event: AlarmEvent },
 }
 
 /// GET /ws/flows/:id/live — WebSocket upgrade for real-time flow monitoring
@@ -141,7 +159,11 @@ async fn handle_socket(socket: WebSocket, flow_id: Uuid, hub: WsHub) {
         "flow_id": flow_id.to_string(),
         "ts": chrono::Utc::now().to_rfc3339(),
     });
-    if sender.send(Message::Text(snapshot.to_string().into())).await.is_err() {
+    if sender
+        .send(Message::Text(snapshot.to_string().into()))
+        .await
+        .is_err()
+    {
         return;
     }
 
@@ -189,12 +211,72 @@ async fn handle_socket(socket: WebSocket, flow_id: Uuid, hub: WsHub) {
     }
 }
 
+pub async fn ws_alarms(
+    ws: WebSocketUpgrade,
+    State(state): State<super::state::AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_alarm_socket(socket, state.ws_hub.clone()))
+}
+
+async fn handle_alarm_socket(socket: WebSocket, hub: WsHub) {
+    let (mut sender, mut receiver) = socket.split();
+    let mut rx = hub.subscribe_alarms();
+
+    let connected = serde_json::json!({
+        "type": "connected",
+        "channel": "alarms",
+        "ts": chrono::Utc::now().to_rfc3339(),
+    });
+    if sender
+        .send(Message::Text(connected.to_string().into()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    loop {
+        tokio::select! {
+            msg = receiver.next() => {
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        if text.trim() == r#"{"type":"ping"}"# || text.trim() == r#""ping""# {
+                            let pong = serde_json::json!({
+                                "type": "pong",
+                                "ts": chrono::Utc::now().to_rfc3339(),
+                            });
+                            let _ = sender.send(Message::Text(pong.to_string().into())).await;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Err(_)) | Some(Ok(Message::Ping(_))) | Some(Ok(Message::Binary(_))) | Some(Ok(Message::Pong(_))) => {}
+                }
+            }
+            event = rx.recv() => {
+                match event {
+                    Ok(evt) => {
+                        let json = serde_json::to_string(&evt).unwrap_or_default();
+                        if sender.send(Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(n, "alarm websocket lagged behind, skipping events");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
+}
+
 /// GET /flows/:id/live/summary — HTTP endpoint returning current live summary for a flow
 pub async fn flow_live_summary(
     State(state): State<super::state::AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, super::api::ApiError> {
-    let id = Uuid::parse_str(&id).map_err(|_| super::api::ApiError::bad_request("invalid flow id"))?;
+    let id =
+        Uuid::parse_str(&id).map_err(|_| super::api::ApiError::bad_request("invalid flow id"))?;
 
     let runtimes = state.flow_runtimes.read().await;
     let runtime = runtimes

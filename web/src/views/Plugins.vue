@@ -31,6 +31,19 @@ function pluginDisplayDesc(p) {
   if (!p) return ''
   return (locale.value === 'zh' ? p.description_zh : p.description_en) || p.description || ''
 }
+function statusTagType(status) {
+  return ({ ga: 'success', beta: 'primary', experimental: 'warning', stub: 'info' })[status] || 'info'
+}
+function protocolTagType(stack) {
+  return ({ real: 'success', simulated: 'warning', partial: 'info', none: 'info' })[stack] || 'info'
+}
+function capabilityText(capabilities) {
+  if (!capabilities) return '-'
+  return Object.entries(capabilities)
+    .filter(([, enabled]) => enabled)
+    .map(([name]) => name)
+    .join(', ') || '-'
+}
 const plugins = computed(() => {
   const list = (activeTab.value === 'south' ? southPlugins.value : northPlugins.value).map(p => ({
     ...p,
@@ -114,6 +127,19 @@ onMounted(loadData)
                   {{ row.kind === 'south' ? t('plugins.southDevice') : t('plugins.northApp') }}
                 </el-tag>
               </template>
+            </el-table-column>
+            <el-table-column label="状态" width="100">
+              <template #default="{ row }">
+                <el-tag size="small" :type="statusTagType(row.status)">{{ row.status || '-' }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="协议栈" width="100">
+              <template #default="{ row }">
+                <el-tag size="small" :type="protocolTagType(row.protocol_stack)" effect="plain">{{ row.protocol_stack || '-' }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="能力" min-width="120" show-overflow-tooltip>
+              <template #default="{ row }">{{ capabilityText(row.capabilities) }}</template>
             </el-table-column>
             <el-table-column :label="t('plugins.licenseStatus')" width="90">
               <template #default="{ row }">
@@ -200,6 +226,19 @@ onMounted(loadData)
               <template #default="{ row }">
                 <el-tag size="small" type="primary">{{ t('plugins.northApp') }}</el-tag>
               </template>
+            </el-table-column>
+            <el-table-column label="状态" width="100">
+              <template #default="{ row }">
+                <el-tag size="small" :type="statusTagType(row.status)">{{ row.status || '-' }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="协议栈" width="100">
+              <template #default="{ row }">
+                <el-tag size="small" :type="protocolTagType(row.protocol_stack)" effect="plain">{{ row.protocol_stack || '-' }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="能力" min-width="120" show-overflow-tooltip>
+              <template #default="{ row }">{{ capabilityText(row.capabilities) }}</template>
             </el-table-column>
             <el-table-column :label="t('plugins.licenseStatus')" width="90">
               <template #default="{ row }">

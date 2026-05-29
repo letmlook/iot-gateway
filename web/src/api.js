@@ -246,10 +246,15 @@ export const api = {
   pauseFlow: (id) => req('POST', `/flows/${id}/pause`),
   stopFlow: (id) => req('POST', `/flows/${id}/stop`),
   flowMetrics: (id) => req('GET', `/flows/${id}/metrics`),
+  previewFlow: (id, input) => req('POST', `/flows/${id}/preview`, input || {}),
+  flowBindings: (id) => req('GET', `/flows/${id}/bindings`),
+  setFlowBindings: (id, bindings) => req('PUT', `/flows/${id}/bindings`, { bindings }),
 
   // Operators
   operators: () => req('GET', '/flows/operators'),
 
   // Alarm events
   alarmEvents: () => req('GET', '/alarm/events'),
+  ackAlarmEvent: (id) => req('POST', `/alarm/events/${id}/ack`),
+  resolveAlarmEvent: (id) => req('POST', `/alarm/events/${id}/resolve`),
 }

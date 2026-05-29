@@ -4,15 +4,12 @@
 //! to alarm or normal port based on whether any rule triggered.
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use gateway_sdk::{NodeId, Operable, PipelineData, PluginConfig, PluginMeta, PluginResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use gateway_sdk::{
-    Operable, PipelineData, PluginConfig, PluginMeta, PluginResult,
-    NodeId,
-};
-use chrono::{DateTime, Utc};
 
 /// Alarm level (severity)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,7 +52,7 @@ pub enum AlarmRule {
     /// Rate-of-change alarm: triggers when value changes too fast
     RateOfChange {
         tag: String,
-        threshold: f64,       // max change per second
+        threshold: f64, // max change per second
         level: String,
         #[serde(default)]
         message: Option<String>,
@@ -63,12 +60,27 @@ pub enum AlarmRule {
     /// State-change alarm: triggers on specific state transitions
     StateChange {
         tag: String,
-        from: String,         // previous value ("*" for any)
-        to: String,           // new value
+        from: String, // previous value ("*" for any)
+        to: String,   // new value
         level: String,
         #[serde(default)]
         message: Option<String>,
     },
+}
+
+/// Alarm side-effect draft emitted by flow runtime without depending on gateway-server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlarmEventDraft {
+    pub source_type: String,
+    pub source_id: Option<String>,
+    pub node_id: String,
+    pub tag: String,
+    pub severity: AlarmLevel,
+    pub message: String,
+    pub value: f64,
+    pub threshold: String,
+    pub rule_id: String,
+    pub created_at: DateTime<Utc>,
 }
 
 /// Serialized alarm event stored in pipeline data metadata
@@ -80,19 +92,36 @@ pub struct AlarmEvent {
     pub message: String,
     pub tag: String,
     pub trigger_value: f64,
-    pub threshold: String,   // human-readable threshold description
+    pub threshold: String, // human-readable threshold description
     pub timestamp: DateTime<Utc>,
+}
+
+impl AlarmEventDraft {
+    pub fn from_alarm_event(node_id: NodeId, event: AlarmEvent) -> Self {
+        Self {
+            source_type: "flow".to_string(),
+            source_id: None,
+            node_id: node_id.0.to_string(),
+            tag: event.tag,
+            severity: event.level,
+            message: event.message,
+            value: event.trigger_value,
+            threshold: event.threshold,
+            rule_id: event.rule_id,
+            created_at: event.timestamp,
+        }
+    }
 }
 
 /// Alarm state for a specific tag (used by rate-of-change and state-change)
 #[derive(Debug, Clone)]
 pub enum AlarmStateValue {
-    Numeric(f64, i64),       // (value, timestamp_ms)
-    Text(String, i64),       // (value, timestamp_ms)
+    Numeric(f64, i64), // (value, timestamp_ms)
+    Text(String, i64), // (value, timestamp_ms)
 }
 
 pub struct AlarmOperator {
-    rules: Vec<(String, AlarmRule)>,  // (rule_id, rule)
+    rules: Vec<(String, AlarmRule)>, // (rule_id, rule)
     /// Per-tag state for rate-of-change and state-change tracking
     states: Arc<RwLock<HashMap<String, AlarmStateValue>>>,
     /// Alarm level per rule
@@ -101,7 +130,8 @@ pub struct AlarmOperator {
 
 impl AlarmOperator {
     pub fn new(config: &PluginConfig) -> Self {
-        let rules_json = config.get("rules")
+        let rules_json = config
+            .get("rules")
             .and_then(|v| v.as_array())
             .map(|arr| arr.clone())
             .unwrap_or_default();
@@ -111,11 +141,13 @@ impl AlarmOperator {
 
         for rule_val in rules_json {
             if let Ok(rule) = serde_json::from_value::<AlarmRule>(rule_val.clone()) {
-                let id = rule_val.get("id")
+                let id = rule_val
+                    .get("id")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown")
                     .to_string();
-                let level_str = rule_val.get("level")
+                let level_str = rule_val
+                    .get("level")
                     .and_then(|v| v.as_str())
                     .unwrap_or("info");
                 let level = AlarmLevel::from_str(level_str);
@@ -146,7 +178,9 @@ impl AlarmOperator {
             if let Some(low_val) = low {
                 if value < *low_val {
                     triggered = true;
-                    if !desc.is_empty() { desc.push_str(", "); }
+                    if !desc.is_empty() {
+                        desc.push_str(", ");
+                    }
                     desc.push_str(&format!("{} < {}", value, low_val));
                 }
             }
@@ -172,13 +206,17 @@ impl AlarmOperator {
 
             let (rate, desc) = {
                 let mut states_guard = states.write().await;
-                let entry = states_guard.entry(tag.clone()).or_insert_with(|| {
-                    AlarmStateValue::Numeric(value, now_ms)
-                });
+                let entry = states_guard
+                    .entry(tag.clone())
+                    .or_insert_with(|| AlarmStateValue::Numeric(value, now_ms));
 
                 if let AlarmStateValue::Numeric(prev_value, prev_ts) = entry {
                     let dt = ((now_ms - *prev_ts) as f64) / 1000.0;
-                    let rate = if dt > 0.0 { (value - *prev_value).abs() / dt } else { 0.0 };
+                    let rate = if dt > 0.0 {
+                        (value - *prev_value).abs() / dt
+                    } else {
+                        0.0
+                    };
                     *prev_value = value;
                     *prev_ts = now_ms;
                     (rate, format!("{:.2}/s (limit: {}/s)", rate, threshold))
@@ -205,14 +243,16 @@ impl AlarmOperator {
     ) -> Option<(f64, String)> {
         if let AlarmRule::StateChange { tag, from, to, .. } = rule {
             let value_opt = data.payload.get(tag).and_then(|v| v.as_string());
-            let Some(value) = value_opt else { return None; };
+            let Some(value) = value_opt else {
+                return None;
+            };
             let now_ms = data.ts.timestamp_millis();
 
             let triggered = {
                 let mut states_guard = states.write().await;
-                let entry = states_guard.entry(tag.clone()).or_insert_with(|| {
-                    AlarmStateValue::Text(value.clone(), now_ms)
-                });
+                let entry = states_guard
+                    .entry(tag.clone())
+                    .or_insert_with(|| AlarmStateValue::Text(value.clone(), now_ms));
 
                 if let AlarmStateValue::Text(prev_value, _) = entry {
                     let matches_from = from == "*" || *prev_value == *from;
@@ -258,7 +298,8 @@ impl AlarmOperator {
             AlarmRule::Threshold { message, .. } => message.clone(),
             AlarmRule::RateOfChange { message, .. } => message.clone(),
             AlarmRule::StateChange { message, .. } => message.clone(),
-        }.unwrap_or_else(|| format!("[{:?}] {} triggered", level, rule_type));
+        }
+        .unwrap_or_else(|| format!("[{:?}] {} triggered", level, rule_type));
 
         AlarmEvent {
             rule_id: rule_id.to_string(),
@@ -284,7 +325,9 @@ impl Operable for AlarmOperator {
             name_zh: Some("告警"),
             name_en: Some("Alarm"),
             description_zh: Some("告警规则引擎，支持阈值告警、变化率告警、状态变化告警"),
-            description_en: Some("Alarm rule engine with threshold, rate-of-change, and state-change rules"),
+            description_en: Some(
+                "Alarm rule engine with threshold, rate-of-change, and state-change rules",
+            ),
         }
     }
 
@@ -296,16 +339,23 @@ impl Operable for AlarmOperator {
         Ok(())
     }
 
-    async fn process(&self, _node_id: NodeId, data: PipelineData) -> PluginResult<Vec<PipelineData>> {
+    async fn process(
+        &self,
+        _node_id: NodeId,
+        data: PipelineData,
+    ) -> PluginResult<Vec<PipelineData>> {
         let mut triggered_alarms = Vec::new();
 
         for (rule_id, rule) in &self.rules {
-            let level = self.levels.get(rule_id).copied().unwrap_or(AlarmLevel::Info);
+            let level = self
+                .levels
+                .get(rule_id)
+                .copied()
+                .unwrap_or(AlarmLevel::Info);
 
             let triggered = match rule {
                 AlarmRule::Threshold { .. } => {
-                    Self::evaluate_threshold(&data, rule)
-                        .map(|(v, desc)| (v, desc))
+                    Self::evaluate_threshold(&data, rule).map(|(v, desc)| (v, desc))
                 }
                 AlarmRule::RateOfChange { .. } => {
                     Self::evaluate_rate_of_change(&self.states, &data, rule).await
@@ -317,7 +367,12 @@ impl Operable for AlarmOperator {
 
             if let Some((trigger_value, threshold_desc)) = triggered {
                 let event = Self::make_alarm_event(
-                    rule_id, rule, level, trigger_value, threshold_desc, &data
+                    rule_id,
+                    rule,
+                    level,
+                    trigger_value,
+                    threshold_desc,
+                    &data,
                 );
                 triggered_alarms.push(event);
             }
@@ -326,19 +381,27 @@ impl Operable for AlarmOperator {
         // If any alarm triggered, route to alarm port; otherwise to normal port
         if !triggered_alarms.is_empty() {
             let mut out = data;
-            out.metadata.insert("alarm.port".into(), "alarm".to_string());
+            out.metadata
+                .insert("alarm.port".into(), "alarm".to_string());
             // Store first alarm event (could store all as JSON array)
             if let Ok(event_json) = serde_json::to_string(&triggered_alarms[0]) {
                 out.metadata.insert("alarm.event".into(), event_json);
             }
-            out.metadata.insert("alarm.is_triggered".into(), "true".to_string());
-            out.metadata.insert("alarm.level".into(), format!("{:?}", triggered_alarms[0].level));
-            out.metadata.insert("alarm.rule_id".into(), triggered_alarms[0].rule_id.clone());
+            out.metadata
+                .insert("alarm.is_triggered".into(), "true".to_string());
+            out.metadata.insert(
+                "alarm.level".into(),
+                format!("{:?}", triggered_alarms[0].level),
+            );
+            out.metadata
+                .insert("alarm.rule_id".into(), triggered_alarms[0].rule_id.clone());
             Ok(vec![out])
         } else {
             let mut out = data;
-            out.metadata.insert("alarm.port".into(), "normal".to_string());
-            out.metadata.insert("alarm.is_triggered".into(), "false".to_string());
+            out.metadata
+                .insert("alarm.port".into(), "normal".to_string());
+            out.metadata
+                .insert("alarm.is_triggered".into(), "false".to_string());
             Ok(vec![out])
         }
     }
@@ -385,8 +448,59 @@ mod tests {
     async fn test_threshold_alarm_high() {
         let config = PluginConfig::new();
         let alarm = AlarmOperator::new(&config);
-        
+
         // This test just verifies the operator can be created
         assert_eq!(alarm.rules.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn alarm_operator_emits_alarm_event_when_threshold_is_exceeded() {
+        let mut config = PluginConfig::new();
+        config.insert(
+            "rules".to_string(),
+            serde_json::json!([
+                {
+                    "id": "temp_high",
+                    "type": "threshold",
+                    "tag": "temperature",
+                    "high": 80.0,
+                    "level": "high",
+                    "message": "temperature too high"
+                }
+            ]),
+        );
+        let alarm = AlarmOperator::new(&config);
+        let node_id = NodeId::new();
+        let mut data = PipelineData::new(node_id);
+        data.payload.insert(
+            "temperature".to_string(),
+            gateway_sdk::DataValue::Float64(92.5),
+        );
+
+        let output = alarm.process(node_id, data).await.unwrap();
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0]
+                .metadata
+                .get("alarm.is_triggered")
+                .map(String::as_str),
+            Some("true")
+        );
+
+        let event_json = output[0]
+            .metadata
+            .get("alarm.event")
+            .expect("alarm.event metadata");
+        let event: AlarmEvent = serde_json::from_str(event_json).unwrap();
+        assert_eq!(event.rule_id, "temp_high");
+        assert_eq!(event.tag, "temperature");
+        assert_eq!(event.level, AlarmLevel::High);
+        assert_eq!(event.trigger_value, 92.5);
+
+        let draft = AlarmEventDraft::from_alarm_event(node_id, event);
+        assert_eq!(draft.source_type, "flow");
+        assert_eq!(draft.tag, "temperature");
+        assert_eq!(draft.severity, AlarmLevel::High);
+        assert_eq!(draft.value, 92.5);
     }
 }

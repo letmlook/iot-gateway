@@ -9,9 +9,10 @@ mod loader;
 mod manager;
 mod node;
 mod persist;
+mod processor;
 mod store;
 
-pub use bus::{Bus, SubscriptionTable, subscription_set};
+pub use bus::{subscription_set, Bus, SubscriptionTable};
 pub use data_flow::{DataFlowMetrics, DataFlowMetricsSnapshot, TagForwardedStat, TagPublishedStat};
 pub use loader::PluginLoader;
 pub use manager::{Manager, SouthConnectionState};
@@ -21,4 +22,5 @@ pub use persist::{
     save as persist_save, save_with_backup as persist_save_with_backup, PersistError, Snapshot,
     SNAPSHOT_VERSION,
 };
+pub use processor::{GroupDataProcessor, ProcessDecision};
 pub use store::Store;

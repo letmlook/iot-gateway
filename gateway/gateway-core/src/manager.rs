@@ -1,21 +1,22 @@
 //! 路由核心：插件管理、节点启停、消息路由。
 
-use crate::bus::{Bus, SubscriptionTable, subscription_set};
+use crate::bus::{subscription_set, Bus, SubscriptionTable};
 use crate::data_flow::DataFlowMetrics;
 use crate::node::Node;
+use crate::processor::{GroupDataProcessor, ProcessDecision};
 use crate::store::Store;
-use gateway_sdk::{
-    Group, GroupData, GroupSubscription, NorthPlugin, SouthPlugin, PluginConfig,
-    NodeId, NodeKind, NodeState, PluginInfo, Tag,
-};
+use chrono::Utc;
 use gateway_sdk::log;
 use gateway_sdk::types::{DataValue, TagId};
+use gateway_sdk::{
+    Group, GroupData, GroupSubscription, NodeId, NodeKind, NodeState, NorthPlugin, PluginConfig,
+    PluginInfo, SouthPlugin, Tag,
+};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{instrument, warn, error};
-use chrono::Utc;
+use tracing::{error, instrument, warn};
 
 use crate::persist::{apply_to_store, Snapshot};
 
@@ -45,6 +46,8 @@ pub struct Manager {
     pub data_flow_metrics: Arc<DataFlowMetrics>,
     /// 南向节点连接状态（按最近一次 poll 结果更新，供 API 与前端展示）
     south_connection_status: Arc<RwLock<HashMap<NodeId, SouthConnectionState>>>,
+    /// Optional processing hook before south GroupData is published to the bus.
+    group_data_processor: Arc<RwLock<Option<Arc<dyn GroupDataProcessor>>>>,
 }
 
 impl Manager {
@@ -59,12 +62,23 @@ impl Manager {
             north_cancel: Arc::new(RwLock::new(HashMap::new())),
             data_flow_metrics: Arc::new(DataFlowMetrics::new()),
             south_connection_status: Arc::new(RwLock::new(HashMap::new())),
+            group_data_processor: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Install or replace the optional pre-bus GroupData processor.
+    pub async fn set_group_data_processor(&self, processor: Option<Arc<dyn GroupDataProcessor>>) {
+        let mut slot = self.group_data_processor.write().await;
+        *slot = processor;
     }
 
     /// 南向节点连接状态（由最近一次采集成功/失败推断），供 API 与前端展示
     pub async fn south_connection_status(&self, node_id: NodeId) -> Option<SouthConnectionState> {
-        self.south_connection_status.read().await.get(&node_id).cloned()
+        self.south_connection_status
+            .read()
+            .await
+            .get(&node_id)
+            .cloned()
     }
 
     /// 数据流链路监控快照
@@ -141,7 +155,9 @@ impl Manager {
         match kind {
             gateway_sdk::NodeKind::South => {
                 let p = plugin_south.as_ref().ok_or("south plugin not found")?;
-                p.open(id, config.clone()).await.map_err(|e| e.to_string())?;
+                p.open(id, config.clone())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 if let Err(e) = p.init(id).await {
                     let _ = p.close(id).await;
                     let _ = self.store.node_remove(id);
@@ -150,7 +166,9 @@ impl Manager {
             }
             gateway_sdk::NodeKind::North => {
                 let p = plugin_north.as_ref().ok_or("north plugin not found")?;
-                p.open(id, config.clone()).await.map_err(|e| e.to_string())?;
+                p.open(id, config.clone())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 if let Err(e) = p.init(id).await {
                     let _ = p.close(id).await;
                     let _ = self.store.node_remove(id);
@@ -167,7 +185,9 @@ impl Manager {
 
     /// 更新节点名称。
     pub fn node_update(&self, id: NodeId, name: Option<String>) -> Result<(), String> {
-        let Some(n) = name else { return Ok(()); };
+        let Some(n) = name else {
+            return Ok(());
+        };
         self.store.node_update_name(id, n);
         Ok(())
     }
@@ -201,7 +221,11 @@ impl Manager {
     /// 设置北向节点的订阅。若该北向节点正在运行，会重启其总线消费任务以使新订阅生效。
     /// 会过滤掉无效的订阅项（south_node_id 或 group_id 不存在）。
     #[instrument(skip(self))]
-    pub async fn set_north_subscriptions(&self, north_node_id: NodeId, subs: Vec<GroupSubscription>) {
+    pub async fn set_north_subscriptions(
+        &self,
+        north_node_id: NodeId,
+        subs: Vec<GroupSubscription>,
+    ) {
         let subs: Vec<GroupSubscription> = subs
             .into_iter()
             .filter(|s| {
@@ -223,7 +247,9 @@ impl Manager {
             return;
         }
         let plugin_name = node.config.plugin_name.clone();
-        let Some(plugin) = self.north_plugin(&plugin_name) else { return };
+        let Some(plugin) = self.north_plugin(&plugin_name) else {
+            return;
+        };
         let mut c = self.north_cancel.write().await;
         if let Some(tx) = c.remove(&north_node_id) {
             let _ = tx.send(());
@@ -306,12 +332,20 @@ impl Manager {
 
         match node.kind() {
             NodeKind::South => {
-                let plugin = self.south_plugin(&plugin_name).ok_or("south plugin not found")?;
+                let plugin = self
+                    .south_plugin(&plugin_name)
+                    .ok_or("south plugin not found")?;
                 plugin.start(id).await.map_err(|e| e.to_string())?;
                 log::info(id, "南向节点启动 运行中 连接中");
                 {
                     let mut st = self.south_connection_status.write().await;
-                    st.insert(id, SouthConnectionState { connected: false, last_error: None });
+                    st.insert(
+                        id,
+                        SouthConnectionState {
+                            connected: false,
+                            last_error: None,
+                        },
+                    );
                 }
                 // 若 Store 中尚无该节点的 group，从插件同步默认 groups/tags
                 let groups = self.store.groups_by_node(id);
@@ -321,7 +355,10 @@ impl Manager {
                         self.store.group_insert(id, g.clone());
                     }
                     for g in &gs {
-                        let ts = plugin.list_tags(id, g.id).await.map_err(|e| e.to_string())?;
+                        let ts = plugin
+                            .list_tags(id, g.id)
+                            .await
+                            .map_err(|e| e.to_string())?;
                         for t in ts {
                             self.store.tag_insert(id, t);
                         }
@@ -335,6 +372,7 @@ impl Manager {
                 }
                 let metrics = self.data_flow_metrics.clone();
                 let south_conn = self.south_connection_status.clone();
+                let processor = self.group_data_processor.clone();
                 for g in groups {
                     let store = self.store.clone();
                     let bus = self.bus.clone();
@@ -342,6 +380,7 @@ impl Manager {
                     let cancel_rx = cancel_tx.subscribe();
                     let metrics = metrics.clone();
                     let south_conn = south_conn.clone();
+                    let processor = processor.clone();
                     let gid = g.id;
                     tokio::spawn(async move {
                         let mut cancel_rx = cancel_rx;
@@ -349,7 +388,6 @@ impl Manager {
                             let tags = store.tags_by_group(id, gid);
                             match plugin.poll_group(id, gid, &tags).await {
                                 Ok(values) => {
-                                    let point_count = values.len();
                                     let node_name = store.node_get(id).map(|n| n.config.name);
                                     let group_name = store.group_get(id, gid).map(|g| g.name);
                                     let tag_names: std::collections::HashMap<_, _> = values
@@ -372,19 +410,39 @@ impl Manager {
                                         group_name,
                                         tag_names,
                                     });
-                                    metrics.record_south_published_tags(id, gid, &data.values);
-                                    match bus.publish(data) {
-                                        Ok(_) => {
-                                            metrics.south_published.fetch_add(1, Ordering::Relaxed);
+                                    let decision = match processor.read().await.clone() {
+                                        Some(processor) => {
+                                            processor
+                                                .process_group_data(id, gid, data.clone())
+                                                .await
                                         }
-                                        Err(_) => {
-                                            metrics.bus_no_subscribers.fetch_add(1, Ordering::Relaxed);
+                                        None => ProcessDecision::Publish(data),
+                                    };
+                                    if let ProcessDecision::Publish(data) = decision {
+                                        metrics.record_south_published_tags(id, gid, &data.values);
+                                        match bus.publish(data) {
+                                            Ok(_) => {
+                                                metrics
+                                                    .south_published
+                                                    .fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                metrics
+                                                    .bus_no_subscribers
+                                                    .fetch_add(1, Ordering::Relaxed);
+                                            }
                                         }
                                     }
                                     // let grp_name = store.group_get(id, gid).map(|g| g.name).unwrap_or_else(|| gid.0.to_string());
-                                    // log::info(id, format!("采集成功 组[{}] 全点 {} 个 连接正常", grp_name, point_count));
+                                    // log::info(id, format!("采集成功 组[{}] 连接正常", grp_name));
                                     let mut st = south_conn.write().await;
-                                    st.insert(id, SouthConnectionState { connected: true, last_error: None });
+                                    st.insert(
+                                        id,
+                                        SouthConnectionState {
+                                            connected: true,
+                                            last_error: None,
+                                        },
+                                    );
                                 }
                                 Err(e) => {
                                     // let grp_name = store.group_get(id, gid).map(|g| g.name).unwrap_or_else(|| gid.0.to_string());
@@ -392,7 +450,13 @@ impl Manager {
                                     // log::warn(id, format!("采集失败 组[{}]: {} 连接异常", grp_name, err_msg));
                                     warn!(node_id = ?id, group_id = ?gid, "poll_group error: {}", e);
                                     let mut st = south_conn.write().await;
-                                    st.insert(id, SouthConnectionState { connected: false, last_error: Some(err_msg) });
+                                    st.insert(
+                                        id,
+                                        SouthConnectionState {
+                                            connected: false,
+                                            last_error: Some(err_msg),
+                                        },
+                                    );
                                 }
                             }
                             let interval_ms = match store.group_get(id, gid) {
@@ -408,10 +472,15 @@ impl Manager {
                 }
             }
             NodeKind::North => {
-                let plugin = self.north_plugin(&plugin_name).ok_or("north plugin not found")?;
+                let plugin = self
+                    .north_plugin(&plugin_name)
+                    .ok_or("north plugin not found")?;
                 plugin.start(id).await.map_err(|e| e.to_string())?;
                 let subs = self.get_north_subscriptions(id).await;
-                plugin.set_subscriptions(id, &subs).await.map_err(|e| e.to_string())?;
+                plugin
+                    .set_subscriptions(id, &subs)
+                    .await
+                    .map_err(|e| e.to_string())?;
                 let mut recv = self.bus.subscribe();
                 let (tx, mut rx) = tokio::sync::oneshot::channel();
                 {
@@ -470,7 +539,13 @@ impl Manager {
             log::info(id, "南向节点停止 连接断开");
             {
                 let mut st = self.south_connection_status.write().await;
-                st.insert(id, SouthConnectionState { connected: false, last_error: None });
+                st.insert(
+                    id,
+                    SouthConnectionState {
+                        connected: false,
+                        last_error: None,
+                    },
+                );
             }
             let mut c = self.south_cancel.write().await;
             if let Some(tx) = c.remove(&id) {
@@ -533,7 +608,9 @@ impl Manager {
             let config = n.config.config.clone();
             match n.kind() {
                 gateway_sdk::NodeKind::South => {
-                    let Some(p) = self.south_plugin(&plugin_name) else { continue };
+                    let Some(p) = self.south_plugin(&plugin_name) else {
+                        continue;
+                    };
                     if let Err(e) = p.open(nid, config.clone()).await {
                         tracing::warn!(node_id = ?nid, "apply_snapshot open failed: {}", e);
                         self.store.node_update_state(nid, NodeState::Stopped);
@@ -546,7 +623,9 @@ impl Manager {
                     }
                 }
                 gateway_sdk::NodeKind::North => {
-                    let Some(p) = self.north_plugin(&plugin_name) else { continue };
+                    let Some(p) = self.north_plugin(&plugin_name) else {
+                        continue;
+                    };
                     if let Err(e) = p.open(nid, config.clone()).await {
                         tracing::warn!(node_id = ?nid, "apply_snapshot open failed: {}", e);
                         self.store.node_update_state(nid, NodeState::Stopped);
@@ -606,7 +685,8 @@ impl Manager {
                 }
             }
         }
-        self.store.group_update(node_id, group_id, name, interval_ms, description);
+        self.store
+            .group_update(node_id, group_id, name, interval_ms, description);
         Ok(())
     }
 
@@ -636,7 +716,9 @@ impl Manager {
         let p = self
             .south_plugin(node.plugin_name())
             .ok_or("south plugin not found")?;
-        p.validate_tag(node_id, tag).await.map_err(|e| e.to_string())
+        p.validate_tag(node_id, tag)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     pub fn tag_add(&self, node_id: NodeId, t: Tag) {
@@ -695,7 +777,8 @@ impl Manager {
             }
             self.validate_tag(node_id, &updated).await?;
         }
-        self.store.tag_update(tag_id, name, address, attr, data_type, description);
+        self.store
+            .tag_update(tag_id, name, address, attr, data_type, description);
         Ok(())
     }
 
@@ -729,8 +812,12 @@ impl Manager {
         let tag_set: std::collections::HashSet<TagId> = tag_ids.iter().copied().collect();
         let mut tags_to_read: Vec<Tag> = Vec::new();
         for tid in tag_ids {
-            let Some(t) = self.store.tag_get(*tid) else { continue };
-            let Some(loc) = self.store.tag_location_get(*tid) else { continue };
+            let Some(t) = self.store.tag_get(*tid) else {
+                continue;
+            };
+            let Some(loc) = self.store.tag_location_get(*tid) else {
+                continue;
+            };
             if loc.0 != node_id {
                 continue;
             }
@@ -782,7 +869,9 @@ impl Manager {
                 if was_running {
                     let _ = self.node_stop(id).await;
                 }
-                p.setting(id, config.clone()).await.map_err(|e| e.to_string())?;
+                p.setting(id, config.clone())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 self.store.node_update_config(id, config.clone());
                 if was_running {
                     self.node_start(id).await?;
@@ -790,7 +879,9 @@ impl Manager {
             }
             gateway_sdk::NodeKind::North => {
                 let p = plugin_north.ok_or("north plugin not found")?;
-                p.setting(id, config.clone()).await.map_err(|e| e.to_string())?;
+                p.setting(id, config.clone())
+                    .await
+                    .map_err(|e| e.to_string())?;
                 self.store.node_update_config(id, config);
             }
         }
@@ -807,12 +898,16 @@ impl Manager {
         if node.kind() != gateway_sdk::NodeKind::South {
             return Err("write_tags only for south nodes".to_string());
         }
-        let mut tag_values: Vec<(Tag, gateway_sdk::types::DataValue)> = Vec::with_capacity(values.len());
+        let mut tag_values: Vec<(Tag, gateway_sdk::types::DataValue)> =
+            Vec::with_capacity(values.len());
         for (tid, val) in values {
             let Some(tag) = self.store.tag_get(*tid) else {
                 return Err(format!("tag {} not found", tid.0));
             };
-            let (nid, _) = self.store.tag_location_get(*tid).ok_or("tag location not found")?;
+            let (nid, _) = self
+                .store
+                .tag_location_get(*tid)
+                .ok_or("tag location not found")?;
             if nid != node_id {
                 return Err(format!("tag {} does not belong to node", tid.0));
             }
@@ -821,7 +916,9 @@ impl Manager {
         let p = self
             .south_plugin(node.plugin_name())
             .ok_or("south plugin not found")?;
-        p.write_tags(node_id, &tag_values).await.map_err(|e| e.to_string())
+        p.write_tags(node_id, &tag_values)
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 
