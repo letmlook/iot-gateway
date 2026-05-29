@@ -100,7 +100,7 @@ async function handleDelete(id) {
 }
 
 function statusType(s) {
-  return { draft: '', deployed: 'info', running: 'success', paused: 'warning', stopped: 'info', error: 'danger' }[s] || ''
+  return { draft: 'info', deployed: 'info', running: 'success', paused: 'warning', stopped: 'info', error: 'danger' }[s] || 'info'
 }
 
 function statusLabel(s) {

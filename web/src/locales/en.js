@@ -100,6 +100,10 @@ export default {
     expandMenu: 'Expand menu',
     collapseMenu: 'Collapse menu',
   },
+  flows: {
+    title: 'Flow Orchestration',
+    new: 'New Flow',
+  },
   header: {
     southDevices: 'South Devices',
     northApps: 'North Apps',

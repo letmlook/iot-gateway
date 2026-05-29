@@ -100,6 +100,10 @@ export default {
     expandMenu: '展开菜单',
     collapseMenu: '收起菜单',
   },
+  flows: {
+    title: '数据流编排',
+    new: '新建数据流',
+  },
   header: {
     southDevices: '南向设备',
     northApps: '北向应用',
