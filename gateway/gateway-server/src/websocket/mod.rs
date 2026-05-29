@@ -69,7 +69,10 @@ impl WsHub {
     /// Get a snapshot of the number of active subscribers for a flow.
     pub async fn subscriber_count(&self, flow_id: Uuid) -> usize {
         let channels = self.channels.read().await;
-        channels.get(&flow_id).map(|tx| tx.len()).unwrap_or(0)
+        channels
+            .get(&flow_id)
+            .map(|tx| tx.receiver_count())
+            .unwrap_or(0)
     }
 }
 
