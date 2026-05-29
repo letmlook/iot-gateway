@@ -2,7 +2,7 @@
 
 use crate::alarm::AlarmStore;
 use crate::flow::FlowStore;
-use crate::websocket::{AlarmLiveEvent, WsHub};
+use crate::websocket::{AlarmLiveEvent, FlowLiveEvent, WsHub};
 use gateway_core::{GroupDataProcessor, ProcessDecision};
 use gateway_flow::{FlowFailurePolicy, FlowRuntime, OperatorRegistry};
 use gateway_sdk::{DataValue, GroupData, GroupId, NodeId, PipelineData, TagId};
@@ -96,6 +96,36 @@ impl FlowGroupDataProcessor {
             group_name: original.group_name.clone(),
             tag_names: original.tag_names.clone(),
         }
+    }
+
+    fn group_data_values_json(data: &GroupData) -> serde_json::Value {
+        let mut values = serde_json::Map::new();
+        for (tag_id, value) in &data.values {
+            let key = data
+                .tag_names
+                .as_ref()
+                .and_then(|names| names.get(tag_id))
+                .cloned()
+                .unwrap_or_else(|| tag_id.0.to_string());
+            values.insert(key, serde_json::to_value(value).unwrap_or(serde_json::Value::Null));
+        }
+        serde_json::Value::Object(values)
+    }
+
+    async fn broadcast_processed_data(&self, flow_id: Uuid, data: &GroupData) {
+        self.ws_hub
+            .broadcast(
+                flow_id,
+                FlowLiveEvent::DataProcessed {
+                    flow_id: flow_id.to_string(),
+                    south_node_id: data.node_id.0.to_string(),
+                    group_id: data.group_id.0.to_string(),
+                    node_name: data.node_name.clone(),
+                    group_name: data.group_name.clone(),
+                    values: Self::group_data_values_json(data),
+                },
+            )
+            .await;
     }
 
     async fn ensure_runtime(&self, flow_id: Uuid) -> Result<(), String> {
@@ -207,6 +237,7 @@ impl GroupDataProcessor for FlowGroupDataProcessor {
                     return ProcessDecision::Drop;
                 };
                 let processed = Self::pipeline_to_group_data(&data, first);
+                self.broadcast_processed_data(binding.flow_id, &processed).await;
                 ProcessDecision::Publish(Arc::new(processed))
             }
             Err(e) => Self::failure_decision(binding.failure_policy, data, e.to_string()),

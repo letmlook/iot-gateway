@@ -100,6 +100,15 @@ pub enum FlowLiveEvent {
         event: String,
         detail: Option<String>,
     },
+    /// A bound flow processed south group data in the main gateway data path.
+    DataProcessed {
+        flow_id: String,
+        south_node_id: String,
+        group_id: String,
+        node_name: Option<String>,
+        group_name: Option<String>,
+        values: serde_json::Value,
+    },
     /// Heartbeat / keepalive
     Ping { ts: String },
 }
@@ -296,4 +305,34 @@ pub async fn flow_live_summary(
         "ws_subscribers": ws_subscribers,
         "ts": chrono::Utc::now().to_rfc3339(),
     })))
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn data_processed_event_serializes_with_source_identifiers() {
+        let event = FlowLiveEvent::DataProcessed {
+            flow_id: "flow-1".to_string(),
+            south_node_id: "south-1".to_string(),
+            group_id: "group-1".to_string(),
+            node_name: Some("e2e_sim".to_string()),
+            group_name: Some("e2e_group".to_string()),
+            values: serde_json::json!({
+                "temperature": 123.4,
+                "humidity": 55.0,
+            }),
+        };
+
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(json["type"], "data_processed");
+        assert_eq!(json["flow_id"], "flow-1");
+        assert_eq!(json["south_node_id"], "south-1");
+        assert_eq!(json["group_id"], "group-1");
+        assert_eq!(json["node_name"], "e2e_sim");
+        assert_eq!(json["group_name"], "e2e_group");
+        assert_eq!(json["values"]["temperature"], 123.4);
+    }
 }
