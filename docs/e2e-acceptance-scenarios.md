@@ -226,3 +226,47 @@ cargo test -p plugin-modbus-tcp
 cargo test -p plugin-modbus-rtu
 cargo test -p plugin-mqtt
 ```
+
+## Full-chain process E2E
+
+The full-chain E2E verifies the product runtime loop with real gateway components:
+
+```text
+Sim south plugin -> Flow range/alarm operators -> MQTT north plugin
+                                      |-> flow WebSocket data_processed event
+                                      |-> alarm WebSocket / Alarm REST event
+```
+
+Run it explicitly because it starts processes and needs an MQTT broker:
+
+```bash
+cargo build -p gateway-server
+python3 -m pip install -r e2e/full_chain/requirements.txt
+./scripts/e2e_full_chain.sh
+```
+
+The runner starts gateway with an isolated temporary data directory and `GATEWAY_DISABLE_AUTH=true`. It does not use the development `data/` directory.
+
+MQTT broker behavior:
+
+- If `E2E_MQTT_HOST` and `E2E_MQTT_PORT` are set, the runner uses that broker.
+- If no broker is configured, the runner tries to start a temporary `mosquitto` broker.
+- If neither path is available, the command exits with code `77` and prints a skip message.
+
+Useful environment variables:
+
+```bash
+E2E_MQTT_HOST=127.0.0.1
+E2E_MQTT_PORT=1883
+E2E_KEEP_ARTIFACTS=1
+E2E_VERBOSE=1
+GATEWAY_BIN=./target/debug/gateway
+```
+
+Success requires all of these observations in one run:
+
+- MQTT receives a payload on `iot-gateway/e2e/<run_id>/#`.
+- The MQTT `temperature` value is greater than `100`, proving the Flow `range` operator processed the Sim value.
+- The flow WebSocket receives a `data_processed` event for the test group.
+- The alarm WebSocket or Alarm REST API observes the test rule event.
+- The Alarm REST API returns the persisted event for the test rule.
