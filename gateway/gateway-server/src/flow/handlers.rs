@@ -89,6 +89,13 @@ pub async fn create_flow(
             return Err(ApiError::bad_request("flow name cannot be empty"));
         }
         let now = chrono::Utc::now();
+
+        // Deserialize nodes from FlowCreate into FlowNode objects
+        let nodes: Vec<gateway_flow::FlowNode> = serde_json::from_value(serde_json::json!(create.nodes))
+            .map_err(|e| ApiError::bad_request(format!("invalid nodes: {e}")))?;
+        let edges: Vec<gateway_flow::FlowEdge> = serde_json::from_value(serde_json::json!(create.edges))
+            .map_err(|e| ApiError::bad_request(format!("invalid edges: {e}")))?;
+
         Flow {
             id: Uuid::new_v4(),
             name: create.name,
@@ -96,8 +103,8 @@ pub async fn create_flow(
             status: gateway_flow::FlowStatus::Draft,
             created_at: now,
             updated_at: now,
-            nodes: Vec::new(),
-            edges: Vec::new(),
+            nodes,
+            edges,
             bindings: Vec::new(),
             version: 1,
         }
