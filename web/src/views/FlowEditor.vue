@@ -480,6 +480,10 @@ function statusLabel(s) {
   return { running: '运行中', stopped: '已停止', error: '错误', unknown: '未知' }[s] || s || '未知'
 }
 
+function normalizePluginList(response) {
+  return Array.isArray(response) ? response : (response?.plugins || [])
+}
+
 import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
 import '@vue-flow/controls/dist/style.css'
@@ -580,10 +584,14 @@ onMounted(async () => {
   // Load plugins
   try {
     const south = await api.pluginsSouth()
-    southPlugins.value = south.plugins || []
+    southPlugins.value = normalizePluginList(south)
     const north = await api.pluginsNorth()
-    northPlugins.value = north.plugins || []
-  } catch (e) { console.error(e) }
+    northPlugins.value = normalizePluginList(north)
+  } catch (e) {
+    console.error(e)
+    southPlugins.value = []
+    northPlugins.value = []
+  }
 
   if (flowId.value) {
     try {
