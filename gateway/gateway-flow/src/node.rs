@@ -29,6 +29,13 @@ pub struct Port {
     pub required: bool,
 }
 
+/// UI position for rendering a node in graph editors.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodePosition {
+    pub x: f64,
+    pub y: f64,
+}
+
 /// A node in a flow graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowNode {
@@ -39,4 +46,6 @@ pub struct FlowNode {
     pub config: gateway_sdk::PluginConfig,
     pub input_ports: Vec<Port>,
     pub output_ports: Vec<Port>,
+    #[serde(default)]
+    pub position: Option<NodePosition>,
 }

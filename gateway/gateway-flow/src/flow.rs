@@ -85,6 +85,47 @@ pub struct Flow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::node::{FlowNode, NodeKind, NodePosition};
+    use serde_json::json;
+
+    #[test]
+    fn flow_node_position_round_trips_json() {
+        let node = FlowNode {
+            id: Uuid::new_v4(),
+            name: "range".to_string(),
+            kind: NodeKind::Operator,
+            operator_name: Some("range".to_string()),
+            config: gateway_sdk::PluginConfig::new(),
+            input_ports: vec![],
+            output_ports: vec![],
+            position: Some(NodePosition { x: 320.0, y: 160.0 }),
+        };
+
+        let json = serde_json::to_value(&node).unwrap();
+        assert_eq!(json["position"]["x"], 320.0);
+        assert_eq!(json["position"]["y"], 160.0);
+
+        let decoded: FlowNode = serde_json::from_value(json).unwrap();
+        let position = decoded.position.unwrap();
+        assert_eq!(position.x, 320.0);
+        assert_eq!(position.y, 160.0);
+    }
+
+    #[test]
+    fn flow_node_without_position_deserializes_for_legacy_json() {
+        let json = json!({
+            "id": Uuid::new_v4(),
+            "name": "legacy",
+            "kind": "operator",
+            "operator_name": "range",
+            "config": {},
+            "input_ports": [],
+            "output_ports": []
+        });
+
+        let decoded: FlowNode = serde_json::from_value(json).unwrap();
+        assert!(decoded.position.is_none());
+    }
 
     #[test]
     fn flow_binding_serializes_south_group_source() {
