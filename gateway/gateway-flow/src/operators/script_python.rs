@@ -77,7 +77,7 @@ impl ScriptPythonOperator {
 
         if !self.output_fields.is_empty() {
             let items: Vec<String> = self.output_fields.iter()
-                .map(|f| format!("'{}': {{{}}}", f, f))
+                .map(|f| format!("'{}': {}", f, f))
                 .collect();
             lines.push(format!("import json; print(json.dumps({{{}}}))", items.join(", ")));
         } else {

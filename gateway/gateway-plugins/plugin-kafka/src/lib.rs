@@ -12,7 +12,7 @@ struct KafkaState {
     #[allow(dead_code)]
     topic: String,
     #[cfg(feature = "kafka-client")]
-    producer: std::sync::Mutex<Option<rdkafka::producer::Producer>>,
+    producer: std::sync::Mutex<Option<rdkafka::producer::FutureProducer>>,
 }
 
 static KAFKA_STATE: once_cell::sync::Lazy<Mutex<Option<KafkaState>>> =
@@ -76,9 +76,9 @@ pub unsafe extern "C" fn north_open(
 
     #[cfg(feature = "kafka-client")]
     let producer = {
-        let conf = rdkafka::config::ClientConfig::new();
-        let conf = conf.set("bootstrap.servers", brokers);
-        match conf.set("message.timeout.ms", "5000").create::<rdkafka::producer::Producer>() {
+        let mut conf = rdkafka::config::ClientConfig::new();
+        conf.set("bootstrap.servers", brokers);
+        match conf.set("message.timeout.ms", "5000").create::<rdkafka::producer::FutureProducer>() {
             Ok(p) => std::sync::Mutex::new(Some(p)),
             Err(e) => return result_to_json(serde_json::json!({"error": e.to_string()})),
         }
@@ -163,33 +163,18 @@ pub unsafe extern "C" fn north_on_group_data(
             None => return result_to_json(serde_json::json!({"error": "no producer"})),
         };
 
-        let payload = rdkafka::producer::ProducerRecordBuilder::new(
-            state.topic.clone(),
-            rdkafka::message::OwnedMessage::new(
-                data.into_bytes(),
-                None,
-                format!("{}-{}", state.brokers, chrono::Utc::now().timestamp_millis()).into(),
-            ),
-        )
-        .key(&state.brokers)
-        .build();
+        let key = format!("{}-{}", state.brokers, chrono::Utc::now().timestamp_millis());
+        let record = rdkafka::producer::FutureRecord::to(&state.topic)
+            .payload(data.as_ref())
+            .key(&key);
 
-        match producer.send(payload) {
-            Ok((partition, offset)) => {
-                tracing::info!(
-                    "kafka: sent to {} [{}] offset={}",
-                    state.topic,
-                    partition,
-                    offset
-                );
-                result_to_json(serde_json::json!({
-                    "sent": 1,
-                    "partition": partition,
-                    "offset": offset
-                }))
+        match producer.send_result(record) {
+            Ok(_) => {
+                tracing::info!("kafka: enqueued message to {}", state.topic);
+                result_to_json(serde_json::json!({ "sent": 1 }))
             }
             Err((e, _)) => {
-                tracing::warn!("kafka: failed to send to {}: {}", state.topic, e);
+                tracing::warn!("kafka: failed to enqueue message to {}: {}", state.topic, e);
                 result_to_json(serde_json::json!({"error": e.to_string()}))
             }
         }
