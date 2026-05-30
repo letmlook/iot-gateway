@@ -85,6 +85,12 @@ const routes = [
     meta: { title: '数据流指标' }
   },
   {
+    path: '/monitor/alarms',
+    name: 'AlarmEvents',
+    component: () => import('./views/AlarmEvents.vue'),
+    meta: { title: '告警事件' }
+  },
+  {
     path: '/flows',
     name: 'FlowList',
     component: () => import('./views/FlowList.vue'),

@@ -77,7 +77,7 @@ This matrix freezes the current production-readiness scope for the IoT Gateway r
 | Flow CRUD/lifecycle | Beta | Flow store, deploy/start/pause/stop APIs exist. |
 | Flow preview | Missing | Replace mock preview with real API. |
 | Live monitor | Beta | WebSocket/live UI path exists; continue stability testing. |
-| Alarm events | Missing | Persist/query/ack/resolve/WebSocket lifecycle planned. |
+| Alarm events | Beta | Basic persisted lifecycle exists: create/list/ack/resolve plus standalone UI visibility. Query filters, dedupe/recovery semantics, and WebSocket auth hardening remain future work. |
 | Plugin status metadata | Missing | SDK/API/UI metadata extension planned. |
 | Prometheus metrics | Experimental | Basic metrics exist; production metric names/runtime paths planned. |
 | Audit logs | Missing | Store/API and critical-operation recording planned. |
@@ -99,5 +99,5 @@ Required before marking v0.6 complete:
 - Flow preview uses real runtime execution.
 - A bound Flow can process south group data before north publishing.
 - MQTT receives processed values.
-- Alarm events have at least a basic persisted lifecycle.
+- Alarm events have at least a basic persisted lifecycle and standalone UI visibility.
 - Plugin capability/status metadata is visible in the UI.

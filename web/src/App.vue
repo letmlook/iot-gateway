@@ -38,6 +38,7 @@ const mainNavItems = [
 const systemNavItems = [
   { path: '/settings/info', labelKey: 'menu.systemInfo' },
   { path: '/monitor/flow', labelKey: 'menu.dataFlowMetrics' },
+  { path: '/monitor/alarms', labelKey: 'menu.alarmEvents' },
   { path: '/settings/license', labelKey: 'menu.license' },
   { path: '/settings/users', labelKey: 'menu.users' },
   { path: '/settings/logs', labelKey: 'menu.logs' },
