@@ -484,6 +484,41 @@ function normalizePluginList(response) {
   return Array.isArray(response) ? response : (response?.plugins || [])
 }
 
+function buildPreviewSampleInput() {
+  return {
+    input: {
+      payload: {
+        temperature: { type: 'Float64', value: 25.6 },
+        humidity: { type: 'Float64', value: 60 }
+      },
+      metadata: {
+        source: 'flow-editor-preview'
+      }
+    }
+  }
+}
+
+function previewResultSummary(result) {
+  const outputCount = Array.isArray(result?.output) ? result.output.length : 0
+  const alarmCount = Array.isArray(result?.alarm_events) ? result.alarm_events.length : 0
+  const errorCount = Array.isArray(result?.errors) ? result.errors.length : 0
+  return `preview ok: output=${outputCount}, alarms=${alarmCount}, errors=${errorCount}`
+}
+
+function previewErrorPayload(error) {
+  return {
+    error: error?.message || String(error),
+    source: 'backend-preview'
+  }
+}
+
+function addRecentPreviewMessage(dir, data) {
+  recentMessages.value = [
+    { time: new Date().toLocaleTimeString(), dir, data },
+    ...recentMessages.value.slice(0, 3)
+  ]
+}
+
 import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
 import '@vue-flow/controls/dist/style.css'
@@ -945,19 +980,28 @@ function stopPreviewRefresh() {
   }
 }
 
-function refreshPreview() {
+async function refreshPreview() {
   if (!selectedNode.value) return
-  // Mock data for preview (real WebSocket comes Phase 4)
-  const now = new Date().toLocaleTimeString()
-  previewInput.value = JSON.stringify({ temperature: 25.6, humidity: 60, timestamp: now }, null, 2)
-  previewOutput.value = JSON.stringify({ temperature: 77.1, humidity: 60, timestamp: now }, null, 2)
 
-  // Add to recent messages
-  recentMessages.value = [
-    { time: now, dir: 'in', data: `temperature=25.6, humidity=60` },
-    { time: now, dir: 'out', data: `temperature=77.1, humidity=60` },
-    ...recentMessages.value.slice(0, 3)
-  ]
+  const sampleInput = buildPreviewSampleInput()
+  previewInput.value = JSON.stringify(sampleInput, null, 2)
+
+  if (!flowId.value) {
+    const message = { message: '请先保存数据流后再预览' }
+    previewOutput.value = JSON.stringify(message, null, 2)
+    addRecentPreviewMessage('out', message.message)
+    return
+  }
+
+  try {
+    const result = await api.previewFlow(flowId.value, sampleInput)
+    previewOutput.value = JSON.stringify(result, null, 2)
+    addRecentPreviewMessage('out', previewResultSummary(result))
+  } catch (e) {
+    const errorPayload = previewErrorPayload(e)
+    previewOutput.value = JSON.stringify(errorPayload, null, 2)
+    addRecentPreviewMessage('out', `preview error: ${errorPayload.error}`)
+  }
 }
 </script>
 
