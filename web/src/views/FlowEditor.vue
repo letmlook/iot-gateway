@@ -519,6 +519,29 @@ function addRecentPreviewMessage(dir, data) {
   ]
 }
 
+function dataPort(id, name, required) {
+  return { id, name, port_type: 'data', required }
+}
+
+function buildInputPorts(node) {
+  if (node.data.kind === 'operator') return [dataPort('in', '输入', true)]
+  if (node.data.kind === 'north') return [dataPort('in', '输入', true)]
+  return []
+}
+
+function buildOutputPorts(node) {
+  if (node.data.kind === 'south') return [dataPort('out', '输出', false)]
+  if (node.data.kind === 'operator') return [dataPort('out', '输出', false)]
+  return []
+}
+
+function nodePosition(node) {
+  return {
+    x: node.position?.x || 0,
+    y: node.position?.y || 0
+  }
+}
+
 import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
 import '@vue-flow/controls/dist/style.css'
@@ -562,6 +585,7 @@ const previewActiveNames = ref(['preview'])
 const previewInput = ref('暂无数据')
 const previewOutput = ref('暂无数据')
 const recentMessages = ref([])
+const currentFlowBindings = ref([])
 
 // Status polling
 let statusPollTimer = null
@@ -634,17 +658,18 @@ onMounted(async () => {
       const flow = data.flow
       flowName.value = flow.name
       flowStatus.value = flow.status
+      currentFlowBindings.value = flow.bindings || []
       nodes.value = (flow.nodes || []).map(n => ({
         id: n.id,
         type: n.kind,
         label: n.name,
-        position: { x: 100, y: 100 },
+        position: n.position || { x: 100, y: 100 },
         data: {
           name: n.name,
           kind: n.kind,
           operatorName: n.operator_name,
           config: n.config || {},
-          operatorConfig: n.operator_config || {},
+          operatorConfig: n.config || {},
           subscriptions: []
         }
       }))
@@ -860,10 +885,12 @@ async function handleSave() {
       name: n.data.name,
       kind: n.data.kind,
       operator_name: n.data.operatorName,
-      config: n.data.config || {},
-      operator_config: n.data.operatorConfig || {},
-      input_ports: n.data.kind === 'operator' ? [{ id: 'in', name: '输入', port_type: 'data', required: true }] : [],
-      output_ports: n.data.kind === 'operator' ? [{ id: 'out', name: '输出', port_type: 'data', required: false }] : [],
+      config: n.data.kind === 'operator'
+        ? (n.data.operatorConfig || {})
+        : (n.data.config || {}),
+      input_ports: buildInputPorts(n),
+      output_ports: buildOutputPorts(n),
+      position: nodePosition(n),
     }))
     const flowEdges = edges.value.map(e => ({
       source_node_id: e.source,
@@ -878,6 +905,7 @@ async function handleSave() {
       status: 'draft',
       nodes: flowNodes,
       edges: flowEdges,
+      bindings: currentFlowBindings.value || [],
       version: 1,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
