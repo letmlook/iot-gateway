@@ -665,6 +665,7 @@ onMounted(async () => {
 onUnmounted(() => {
   if (statusPollTimer) clearInterval(statusPollTimer)
   stopNodeStatusPoll()
+  stopPreviewRefresh()
 })
 
 // Watch selected node to load schema/points data
