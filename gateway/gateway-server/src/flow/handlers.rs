@@ -19,6 +19,38 @@ impl From<FlowStoreError> for ApiError {
     }
 }
 
+fn validate_draft_flow(flow: &Flow) -> Result<(), String> {
+    if flow.name.trim().is_empty() {
+        return Err("flow name cannot be empty".to_string());
+    }
+
+    let node_ids: std::collections::HashSet<Uuid> = flow.nodes.iter().map(|node| node.id).collect();
+    for edge in &flow.edges {
+        if !node_ids.contains(&edge.source_node_id) {
+            return Err(format!(
+                "edge references unknown source node {}",
+                edge.source_node_id
+            ));
+        }
+        if !node_ids.contains(&edge.target_node_id) {
+            return Err(format!(
+                "edge references unknown target node {}",
+                edge.target_node_id
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_flow_for_save(flow: &Flow) -> Result<(), String> {
+    if flow.status == gateway_flow::FlowStatus::Draft {
+        validate_draft_flow(flow)
+    } else {
+        flow.validate().map_err(|e| e.to_string())
+    }
+}
+
 pub async fn list_flows(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -73,6 +105,7 @@ pub async fn create_flow(
 
     // Note: do NOT call flow.validate() here — a name-only Draft flow has no nodes yet.
     // Validation (DAG, port types, node counts) is done at deploy time only.
+    validate_flow_for_save(&flow).map_err(ApiError::bad_request)?;
     state.flow_store.create_flow(&flow).await?;
     Ok(Json(serde_json::json!({ "flow": flow })))
 }
@@ -99,8 +132,7 @@ pub async fn update_flow(
     if flow.id != id {
         return Err(ApiError::bad_request("flow id mismatch"));
     }
-    flow.validate()
-        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    validate_flow_for_save(&flow).map_err(ApiError::bad_request)?;
     state.flow_store.update_flow(&flow).await?;
     Ok(Json(serde_json::json!({ "flow": flow })))
 }
@@ -549,6 +581,55 @@ pub async fn import_flows(
 pub struct ImportResponse {
     pub imported: usize,
     pub skipped: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gateway_flow::{Flow, FlowEdge, FlowNode, FlowStatus, NodeKind};
+
+    fn draft_flow_with_one_node() -> Flow {
+        let mut flow = Flow::new("draft");
+        flow.status = FlowStatus::Draft;
+        flow.nodes.push(FlowNode {
+            id: Uuid::new_v4(),
+            name: "operator".to_string(),
+            kind: NodeKind::Operator,
+            operator_name: Some("range".to_string()),
+            config: gateway_sdk::PluginConfig::new(),
+            input_ports: vec![],
+            output_ports: vec![],
+            position: None,
+        });
+        flow
+    }
+
+    #[test]
+    fn draft_validation_allows_incomplete_graph() {
+        let flow = draft_flow_with_one_node();
+        validate_draft_flow(&flow).unwrap();
+    }
+
+    #[test]
+    fn draft_validation_rejects_empty_name() {
+        let mut flow = draft_flow_with_one_node();
+        flow.name = "  ".to_string();
+        let err = validate_draft_flow(&flow).unwrap_err();
+        assert!(err.contains("flow name cannot be empty"));
+    }
+
+    #[test]
+    fn draft_validation_rejects_edges_referencing_missing_nodes() {
+        let mut flow = draft_flow_with_one_node();
+        flow.edges.push(FlowEdge {
+            source_node_id: flow.nodes[0].id,
+            source_port: "out".to_string(),
+            target_node_id: Uuid::new_v4(),
+            target_port: "in".to_string(),
+        });
+        let err = validate_draft_flow(&flow).unwrap_err();
+        assert!(err.contains("edge references unknown target node"));
+    }
 }
 
 /// POST /flows/:id/rollback/:version — rollback to specific version
