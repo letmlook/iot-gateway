@@ -483,6 +483,8 @@ impl FlowStore {
         flow_id: Uuid,
         node: &FlowNode,
     ) -> Result<(), FlowStoreError> {
+        let position_x = node.position.as_ref().map(|p| p.x).unwrap_or(0.0);
+        let position_y = node.position.as_ref().map(|p| p.y).unwrap_or(0.0);
         conn.execute(
             "INSERT INTO flow_nodes (id, flow_id, name, kind, operator_name, config, input_ports, output_ports, position_x, position_y)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
@@ -497,8 +499,8 @@ impl FlowStore {
                 serde_json::to_string(&node.config).unwrap_or_default(),
                 serde_json::to_string(&node.input_ports).unwrap_or_default(),
                 serde_json::to_string(&node.output_ports).unwrap_or_default(),
-                0.0f64,
-                0.0f64,
+                position_x,
+                position_y,
             ],
         )
         .map_err(FlowStoreError::Rusqlite)?;
@@ -578,7 +580,7 @@ impl FlowStore {
     ) -> Result<Vec<FlowNode>, FlowStoreError> {
         let mut stmt = conn
             .prepare(
-                "SELECT id, name, kind, operator_name, config, input_ports, output_ports FROM flow_nodes WHERE flow_id=?1",
+                "SELECT id, name, kind, operator_name, config, input_ports, output_ports, position_x, position_y FROM flow_nodes WHERE flow_id=?1",
             )
             .map_err(FlowStoreError::Rusqlite)?;
         let mut nodes = Vec::new();
@@ -593,6 +595,8 @@ impl FlowStore {
             let config_str: String = row.get(4).map_err(FlowStoreError::Rusqlite)?;
             let input_ports_str: String = row.get(5).map_err(FlowStoreError::Rusqlite)?;
             let output_ports_str: String = row.get(6).map_err(FlowStoreError::Rusqlite)?;
+            let position_x: f64 = row.get(7).map_err(FlowStoreError::Rusqlite)?;
+            let position_y: f64 = row.get(8).map_err(FlowStoreError::Rusqlite)?;
 
             let id = Uuid::parse_str(&id_str).unwrap_or_else(|_| Uuid::new_v4());
             let kind: gateway_flow::NodeKind =
@@ -612,6 +616,10 @@ impl FlowStore {
                 config,
                 input_ports,
                 output_ports,
+                position: Some(gateway_flow::node::NodePosition {
+                    x: position_x,
+                    y: position_y,
+                }),
             });
         }
         Ok(nodes)
@@ -676,5 +684,46 @@ impl From<rusqlite::Error> for FlowStoreError {
 impl From<serde_json::Error> for FlowStoreError {
     fn from(e: serde_json::Error) -> Self {
         FlowStoreError::Json(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gateway_flow::{node::NodePosition, Flow, FlowNode, FlowStatus, NodeKind};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_db_path(name: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("iot-gateway-{name}-{nanos}.db"))
+    }
+
+    #[tokio::test]
+    async fn flow_store_round_trips_node_position() {
+        let db_path = test_db_path("flow-position");
+        let store = FlowStore::new(&db_path).unwrap();
+        let mut flow = Flow::new("position-flow");
+        flow.status = FlowStatus::Draft;
+        flow.nodes.push(FlowNode {
+            id: Uuid::new_v4(),
+            name: "operator".to_string(),
+            kind: NodeKind::Operator,
+            operator_name: Some("range".to_string()),
+            config: gateway_sdk::PluginConfig::new(),
+            input_ports: vec![],
+            output_ports: vec![],
+            position: Some(NodePosition { x: 123.0, y: 456.0 }),
+        });
+
+        store.create_flow(&flow).await.unwrap();
+        let loaded = store.get_flow(flow.id).await.unwrap().unwrap();
+        let position = loaded.nodes[0].position.as_ref().unwrap();
+        assert_eq!(position.x, 123.0);
+        assert_eq!(position.y, 456.0);
+
+        let _ = std::fs::remove_file(db_path);
     }
 }
