@@ -99,6 +99,26 @@ impl FlowStore {
             CREATE INDEX IF NOT EXISTS idx_flow_bindings_source ON flow_bindings(south_node_id, group_id);
             ",
         )?;
+
+        // Idempotent migration: add position columns if missing (pre-0ea5d11 DBs).
+        Self::migrate_position_columns(&conn)?;
+
+        Ok(())
+    }
+
+    /// Add `position_x` / `position_y` to `flow_nodes` if they don't exist yet.
+    fn migrate_position_columns(conn: &Connection) -> Result<(), rusqlite::Error> {
+        let mut stmt = conn.prepare("PRAGMA table_info(flow_nodes)")?;
+        let existing: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<_, _>>()?;
+
+        if !existing.iter().any(|c| c == "position_x") {
+            conn.execute("ALTER TABLE flow_nodes ADD COLUMN position_x REAL DEFAULT 0", [])?;
+        }
+        if !existing.iter().any(|c| c == "position_y") {
+            conn.execute("ALTER TABLE flow_nodes ADD COLUMN position_y REAL DEFAULT 0", [])?;
+        }
         Ok(())
     }
 
@@ -699,6 +719,72 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("iot-gateway-{name}-{nanos}.db"))
+    }
+
+    #[test]
+    fn flow_store_adds_position_columns_to_existing_nodes_table() {
+        let db_path = test_db_path("flow-position-migration");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE flows (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                status TEXT NOT NULL DEFAULT 'draft',
+                version INTEGER NOT NULL DEFAULT 1,
+                version_history TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE flow_nodes (
+                id TEXT PRIMARY KEY,
+                flow_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                operator_name TEXT,
+                config TEXT NOT NULL DEFAULT '{}',
+                input_ports TEXT NOT NULL DEFAULT '[]',
+                output_ports TEXT NOT NULL DEFAULT '[]',
+                FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE flow_edges (
+                id TEXT PRIMARY KEY,
+                flow_id TEXT NOT NULL,
+                source_node_id TEXT NOT NULL,
+                source_port TEXT NOT NULL,
+                target_node_id TEXT NOT NULL,
+                target_port TEXT NOT NULL,
+                FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE flow_bindings (
+                flow_id TEXT NOT NULL,
+                south_node_id TEXT NOT NULL,
+                group_id TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                failure_policy TEXT NOT NULL DEFAULT 'fail_open',
+                PRIMARY KEY (flow_id, south_node_id, group_id),
+                FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE
+            );",
+        )
+        .unwrap();
+        drop(conn);
+
+        let _store = FlowStore::new(&db_path).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let mut stmt = conn.prepare("PRAGMA table_info(flow_nodes)").unwrap();
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(columns.iter().any(|column| column == "position_x"));
+        assert!(columns.iter().any(|column| column == "position_y"));
+
+        let _ = std::fs::remove_file(db_path);
     }
 
     #[tokio::test]
