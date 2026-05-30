@@ -567,6 +567,21 @@ function parseJsonArray(value) {
   }
 }
 
+function firstJsonArrayEntry(value) {
+  const values = parseJsonArray(value)
+  return values.length > 0 ? values[0] : undefined
+}
+
+function withPluginIdentityConfig(node) {
+  const config = { ...(node.data.config || {}) }
+  config._plugin_name = node.data.pluginName || node.data.name
+  return config
+}
+
+function flowFromResponse(response) {
+  return response?.flow || response
+}
+
 function operatorRuntimeConfig(node) {
   const config = { ...(node.data.operatorConfig || {}) }
   switch (node.data.operatorName) {
@@ -589,6 +604,42 @@ function operatorRuntimeConfig(node) {
         config.specs = config.aggregations
       }
       config.specs = parseJsonArray(config.specs)
+      return config
+    case 'router':
+      if (config.rules === undefined && config.routes !== undefined) {
+        config.rules = parseJsonArray(config.routes)
+      }
+      return config
+    case 'deadband':
+      if (config.tag === undefined && config.field !== undefined) config.tag = config.field
+      if (config.deadband === undefined && config.value !== undefined) config.deadband = config.value
+      return config
+    case 'round':
+      if (config.tag === undefined && config.field !== undefined) config.tag = config.field
+      if (config.precision === undefined && config.decimals !== undefined) config.precision = config.decimals
+      return config
+    case 'batch':
+      if (config.max_size === undefined && config.size !== undefined) config.max_size = config.size
+      return config
+    case 'split':
+      if (config.separator === undefined && config.delimiter !== undefined) config.separator = config.delimiter
+      return config
+    case 'dedup':
+      if (config.key === undefined && config.field !== undefined) config.key = config.field
+      return config
+    case 'throttle':
+      if (config.interval_ms === undefined && config.window_ms !== undefined) config.interval_ms = config.window_ms
+      delete config.max_rate
+      return config
+    case 'json-path': {
+      const firstExpression = firstJsonArrayEntry(config.expressions)
+      if (config.path === undefined) config.path = firstExpression || config.source_field || '$.*'
+      if (config.output_field === undefined) config.output_field = config.source_field || 'value'
+      return config
+    }
+    case 'buffer':
+      if (config.batch_size === undefined && config.size_limit !== undefined) config.batch_size = config.size_limit
+      if (config.timeout_secs === undefined && config.time_limit !== undefined) config.timeout_secs = Math.ceil(config.time_limit / 1000)
       return config
     default:
       return config
@@ -724,7 +775,7 @@ onMounted(async () => {
         data: {
           name: n.name,
           kind: n.kind,
-          pluginName: n.operator_name || n.plugin_name || n.name,
+          pluginName: n.config?._plugin_name || n.plugin_name || n.operator_name || n.name,
           operatorName: n.operator_name,
           config: n.config || {},
           operatorConfig: n.config || {},
@@ -948,7 +999,7 @@ async function handleSave() {
       operator_name: n.data.operatorName,
       config: n.data.kind === 'operator'
         ? operatorRuntimeConfig(n)
-        : (n.data.config || {}),
+        : withPluginIdentityConfig(n),
       input_ports: buildInputPorts(n),
       output_ports: buildOutputPorts(n),
       position: nodePosition(n),
@@ -976,9 +1027,16 @@ async function handleSave() {
       ElMessage.success('保存成功')
     } else {
       const created = await api.createFlow(body)
-      const createdFlowId = created?.flow?.id || savedFlowId
+      const createdFlow = flowFromResponse(created)
+      const createdFlowId = createdFlow?.id || savedFlowId
+      flowCreatedAt.value = createdFlow?.created_at || body.created_at
+      flowStatus.value = createdFlow?.status || body.status
+      flowDescription.value = createdFlow?.description ?? body.description
+      currentFlowBindings.value = createdFlow?.bindings || body.bindings
       ElMessage.success('保存成功')
-      await router.replace(`/flows/${createdFlowId}`)
+      if (!flowId.value) {
+        await router.replace(`/flows/${createdFlowId}`)
+      }
     }
   } catch (e) {
     ElMessage.error('保存失败: ' + e.message)
