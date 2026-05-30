@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import asyncio
 import json
 import socket
 import sys
@@ -84,6 +85,31 @@ class FullChainHelperTests(unittest.TestCase):
         alarm_node = next(node for node in flow["nodes"] if node.get("operator_name") == "alarm")
         self.assertEqual(alarm_node["config"]["rules"][0]["id"], "e2e_run_high_temperature")
         self.assertEqual(alarm_node["config"]["rules"][0]["high"], 100.0)
+
+    def test_wait_for_queue_item_reports_background_task_failure(self):
+        async def scenario():
+            async def failing_task():
+                await asyncio.sleep(0)
+                raise RuntimeError("websocket connect failed")
+
+            queue = asyncio.Queue()
+            task = asyncio.create_task(failing_task())
+            with self.assertRaisesRegex(full_chain.E2EFailure, "flow websocket task failed: websocket connect failed"):
+                await full_chain.wait_for_queue_item("flow websocket", queue, [task], timeout=1.0)
+
+        asyncio.run(scenario())
+
+    def test_websocket_connect_kwargs_disable_supported_proxy_auto_detection(self):
+        def connect_with_proxy(uri, *, proxy=True):
+            return uri, proxy
+
+        self.assertEqual(full_chain.websocket_connect_kwargs(connect_with_proxy), {"proxy": None})
+
+    def test_websocket_connect_kwargs_omit_proxy_for_old_websockets_versions(self):
+        def connect_without_proxy(uri):
+            return uri
+
+        self.assertEqual(full_chain.websocket_connect_kwargs(connect_without_proxy), {})
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import os
 import shutil
@@ -401,6 +402,33 @@ class RestClient:
                 return text
 
 
+def websocket_connect_kwargs(connect_func: Any) -> dict[str, Any]:
+    if "proxy" in inspect.signature(connect_func).parameters:
+        return {"proxy": None}
+    return {}
+
+
+async def wait_for_queue_item(label: str, queue: asyncio.Queue[dict[str, Any]], tasks: list[asyncio.Task[Any]], timeout: float) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for task in tasks:
+            if task.done():
+                if task.cancelled():
+                    raise E2EFailure(f"{label} task was cancelled before producing an event")
+                exc = task.exception()
+                if exc is not None:
+                    raise E2EFailure(f"{label} task failed: {exc}") from exc
+                raise E2EFailure(f"{label} task finished before producing an event")
+
+        remaining = max(0.1, deadline - time.monotonic())
+        try:
+            return await asyncio.wait_for(queue.get(), timeout=min(0.2, remaining))
+        except asyncio.TimeoutError:
+            continue
+
+    raise E2EFailure(f"timed out waiting for {label}")
+
+
 class MqttObserver:
     def __init__(self, host: str, port: int, topic: str, loop: asyncio.AbstractEventLoop):
         assert mqtt is not None
@@ -454,8 +482,10 @@ class MqttObserver:
 async def flow_ws_reader(state: RuntimeState, flow_id: str, expected_group_id: str, expected_group_name: str, queue: asyncio.Queue[dict[str, Any]]) -> None:
     assert websockets is not None
     url = f"{state.flow_ws_base}/{flow_id}/live"
-    async with websockets.connect(url) as ws:
+    async with websockets.connect(url, **websocket_connect_kwargs(websockets.connect)) as ws:
+        connected = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
         print_step(f"[observe] flow websocket connected {url}")
+        await queue.put(connected)
         async for raw in ws:
             event = json.loads(raw)
             if event.get("type") == "data_processed" and event.get("group_id") == expected_group_id and event.get("group_name") == expected_group_name:
@@ -464,8 +494,10 @@ async def flow_ws_reader(state: RuntimeState, flow_id: str, expected_group_id: s
 
 async def alarm_ws_reader(state: RuntimeState, expected_rule_id: str, queue: asyncio.Queue[dict[str, Any]]) -> None:
     assert websockets is not None
-    async with websockets.connect(state.alarm_ws_url) as ws:
+    async with websockets.connect(state.alarm_ws_url, **websocket_connect_kwargs(websockets.connect)) as ws:
+        connected = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
         print_step(f"[observe] alarm websocket connected {state.alarm_ws_url}")
+        await queue.put(connected)
         async for raw in ws:
             event = json.loads(raw)
             alarm = event.get("event") if isinstance(event, dict) else None
@@ -649,6 +681,8 @@ async def run_full_chain(config: RuntimeConfig) -> int:
 
             flow_task = asyncio.create_task(flow_ws_reader(state, flow_id, group["id"], group["name"], flow_queue))
             alarm_task = asyncio.create_task(alarm_ws_reader(state, rule_id, alarm_queue))
+            await wait_for_queue_item("flow websocket", flow_queue, [flow_task], timeout=10)
+            await wait_for_queue_item("alarm websocket", alarm_queue, [alarm_task], timeout=10)
 
             async with MqttObserver(state.config.mqtt_host, state.config.mqtt_port, mqtt_topic, asyncio.get_running_loop()) as mqtt_observer:
                 await rest.request("POST", f"/nodes/{resources['north']['id']}/start")
@@ -659,7 +693,7 @@ async def run_full_chain(config: RuntimeConfig) -> int:
                 topic, payload, detail = await mqtt_observer.wait_for_processed_payload(group["name"], config.timeout)
                 print_step(f"[assert] MQTT processed payload ok topic={topic} {detail}")
 
-                flow_event = await asyncio.wait_for(flow_queue.get(), timeout=config.timeout)
+                flow_event = await wait_for_queue_item("flow websocket data_processed", flow_queue, [flow_task], timeout=config.timeout)
                 print_step(f"[assert] flow websocket data_processed ok group={flow_event.get('group_name')}")
 
                 try:
