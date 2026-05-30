@@ -119,12 +119,12 @@
                   <el-tag>{{ selectedNode.type }}</el-tag>
                 </el-form-item>
                 <template v-if="southSchema">
-                  <div v-for="(prop, key) in southSchema.properties" :key="key">
-                    <el-form-item :label="prop.title || key">
-                      <el-input v-if="!prop.enum" v-model="selectedNode.data.config[key]" />
-                      <el-select v-else v-model="selectedNode.data.config[key]">
-                        <el-option v-for="e in prop.enum" :key="e" :label="e" :value="e" />
+                  <div v-for="param in schemaParams(southSchema)" :key="param.name">
+                    <el-form-item :label="param.name_zh || param.title || param.name">
+                      <el-select v-if="param.options && param.options.length" v-model="selectedNode.data.config[param.name]">
+                        <el-option v-for="option in param.options" :key="optionValue(option)" :label="optionLabel(option)" :value="optionValue(option)" />
                       </el-select>
+                      <el-input v-else v-model="selectedNode.data.config[param.name]" />
                     </el-form-item>
                   </div>
                 </template>
@@ -384,12 +384,12 @@
                   <el-tag>{{ selectedNode.type }}</el-tag>
                 </el-form-item>
                 <template v-if="northSchema">
-                  <div v-for="(prop, key) in northSchema.properties" :key="key">
-                    <el-form-item :label="prop.title || key">
-                      <el-input v-if="!prop.enum" v-model="selectedNode.data.config[key]" />
-                      <el-select v-else v-model="selectedNode.data.config[key]">
-                        <el-option v-for="e in prop.enum" :key="e" :label="e" :value="e" />
+                  <div v-for="param in schemaParams(northSchema)" :key="param.name">
+                    <el-form-item :label="param.name_zh || param.title || param.name">
+                      <el-select v-if="param.options && param.options.length" v-model="selectedNode.data.config[param.name]">
+                        <el-option v-for="option in param.options" :key="optionValue(option)" :label="optionLabel(option)" :value="optionValue(option)" />
                       </el-select>
+                      <el-input v-else v-model="selectedNode.data.config[param.name]" />
                     </el-form-item>
                   </div>
                 </template>
@@ -484,6 +484,20 @@ function normalizePluginList(response) {
   return Array.isArray(response) ? response : (response?.plugins || [])
 }
 
+function schemaParams(schema) {
+  if (!schema) return []
+  if (Array.isArray(schema.params)) return schema.params
+  return Object.entries(schema.properties || {}).map(([name, prop]) => ({ name, ...prop }))
+}
+
+function optionValue(option) {
+  return option && typeof option === 'object' ? (option.value ?? option.name ?? option.label) : option
+}
+
+function optionLabel(option) {
+  return option && typeof option === 'object' ? (option.label ?? option.name ?? option.value) : option
+}
+
 function buildPreviewSampleInput() {
   return {
     input: {
@@ -542,6 +556,45 @@ function nodePosition(node) {
   }
 }
 
+function parseJsonArray(value) {
+  if (Array.isArray(value)) return value
+  if (typeof value !== 'string') return []
+  try {
+    const parsed = JSON.parse(value)
+    return Array.isArray(parsed) ? parsed : []
+  } catch (_) {
+    return []
+  }
+}
+
+function operatorRuntimeConfig(node) {
+  const config = { ...(node.data.operatorConfig || {}) }
+  switch (node.data.operatorName) {
+    case 'range':
+      if (config.field !== undefined && config.tag === undefined) {
+        config.tag = config.field
+        delete config.field
+      }
+      return config
+    case 'transform':
+      if (config.rules === undefined && config.operations !== undefined) {
+        config.rules = config.operations
+      }
+      return config
+    case 'alarm':
+      config.rules = parseJsonArray(config.rules)
+      return config
+    case 'aggregate':
+      if (config.specs === undefined && config.aggregations !== undefined) {
+        config.specs = config.aggregations
+      }
+      config.specs = parseJsonArray(config.specs)
+      return config
+    default:
+      return config
+  }
+}
+
 import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
 import '@vue-flow/controls/dist/style.css'
@@ -554,6 +607,8 @@ const { project } = useVueFlow()
 const flowId = computed(() => route.params.id)
 const flowName = ref('')
 const flowStatus = ref('')
+const flowCreatedAt = ref(null)
+const flowDescription = ref(null)
 const nodes = ref([])
 const edges = ref([])
 const selectedNode = ref(null)
@@ -658,6 +713,8 @@ onMounted(async () => {
       const flow = data.flow
       flowName.value = flow.name
       flowStatus.value = flow.status
+      flowCreatedAt.value = flow.created_at || null
+      flowDescription.value = flow.description || null
       currentFlowBindings.value = flow.bindings || []
       nodes.value = (flow.nodes || []).map(n => ({
         id: n.id,
@@ -667,6 +724,7 @@ onMounted(async () => {
         data: {
           name: n.name,
           kind: n.kind,
+          pluginName: n.operator_name || n.plugin_name || n.name,
           operatorName: n.operator_name,
           config: n.config || {},
           operatorConfig: n.config || {},
@@ -704,13 +762,13 @@ watch(selectedNode, async (node) => {
   tagsData.value = []
 
   if (node.type === 'south') {
-    const pluginName = node.data.name
+    const pluginName = node.data.pluginName || node.data.name
     try {
       southSchema.value = await api.pluginSouthSchema(pluginName)
     } catch (e) { console.error(e) }
     loadPointsData()
   } else if (node.type === 'north') {
-    const pluginName = node.data.name
+    const pluginName = node.data.pluginName || node.data.name
     try {
       northSchema.value = await api.pluginNorthSchema(pluginName)
     } catch (e) { console.error(e) }
@@ -809,6 +867,7 @@ function handleDrop(event) {
   const nodeData = {
     name: label,
     kind,
+    pluginName: name,
     operatorName: kind === 'operator' ? name : undefined,
     config: {},
     operatorConfig: kind === 'operator' ? getOperatorDefaultConfig(name) : {},
@@ -880,13 +939,15 @@ function removeNode(id) {
 
 async function handleSave() {
   try {
+    const savedFlowId = flowId.value || crypto.randomUUID()
+    const now = new Date().toISOString()
     const flowNodes = nodes.value.map(n => ({
       id: n.id,
       name: n.data.name,
       kind: n.data.kind,
       operator_name: n.data.operatorName,
       config: n.data.kind === 'operator'
-        ? (n.data.operatorConfig || {})
+        ? operatorRuntimeConfig(n)
         : (n.data.config || {}),
       input_ports: buildInputPorts(n),
       output_ports: buildOutputPorts(n),
@@ -899,23 +960,26 @@ async function handleSave() {
       target_port: e.targetHandle || 'in',
     }))
     const body = {
-      id: flowId.value || '00000000-0000-0000-0000-000000000000',
+      id: savedFlowId,
       name: flowName.value || '未命名数据流',
-      description: null,
-      status: 'draft',
+      description: flowDescription.value,
+      status: flowStatus.value || 'draft',
       nodes: flowNodes,
       edges: flowEdges,
       bindings: currentFlowBindings.value || [],
       version: 1,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+      created_at: flowCreatedAt.value || now,
+      updated_at: now,
     }
     if (flowId.value) {
       await api.updateFlow(flowId.value, body)
+      ElMessage.success('保存成功')
     } else {
-      await api.createFlow(body)
+      const created = await api.createFlow(body)
+      const createdFlowId = created?.flow?.id || savedFlowId
+      ElMessage.success('保存成功')
+      await router.replace(`/flows/${createdFlowId}`)
     }
-    ElMessage.success('保存成功')
   } catch (e) {
     ElMessage.error('保存失败: ' + e.message)
   }
