@@ -15,8 +15,7 @@ struct KafkaState {
     producer: std::sync::Mutex<Option<rdkafka::producer::FutureProducer>>,
 }
 
-static KAFKA_STATE: once_cell::sync::Lazy<Mutex<Option<KafkaState>>> =
-    once_cell::sync::Lazy::new(|| Mutex::new(None));
+type KafkaHandleState = Mutex<Option<KafkaState>>;
 
 fn result_to_json(value: serde_json::Value) -> *mut c_char {
     CString::new(value.to_string()).unwrap().into_raw()
@@ -24,12 +23,21 @@ fn result_to_json(value: serde_json::Value) -> *mut c_char {
 
 #[no_mangle]
 pub unsafe extern "C" fn north_create() -> *mut c_void {
-    Box::into_raw(Box::new(())) as *mut c_void
+    Box::into_raw(Box::new(Mutex::new(None::<KafkaState>))) as *mut c_void
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn north_destroy(handle: *mut c_void) {
-    drop(unsafe { Box::from_raw(handle as *mut ()) });
+    if !handle.is_null() {
+        drop(unsafe { Box::from_raw(handle as *mut KafkaHandleState) });
+    }
+}
+
+unsafe fn handle_state<'a>(handle: *mut c_void) -> Result<&'a KafkaHandleState, *mut c_char> {
+    if handle.is_null() {
+        return Err(result_to_json(serde_json::json!({"error": "null handle"})));
+    }
+    Ok(unsafe { &*(handle as *mut KafkaHandleState) })
 }
 
 #[no_mangle]
@@ -56,9 +64,13 @@ pub unsafe extern "C" fn north_free_string(s: *mut c_char) {
 
 #[no_mangle]
 pub unsafe extern "C" fn north_open(
-    _handle: *mut c_void,
+    handle: *mut c_void,
     config_json: *const c_char,
 ) -> *mut c_char {
+    let state_slot = match unsafe { handle_state(handle) } {
+        Ok(state) => state,
+        Err(error) => return error,
+    };
     if config_json.is_null() {
         return result_to_json(serde_json::json!({"error": "null config"}));
     }
@@ -92,7 +104,7 @@ pub unsafe extern "C" fn north_open(
         topic: topic.to_string(),
         producer,
     };
-    let mut guard = KAFKA_STATE.lock().unwrap();
+    let mut guard = state_slot.lock().unwrap();
     *guard = Some(state);
 
     result_to_json(serde_json::json!({
@@ -103,8 +115,12 @@ pub unsafe extern "C" fn north_open(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn north_close(_handle: *mut c_void, _node_id: *const c_char) -> *mut c_char {
-    let mut guard = KAFKA_STATE.lock().unwrap();
+pub unsafe extern "C" fn north_close(handle: *mut c_void, _node_id: *const c_char) -> *mut c_char {
+    let state_slot = match unsafe { handle_state(handle) } {
+        Ok(state) => state,
+        Err(error) => return error,
+    };
+    let mut guard = state_slot.lock().unwrap();
     *guard = None;
     result_to_json(serde_json::json!({ "status": "disconnected" }))
 }
@@ -140,16 +156,20 @@ pub unsafe extern "C" fn north_stop(_handle: *mut c_void, _node_id: *const c_cha
 
 #[no_mangle]
 pub unsafe extern "C" fn north_on_group_data(
-    _handle: *mut c_void,
+    handle: *mut c_void,
     _node_id: *const c_char,
     group_json: *const c_char,
 ) -> *mut c_char {
+    let state_slot = match unsafe { handle_state(handle) } {
+        Ok(state) => state,
+        Err(error) => return error,
+    };
     if group_json.is_null() {
         return result_to_json(serde_json::json!({"error": "null"}));
     }
     let data = unsafe { CStr::from_ptr(group_json) }.to_string_lossy();
 
-    let guard = KAFKA_STATE.lock().unwrap();
+    let guard = state_slot.lock().unwrap();
     let state = match guard.as_ref() {
         Some(s) => s,
         None => return result_to_json(serde_json::json!({"error": "not connected"})),
@@ -218,14 +238,47 @@ pub unsafe extern "C" fn north_config_schema(_handle: *mut c_void) -> *mut c_cha
 
 #[no_mangle]
 pub unsafe extern "C" fn north_connection_status(
-    _handle: *mut c_void,
+    handle: *mut c_void,
     _node_id: *const c_char,
 ) -> *mut c_char {
-    let guard = KAFKA_STATE.lock().unwrap();
+    let state_slot = match unsafe { handle_state(handle) } {
+        Ok(state) => state,
+        Err(error) => return error,
+    };
+    let guard = state_slot.lock().unwrap();
     let status = if guard.is_some() {
         "connected"
     } else {
         "disconnected"
     };
     result_to_json(serde_json::json!({ "status": status }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    unsafe fn take_json(ptr: *mut c_char) -> serde_json::Value {
+        let raw = CString::from_raw(ptr).into_string().unwrap();
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    #[test]
+    fn kafka_state_is_isolated_per_handle() {
+        unsafe {
+            let handle_one = north_create();
+            let handle_two = north_create();
+            let config = CString::new(r#"{"brokers":"localhost:9092","topic":"one"}"#).unwrap();
+            let _ = take_json(north_open(handle_one, config.as_ptr()));
+
+            let status_one = take_json(north_connection_status(handle_one, std::ptr::null()));
+            let status_two = take_json(north_connection_status(handle_two, std::ptr::null()));
+
+            assert_eq!(status_one["status"], "connected");
+            assert_eq!(status_two["status"], "disconnected");
+
+            north_destroy(handle_one);
+            north_destroy(handle_two);
+        }
+    }
 }
