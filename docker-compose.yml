@@ -1,0 +1,69 @@
+# 本地/单机部署示例：网关 + MQTT Broker（用于验证北向插件）+ Prometheus（可选）
+#
+#   docker compose up -d --build
+#   open http://localhost:3000
+#
+# 首次启动的初始管理员口令写在容器内 /app/data/.admin_initial_password：
+#   docker compose exec gateway cat /app/data/.admin_initial_password
+#
+# 生产部署务必显式设置下面的密钥类环境变量；此处为本地演示才留空。
+
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: iot-gateway:local
+    container_name: iot-gateway
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # --- 安全相关（生产必填）---
+      # 敏感配置（MQTT 口令等）落盘加密密钥；不设置则明文并告警
+      GATEWAY_SECRET_KEY: ""
+      # 备份加密密钥；不设置则每次启动随机生成，备份无法在别处恢复
+      GATEWAY_BACKUP_SECRET: ""
+      # 允许跨域的前端来源，逗号分隔；默认不允许任何跨域来源
+      GATEWAY_ALLOWED_ORIGINS: ""
+      # --- 规模调优 ---
+      GATEWAY_BUS_CAPACITY: "4096"
+      GATEWAY_MAX_CONCURRENT_POLLS: "32"
+      GATEWAY_PERSIST_DEBOUNCE_MS: "300"
+      # 插件加载模式：inproc（默认，延迟最低）| process（进程隔离，插件崩溃不影响网关）
+      GATEWAY_PLUGIN_ISOLATION: "process"
+      RUST_LOG: "info"
+    volumes:
+      # 配置库、授权文件、节点日志都在这里，必须持久化
+      - gateway-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+
+  # 北向 MQTT 插件的联调对象；也可换成现场 Broker
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: iot-mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    command: ["mosquitto", "-c", "/mosquitto-no-auth.conf"]
+
+  # 可选：抓取 /api/metrics 并加载 deploy/prometheus_rules.yml 里的告警规则
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: iot-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus_rules.yml:/etc/prometheus/rules/gateway.yml:ro
+    depends_on:
+      - gateway
+
+volumes:
+  gateway-data:

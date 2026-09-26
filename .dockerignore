@@ -1,0 +1,14 @@
+.git
+.github
+.workbuddy
+target
+data
+logs
+plugins
+docs
+web/node_modules
+web/dist
+*.pem
+*.dat
+*.bak
+*.log

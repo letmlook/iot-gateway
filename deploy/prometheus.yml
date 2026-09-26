@@ -1,0 +1,18 @@
+# Prometheus 抓取配置（docker-compose 会把它挂进容器）
+#
+# 网关的 /api/metrics 是免认证白名单接口，抓取不需要 Token。
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/rules/gateway.yml
+
+scrape_configs:
+  - job_name: gateway
+    metrics_path: /api/metrics
+    static_configs:
+      - targets: ["gateway:3000"]
+        labels:
+          instance: iot-gateway
