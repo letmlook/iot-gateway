@@ -79,7 +79,7 @@ async fn plugin_process_crash_does_not_kill_the_host() {
     std::fs::copy(&src, dir.join(src.file_name().unwrap())).expect("copy fixture");
 
     let mut mgr = Manager::new();
-    let mut loader = ProcessPluginLoader::new(host_bin());
+    let loader = ProcessPluginLoader::new(host_bin());
     loader
         .load(&dir, &mut mgr)
         .await
@@ -89,9 +89,13 @@ async fn plugin_process_crash_does_not_kill_the_host() {
         .south_plugin("faulty")
         .expect("faulty plugin should be registered from an isolated process");
     assert_eq!(plugin.meta().name, "faulty");
-    assert_eq!(loader.process_count(), 1, "one plugin ⇒ one child process");
+    assert_eq!(
+        loader.process_count().await,
+        1,
+        "one plugin ⇒ one child process"
+    );
     assert!(
-        loader.total_restarts() >= 1,
+        loader.total_restarts().await >= 1,
         "initial spawn should be counted"
     );
 
@@ -162,9 +166,9 @@ async fn plugin_process_crash_does_not_kill_the_host() {
         "after restart the previously opened node must work again (lifecycle replay)"
     );
     assert!(
-        loader.total_restarts() >= 2,
+        loader.total_restarts().await >= 2,
         "a restart should be counted, got {}",
-        loader.total_restarts()
+        loader.total_restarts().await
     );
 
     let _ = std::fs::remove_dir_all(&dir);

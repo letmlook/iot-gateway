@@ -780,7 +780,9 @@ fn leak_opt(v: Option<String>) -> Option<&'static str> {
 /// 与 `PluginLoader::load` 的差别：每个 .so 起一个独立子进程，插件崩溃不会影响网关。
 pub struct ProcessPluginLoader {
     bin: PathBuf,
-    processes: Vec<Arc<PluginProcess>>,
+    /// 已启动的插件子进程。用锁而非 &mut：加载器以 Arc 共享给 AppState，
+    /// 供 `/api/metrics` 读取重启计数，因此 load 必须能用 `&self` 调用。
+    processes: tokio::sync::Mutex<Vec<Arc<PluginProcess>>>,
 }
 
 impl ProcessPluginLoader {
@@ -788,13 +790,13 @@ impl ProcessPluginLoader {
     pub fn new(bin: PathBuf) -> Self {
         Self {
             bin,
-            processes: Vec::new(),
+            processes: tokio::sync::Mutex::new(Vec::new()),
         }
     }
 
     /// 扫描目录，为每个插件动态库拉起一个宿主进程并注册适配器
     pub async fn load(
-        &mut self,
+        &self,
         plugins_dir: &Path,
         mgr: &mut crate::manager::Manager,
     ) -> Result<(), String> {
@@ -819,11 +821,7 @@ impl ProcessPluginLoader {
         Ok(())
     }
 
-    async fn load_one(
-        &mut self,
-        path: &Path,
-        mgr: &mut crate::manager::Manager,
-    ) -> Result<(), String> {
+    async fn load_one(&self, path: &Path, mgr: &mut crate::manager::Manager) -> Result<(), String> {
         let proc = Arc::new(PluginProcess::new(self.bin.clone(), path.to_path_buf()));
         // 通过一次 meta 调用确认子进程起来了、插件也被宿主接受了
         let meta_json = proc
@@ -865,7 +863,7 @@ impl ProcessPluginLoader {
                 mgr.register_north(&name, Arc::new(p));
             }
         }
-        self.processes.push(proc);
+        self.processes.lock().await.push(proc);
         Ok(())
     }
 
@@ -887,11 +885,17 @@ impl ProcessPluginLoader {
     }
 
     /// 所有插件子进程的重启次数之和
-    pub fn total_restarts(&self) -> u64 {
-        self.processes.iter().map(|p| p.restarts()).sum()
+    pub async fn total_restarts(&self) -> u64 {
+        self.processes
+            .lock()
+            .await
+            .iter()
+            .map(|p| p.restarts())
+            .sum()
     }
 
-    pub fn process_count(&self) -> usize {
-        self.processes.len()
+    /// 当前插件子进程数量
+    pub async fn process_count(&self) -> usize {
+        self.processes.lock().await.len()
     }
 }

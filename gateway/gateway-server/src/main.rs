@@ -63,15 +63,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         mgr.register_north("mqtt", Arc::new(MqttPlugin::new()));
     }
 
+    // 进程隔离模式下持有加载器：重启计数要从它这里读（见 /api/metrics）
+    let mut isolated_loader: Option<Arc<ProcessPluginLoader>> = None;
+
     if config.plugins_dir.exists() {
         if config.plugin_isolation.eq_ignore_ascii_case("process") {
             // 进程级隔离：每个插件一个子进程，插件 abort/段错误不会带走网关
             let bin = plugin_host_bin(&config);
             tracing::info!("plugin isolation: process (host={})", bin.display());
-            let mut pl = ProcessPluginLoader::new(bin);
+            let pl = Arc::new(ProcessPluginLoader::new(bin));
             match pl.load(&config.plugins_dir, &mut mgr).await {
                 Ok(()) => {
-                    tracing::info!("{} plugin process(es) started", pl.process_count());
+                    tracing::info!("{} plugin process(es) started", pl.process_count().await);
+                    isolated_loader = Some(pl.clone());
                 }
                 Err(e) => tracing::warn!("isolated plugin load failed: {}", e),
             }
@@ -222,7 +226,7 @@ Backups created now can only be restored by this running instance. Set a fixed s
         );
     }
 
-    let state = AppState::new(
+    let mut state = AppState::new(
         mgr,
         config.clone(),
         loader_opt,
@@ -230,6 +234,7 @@ Backups created now can only be restored by this running instance. Set a fixed s
         user_store,
         node_log_names,
     );
+    state.plugin_processes = isolated_loader;
     state.sync_node_log_names();
     // 优雅退出时需要用到状态（state 随后会被 move 进 Router）
     let shutdown_state = state.clone();

@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use gateway_core::{Manager, DEFAULT_MAX_CONCURRENT_POLLS};
 use gateway_sdk::schema::{ConfigSchema, ParamAttribute, ParamSchema, ParamType, ParamValid};
 use gateway_sdk::{
-    DataValue, Group, GroupData, GroupId, NodeId, NodeKind, PluginConfig, PluginError, PluginMeta,
+    DataValue, Group, GroupId, NodeId, NodeKind, PluginConfig, PluginError, PluginMeta,
     PluginResult, SouthPlugin, Tag, TagId,
 };
 use std::sync::Arc;
@@ -20,6 +20,7 @@ use tokio::sync::RwLock;
 struct SchemaFake {
     schema: Option<ConfigSchema>,
     last_setting: RwLock<Option<PluginConfig>>,
+    calls: std::sync::atomic::AtomicU64,
 }
 
 impl SchemaFake {
@@ -27,9 +28,11 @@ impl SchemaFake {
         Arc::new(Self {
             schema,
             last_setting: RwLock::new(None),
+            calls: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
+    /// 最近一次收到的 setting 配置（用于断言配置确实到达了插件）
     async fn last_setting(&self) -> Option<PluginConfig> {
         self.last_setting.read().await.clone()
     }
@@ -104,6 +107,8 @@ impl SouthPlugin for SchemaFake {
 
     async fn setting(&self, _node_id: NodeId, config: PluginConfig) -> PluginResult<()> {
         *self.last_setting.write().await = Some(config);
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -137,9 +142,10 @@ fn cfg(pairs: &[(&str, serde_json::Value)]) -> PluginConfig {
     c
 }
 
-/// 建 Manager + 已创建节点，返回 (mgr, node_id)
-async fn setup(schema: Option<ConfigSchema>) -> (Manager, NodeId) {
+/// 建 Manager + 已创建节点，返回 (mgr, 插件句柄, node_id)
+async fn setup(schema: Option<ConfigSchema>) -> (Manager, Arc<SchemaFake>, NodeId) {
     let plugin = SchemaFake::new(schema);
+    let handle = plugin.clone();
     let mut mgr = Manager::with_limits(256, DEFAULT_MAX_CONCURRENT_POLLS);
     mgr.register_south("schemafake", plugin);
     let node = mgr
@@ -151,12 +157,12 @@ async fn setup(schema: Option<ConfigSchema>) -> (Manager, NodeId) {
         )
         .await
         .expect("create node");
-    (mgr, node.id())
+    (mgr, handle, node.id())
 }
 
 #[tokio::test]
 async fn invalid_setting_is_rejected_and_config_kept() {
-    let (mgr, nid) = setup(Some(host_schema())).await;
+    let (mgr, _plugin, nid) = setup(Some(host_schema())).await;
 
     // 缺少必填项
     let err = mgr
@@ -202,7 +208,7 @@ async fn invalid_setting_is_rejected_and_config_kept() {
 
 #[tokio::test]
 async fn valid_setting_updates_config() {
-    let (mgr, nid) = setup(Some(host_schema())).await;
+    let (mgr, plugin, nid) = setup(Some(host_schema())).await;
     mgr.node_setting(
         nid,
         cfg(&[
@@ -222,12 +228,18 @@ async fn valid_setting_updates_config() {
         node.config.config.get("port").and_then(|v| v.as_i64()),
         Some(1502)
     );
+    // 配置必须真的到达插件（而不只是写进了 Store）
+    let last = plugin
+        .last_setting()
+        .await
+        .expect("setting should reach the plugin");
+    assert_eq!(last.get("host").and_then(|v| v.as_str()), Some("new-host"));
 }
 
 #[tokio::test]
 async fn plugin_without_schema_keeps_working() {
     // 无 Schema 的插件：任何配置都放行（回归保护，避免校验把这类插件锁死）
-    let (mgr, nid) = setup(None).await;
+    let (mgr, plugin, nid) = setup(None).await;
     mgr.node_setting(nid, cfg(&[("anything", serde_json::json!(1))]))
         .await
         .expect("plugin without schema must accept arbitrary config");
@@ -236,6 +248,12 @@ async fn plugin_without_schema_keeps_working() {
         node.config.config.get("anything").and_then(|v| v.as_i64()),
         Some(1)
     );
+    // 配置必须真的到达插件
+    let last = plugin
+        .last_setting()
+        .await
+        .expect("setting should reach the plugin");
+    assert_eq!(last.get("anything").and_then(|v| v.as_i64()), Some(1));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

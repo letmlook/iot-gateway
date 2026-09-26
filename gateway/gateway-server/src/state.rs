@@ -4,6 +4,7 @@ use crate::config::Config;
 use crate::license::FeatureManager;
 use crate::logging::NodeLogNameMap;
 use crate::users::UserStore;
+use gateway_core::proc_plugin::ProcessPluginLoader;
 use gateway_core::{persist_save_secret, Manager, PluginLoader};
 use std::sync::Arc;
 use tracing::warn;
@@ -21,6 +22,8 @@ pub struct AppState {
     /// 持久化脏标记：true 表示内存中已有尚未落盘的变更
     persist_dirty: Arc<std::sync::atomic::AtomicBool>,
     _loader: Option<Arc<PluginLoader>>,
+    /// 进程隔离模式下的插件加载器（含各子进程的重启计数）；inproc 模式为 None
+    pub plugin_processes: Option<Arc<ProcessPluginLoader>>,
 }
 
 impl AppState {
@@ -40,6 +43,7 @@ impl AppState {
             node_log_names,
             persist_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             _loader: loader.map(Arc::new),
+            plugin_processes: None,
         }
     }
 

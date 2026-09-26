@@ -755,10 +755,29 @@ pub async fn metrics(State(state): State<AppState>) -> (axum::http::StatusCode, 
                 .map(|node| node.config.name)
                 .unwrap_or_else(|| nid.0.to_string());
             body.push_str(&format!(
-                "gateway_north_lagged_by_node{{north_node=\"{}\",north_node_id=\"{}\")}} {}\n",
+                "gateway_north_lagged_by_node{{north_node=\"{}\",north_node_id=\"{}\"}} {}\n",
                 name, nid.0, n
             ));
         }
+    }
+    // 进程隔离模式：暴露插件子进程数量与重启次数（插件崩溃自愈的观测点）
+    if let Some(loader) = &state.plugin_processes {
+        body.push_str(
+            "# HELP gateway_plugin_processes Number of plugin host child processes.\n\
+             # TYPE gateway_plugin_processes gauge\n",
+        );
+        body.push_str(&format!(
+            "gateway_plugin_processes {}\n",
+            loader.process_count().await
+        ));
+        body.push_str(
+            "# HELP gateway_plugin_process_restarts Total plugin host process restarts.\n\
+             # TYPE gateway_plugin_process_restarts counter\n",
+        );
+        body.push_str(&format!(
+            "gateway_plugin_process_restarts {}\n",
+            loader.total_restarts().await
+        ));
     }
     (StatusCode::OK, body)
 }
