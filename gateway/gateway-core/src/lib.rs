@@ -14,7 +14,7 @@ mod store;
 pub use bus::{Bus, SubscriptionTable, subscription_set};
 pub use data_flow::{DataFlowMetrics, DataFlowMetricsSnapshot, TagForwardedStat, TagPublishedStat};
 pub use loader::PluginLoader;
-pub use manager::{Manager, SouthConnectionState};
+pub use manager::{Manager, SouthConnectionState, MIN_POLL_INTERVAL_MS};
 pub use node::{Node, NodeConfig};
 pub use persist::{
     apply_to_store, build_snapshot, load as persist_load, load_json as persist_load_json,

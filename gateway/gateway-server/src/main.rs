@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .map(|_| std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())));
     logging::init_logging(&config, node_log_names.clone());
 
-    let mut mgr = Manager::new();
+    let mut mgr = Manager::with_bus_capacity(config.bus_capacity);
     let mut loader_opt: Option<PluginLoader> = None;
 
     // 从 plugins_dir 加载动态库插件（Windows: .dll，Unix: .so）；若无目录或加载后无插件则使用内置

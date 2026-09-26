@@ -42,6 +42,8 @@ pub struct Config {
     pub enforce_roles: bool,
     /// 持久化写合并窗口（毫秒）：窗口内的多次变更合并为一次 SQLite 事务；0 表示每次变更立即落盘
     pub persist_debounce_ms: u64,
+    /// 消息总线容量（条）：慢消费者可积压的消息数，规模较大时可调高
+    pub bus_capacity: usize,
 }
 
 fn default_bind_str() -> String {
@@ -53,6 +55,11 @@ fn random_secret() -> String {
     use rand::Rng;
     let bytes: [u8; 32] = rand::thread_rng().gen();
     hex::encode(bytes)
+}
+
+/// 总线默认容量（与 gateway-core 的 BUS_CAPACITY 一致）
+fn default_bus_capacity() -> usize {
+    4096
 }
 
 /// 持久化写合并窗口默认 300ms：足够合并一次页面上的连续操作，又不会让数据长时间只在内存里
@@ -156,6 +163,7 @@ impl Default for Config {
             master_secret: None,
             enforce_roles: true,
             persist_debounce_ms: default_persist_debounce_ms(),
+            bus_capacity: default_bus_capacity(),
         }
     }
 }
@@ -183,6 +191,7 @@ impl Config {
             master_secret: None,
             enforce_roles: true,
             persist_debounce_ms: default_persist_debounce_ms(),
+            bus_capacity: default_bus_capacity(),
         })
     }
 
@@ -289,6 +298,11 @@ impl Config {
         }
         if let Ok(s) = std::env::var("GATEWAY_ENFORCE_ROLES") {
             c.enforce_roles = !(s == "0" || s.eq_ignore_ascii_case("false"));
+        }
+        if let Ok(s) = std::env::var("GATEWAY_BUS_CAPACITY") {
+            if let Ok(n) = s.parse::<usize>() {
+                c.bus_capacity = n;
+            }
         }
         if let Ok(s) = std::env::var("GATEWAY_PERSIST_DEBOUNCE_MS") {
             if let Ok(ms) = s.parse::<u64>() {

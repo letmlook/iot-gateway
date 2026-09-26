@@ -644,11 +644,37 @@ pub async fn metrics(State(state): State<AppState>) -> (axum::http::StatusCode, 
          gateway_data_flow_north_on_group_data_err {}\n\
          # HELP gateway_data_flow_north_lagged Total messages skipped due to lag.\n\
          # TYPE gateway_data_flow_north_lagged counter\n\
-         gateway_data_flow_north_lagged {}\n",
+         gateway_data_flow_north_lagged {}\n\
+         # HELP gateway_south_poll_timeout Total south poll_group timeouts.\n\
+         # TYPE gateway_south_poll_timeout counter\n\
+         gateway_south_poll_timeout {}\n\
+         # HELP gateway_south_poll_err Total south poll_group errors.\n\
+         # TYPE gateway_south_poll_err counter\n\
+         gateway_south_poll_err {}\n",
         nodes_total, nodes_running, plugins_south, plugins_north,
         df.south_published, df.bus_no_subscribers, df.north_received, df.north_filtered,
         df.north_forwarded, df.north_on_group_data_ok, df.north_on_group_data_err, df.north_lagged,
+        df.south_poll_timeout, df.south_poll_err,
     );
+    // 维度化指标：定位「是哪个北向节点在丢数据」
+    let mut body = body;
+    if !df.lagged_by_node.is_empty() {
+        body.push_str(
+            "# HELP gateway_north_lagged_by_node Messages skipped due to lag, per north node.\n\
+             # TYPE gateway_north_lagged_by_node counter\n",
+        );
+        for (nid, n) in &df.lagged_by_node {
+            let name = state
+                .manager
+                .node_get(*nid)
+                .map(|node| node.config.name)
+                .unwrap_or_else(|| nid.0.to_string());
+            body.push_str(&format!(
+                "gateway_north_lagged_by_node{{north_node=\"{}\",north_node_id=\"{}\")}} {}\n",
+                name, nid.0, n
+            ));
+        }
+    }
     (StatusCode::OK, body)
 }
 
@@ -696,7 +722,16 @@ pub async fn data_flow(State(state): State<AppState>) -> Json<serde_json::Value>
             "north_on_group_data_ok": m.north_on_group_data_ok,
             "north_on_group_data_err": m.north_on_group_data_err,
             "north_lagged": m.north_lagged,
+            "south_poll_timeout": m.south_poll_timeout,
+            "south_poll_err": m.south_poll_err,
         },
+        "lagged_by_node": m.lagged_by_node.iter().map(|(nid, n)| {
+            serde_json::json!({
+                "north_node_id": nid,
+                "north_node_name": state.manager.node_get(*nid).map(|node| node.config.name),
+                "skipped": n,
+            })
+        }).collect::<Vec<_>>(),
         "per_tag": {
             "published": published_per_tag,
             "forwarded": forwarded_per_tag,
@@ -1047,6 +1082,18 @@ pub async fn get_group(
     Ok(Json(group))
 }
 
+/// 轮询周期下限校验：过小的周期会造成忙循环并压垮设备，属于配置事故
+pub(super) fn validate_interval_ms(interval_ms: u64) -> Result<u64, ApiError> {
+    if interval_ms < gateway_core::MIN_POLL_INTERVAL_MS {
+        return Err(ApiError::bad_request(format!(
+            "interval_ms must be >= {} (got {})",
+            gateway_core::MIN_POLL_INTERVAL_MS,
+            interval_ms
+        )));
+    }
+    Ok(interval_ms)
+}
+
 #[derive(Deserialize)]
 pub struct AddGroupReq {
     pub name: String,
@@ -1061,7 +1108,8 @@ pub async fn add_group(
 ) -> Result<Json<Group>, ApiError> {
     let nid = parse_node_id(&id)?;
     ensure_node_south(&state, nid)?;
-    let mut g = Group::new(req.name, req.interval_ms);
+    let interval_ms = validate_interval_ms(req.interval_ms)?;
+    let mut g = Group::new(req.name, interval_ms);
     g.description = req.description;
     state.manager.group_add(nid, g.clone()).map_err(ApiError::bad_request)?;
     state.persist().await;
@@ -1085,7 +1133,7 @@ pub async fn update_group(
     let g = parse_group_id(&gid)?;
     state
         .manager
-        .group_update(nid, g, req.name, req.interval_ms, req.description)
+        .group_update(nid, g, req.name, req.interval_ms.map(validate_interval_ms).transpose()?, req.description)
         .map_err(ApiError::bad_request)?;
     state.persist().await;
     Ok(StatusCode::NO_CONTENT)

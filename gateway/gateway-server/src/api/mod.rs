@@ -678,4 +678,14 @@ mod tests {
         assert!(!state.persist_pending());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn group_interval_lower_bound_is_enforced() {
+        // 10ms 是服务端下限：过小会造成忙循环并压垮设备
+        use super::handlers::validate_interval_ms;
+        assert!(validate_interval_ms(10).is_ok());
+        assert!(validate_interval_ms(1000).is_ok());
+        assert!(validate_interval_ms(9).is_err());
+        assert!(validate_interval_ms(0).is_err(), "interval_ms=0 must be rejected");
+    }
 }

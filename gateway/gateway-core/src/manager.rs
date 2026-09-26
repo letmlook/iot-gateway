@@ -30,6 +30,14 @@ pub struct SouthConnectionState {
 }
 
 /// 路由核心
+/// 南向轮询周期下限（毫秒）：低于该值的配置会被钳制，避免忙循环打满 CPU
+pub const MIN_POLL_INTERVAL_MS: u64 = 10;
+
+/// 总线默认容量（与 `gateway_core::bus::BUS_CAPACITY` 保持一致）
+fn gateway_core_bus_default() -> usize {
+    crate::bus::BUS_CAPACITY
+}
+
 pub struct Manager {
     pub bus: Bus,
     pub store: Store,
@@ -49,8 +57,13 @@ pub struct Manager {
 
 impl Manager {
     pub fn new() -> Self {
+        Self::with_bus_capacity(gateway_core_bus_default())
+    }
+
+    /// 以指定总线容量创建（容量决定慢消费者可积压的消息数，用于规模调优）
+    pub fn with_bus_capacity(capacity: usize) -> Self {
         Self {
-            bus: Bus::new(),
+            bus: Bus::with_capacity(capacity.max(16)),
             store: Store::new(),
             subscriptions: Arc::new(RwLock::new(SubscriptionTable::default())),
             south_plugins: SouthRegistry::new(),
@@ -190,6 +203,9 @@ impl Manager {
         }
         if is_south {
             self.remove_subscriptions_ref_south(id).await;
+            self.data_flow_metrics.forget_south_node(id);
+        } else {
+            self.data_flow_metrics.forget_north_node(id);
         }
         self.store.node_remove(id)
     }
@@ -262,7 +278,7 @@ impl Manager {
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            metrics.north_lagged.fetch_add(n, Ordering::Relaxed);
+                            metrics.record_lagged(id, n);
                             warn!(node_id = ?id, lagged = n, "north bus recv lagged, skipped messages");
                         }
                         Err(_) => {}
@@ -347,8 +363,31 @@ impl Manager {
                         let mut cancel_rx = cancel_rx;
                         loop {
                             let tags = store.tags_by_group(id, gid);
-                            match plugin.poll_group(id, gid, &tags).await {
-                                Ok(values) => {
+                            // 周期下限做服务端钳制：防止 interval_ms=0 造成忙循环打满 CPU
+                            let interval_ms = match store.group_get(id, gid) {
+                                Some(grp) => grp.interval_ms.max(MIN_POLL_INTERVAL_MS),
+                                None => break,
+                            };
+                            // 采集超时：慢设备不应挂住整个轮询任务（多数插件无内部超时）
+                            let poll_timeout_ms = interval_ms.saturating_mul(3).max(5_000);
+                            let poll_result = tokio::time::timeout(
+                                tokio::time::Duration::from_millis(poll_timeout_ms),
+                                plugin.poll_group(id, gid, &tags),
+                            )
+                            .await;
+                            match poll_result {
+                                Err(_) => {
+                                    let err_msg =
+                                        format!("poll_group timeout after {} ms", poll_timeout_ms);
+                                    metrics.south_poll_timeout.fetch_add(1, Ordering::Relaxed);
+                                    warn!(node_id = ?id, group_id = ?gid, "{}", err_msg);
+                                    let mut st = south_conn.write().await;
+                                    st.insert(
+                                        id,
+                                        SouthConnectionState { connected: false, last_error: Some(err_msg) },
+                                    );
+                                }
+                                Ok(Ok(values)) => {
                                     let _point_count = values.len();
                                     let node_name = store.node_get(id).map(|n| n.config.name);
                                     let group_name = store.group_get(id, gid).map(|g| g.name);
@@ -386,8 +425,9 @@ impl Manager {
                                     let mut st = south_conn.write().await;
                                     st.insert(id, SouthConnectionState { connected: true, last_error: None });
                                 }
-                                Err(e) => {
+                                Ok(Err(e)) => {
                                     // let grp_name = store.group_get(id, gid).map(|g| g.name).unwrap_or_else(|| gid.0.to_string());
+                                    metrics.south_poll_err.fetch_add(1, Ordering::Relaxed);
                                     let err_msg = e.to_string();
                                     // log::warn(id, format!("采集失败 组[{}]: {} 连接异常", grp_name, err_msg));
                                     warn!(node_id = ?id, group_id = ?gid, "poll_group error: {}", e);
@@ -395,10 +435,6 @@ impl Manager {
                                     st.insert(id, SouthConnectionState { connected: false, last_error: Some(err_msg) });
                                 }
                             }
-                            let interval_ms = match store.group_get(id, gid) {
-                                Some(grp) => grp.interval_ms,
-                                None => break,
-                            };
                             tokio::select! {
                                 _ = cancel_rx.recv() => break,
                                 _ = tokio::time::sleep(tokio::time::Duration::from_millis(interval_ms)) => {}
@@ -619,6 +655,7 @@ impl Manager {
         let g = self.store.group_remove(node_id, group_id);
         if g.is_some() {
             self.remove_subscriptions_ref_group(node_id, group_id).await;
+            self.data_flow_metrics.forget_group(node_id, group_id);
         }
         g
     }
