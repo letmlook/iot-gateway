@@ -28,6 +28,51 @@ use value::{register_to_value_ext, value_to_registers};
 #[cfg(feature = "modbus-client")]
 use std::time::Duration;
 
+
+/// 建立一条新的 Modbus TCP 连接（带连接超时）
+#[cfg(feature = "modbus-client")]
+async fn connect_ctx(s: &ModbusTcpState) -> PluginResult<tokio_modbus::client::Context> {
+    use tokio::net::TcpStream;
+    use tokio_modbus::client::tcp::attach_slave;
+    use tokio_modbus::slave::Slave;
+
+    let addr = (s.host.as_str(), s.port);
+    let timeout_dur = Duration::from_millis(s.connection_timeout_ms.min(60000));
+    let stream = tokio::time::timeout(timeout_dur, TcpStream::connect(addr))
+        .await
+        .map_err(|_| PluginError::msg("tcp connect timeout"))?
+        .map_err(|e| PluginError::msg(format!("tcp connect: {}", e)))?;
+    Ok(attach_slave(stream, Slave(s.slave_id)))
+}
+
+/// 取出（必要时建立）长连接。处于退避窗口内时直接报错，避免对不可达设备反复建连。
+#[cfg(feature = "modbus-client")]
+async fn ensure_connection(
+    s: &ModbusTcpState,
+) -> PluginResult<tokio::sync::MutexGuard<'_, state::ConnectionState>> {
+    let mut cst = s.conn.lock().await;
+    if cst.conn.is_none() {
+        let wait = cst.backoff_remaining_ms();
+        if wait > 0 {
+            return Err(PluginError::msg(format!(
+                "connection in backoff, retry in {} ms",
+                wait
+            )));
+        }
+        match connect_ctx(s).await {
+            Ok(ctx) => {
+                cst.conn = Some(ctx);
+                cst.on_success();
+            }
+            Err(e) => {
+                cst.on_failure();
+                return Err(e);
+            }
+        }
+    }
+    Ok(cst)
+}
+
 /// Modbus TCP 南向插件
 pub struct ModbusTcpPlugin {
     state: Arc<RwLock<HashMap<NodeId, ModbusTcpState>>>,
@@ -394,6 +439,8 @@ impl SouthPlugin for ModbusTcpPlugin {
                 start_address,
                 groups,
                 tags,
+                #[cfg(feature = "modbus-client")]
+                conn: tokio::sync::Mutex::new(state::ConnectionState::new()),
             },
         );
         Ok(())
@@ -445,68 +492,119 @@ impl SouthPlugin for ModbusTcpPlugin {
 
         #[cfg(feature = "modbus-client")]
         {
-            use tokio::net::TcpStream;
-            use tokio_modbus::client::tcp::attach_slave;
             use tokio_modbus::prelude::*;
-            use tokio_modbus::slave::Slave;
 
-            let addr = (s.host.as_str(), s.port);
-            let timeout_dur = Duration::from_millis(s.connection_timeout_ms.min(60000));
-            let stream = tokio::time::timeout(timeout_dur, TcpStream::connect(addr))
-                .await
-                .map_err(|_| PluginError::msg("tcp connect timeout"))?
-                .map_err(|e| PluginError::msg(format!("tcp connect: {}", e)))?;
-            let mut ctx = attach_slave(stream, Slave(s.slave_id));
+            // 复用长连接：仅首次或上次出错后重建（退避见 state::ConnectionState）
+            let mut cst = ensure_connection(s).await?;
+            let ctx = cst
+                .conn
+                .as_mut()
+                .ok_or_else(|| PluginError::msg("modbus connection unavailable"))?;
 
             let send_interval = Duration::from_millis(s.send_interval_ms.min(5000));
             let mut out = Vec::with_capacity(tags.len());
-            for tag in tags {
-                let (tag_id, value) = match parse_address_full(&tag.address, s.start_address) {
+            let mut failure: Option<PluginError> = None;
+
+            'read: for tag in tags {
+                let value = match parse_address_full(&tag.address, s.start_address) {
                     Some(parsed) => {
                         let dt = tag.data_type.as_deref().unwrap_or("uint16");
                         let v = match parsed.area {
-                            ModbusArea::Coil => {
-                                let coils = match ctx.read_coils(parsed.start, parsed.count).await {
-                                    Ok(Ok(v)) => v,
-                                    Ok(Err(e)) => return Err(PluginError::msg(format!("read_coils exception: {}", e))),
-                                    Err(e) => return Err(PluginError::msg(format!("read_coils: {}", e))),
-                                };
-                                let b = coils.first().copied().unwrap_or(false);
-                                DataValue::Bool(b)
-                            }
-                            ModbusArea::DiscreteInput => {
-                                let disc = match ctx.read_discrete_inputs(parsed.start, parsed.count).await {
-                                    Ok(Ok(v)) => v,
-                                    Ok(Err(e)) => return Err(PluginError::msg(format!("read_discrete_inputs exception: {}", e))),
-                                    Err(e) => return Err(PluginError::msg(format!("read_discrete_inputs: {}", e))),
-                                };
-                                DataValue::Bool(disc.first().copied().unwrap_or(false))
-                            }
-                            ModbusArea::InputRegister => {
-                                let regs = match ctx.read_input_registers(parsed.start, parsed.count).await {
-                                    Ok(Ok(v)) => v,
-                                    Ok(Err(e)) => return Err(PluginError::msg(format!("read_input_registers exception: {}", e))),
-                                    Err(e) => return Err(PluginError::msg(format!("read_input_registers: {}", e))),
-                                };
-                                register_to_value_ext(&regs, dt, &parsed.endian, parsed.bit_index)
-                            }
-                            ModbusArea::HoldingRegister => {
-                                let regs = match ctx.read_holding_registers(parsed.start, parsed.count).await {
-                                    Ok(Ok(v)) => v,
-                                    Ok(Err(e)) => return Err(PluginError::msg(format!("read_holding_registers exception: {}", e))),
-                                    Err(e) => return Err(PluginError::msg(format!("read_holding_registers: {}", e))),
-                                };
-                                register_to_value_ext(&regs, dt, &parsed.endian, parsed.bit_index)
-                            }
+                            ModbusArea::Coil => match ctx.read_coils(parsed.start, parsed.count).await {
+                                Ok(Ok(v)) => DataValue::Bool(v.first().copied().unwrap_or(false)),
+                                Ok(Err(e)) => {
+                                    failure = Some(PluginError::msg(format!("read_coils exception: {}", e)));
+                                    break 'read;
+                                }
+                                Err(e) => {
+                                    failure = Some(PluginError::msg(format!("read_coils: {}", e)));
+                                    break 'read;
+                                }
+                            },
+                            ModbusArea::DiscreteInput => match ctx
+                                .read_discrete_inputs(parsed.start, parsed.count)
+                                .await
+                            {
+                                Ok(Ok(v)) => DataValue::Bool(v.first().copied().unwrap_or(false)),
+                                Ok(Err(e)) => {
+                                    failure = Some(PluginError::msg(format!(
+                                        "read_discrete_inputs exception: {}",
+                                        e
+                                    )));
+                                    break 'read;
+                                }
+                                Err(e) => {
+                                    failure = Some(PluginError::msg(format!(
+                                        "read_discrete_inputs: {}",
+                                        e
+                                    )));
+                                    break 'read;
+                                }
+                            },
+                            ModbusArea::InputRegister => match ctx
+                                .read_input_registers(parsed.start, parsed.count)
+                                .await
+                            {
+                                Ok(Ok(regs)) => {
+                                    register_to_value_ext(&regs, dt, &parsed.endian, parsed.bit_index)
+                                }
+                                Ok(Err(e)) => {
+                                    failure = Some(PluginError::msg(format!(
+                                        "read_input_registers exception: {}",
+                                        e
+                                    )));
+                                    break 'read;
+                                }
+                                Err(e) => {
+                                    failure = Some(PluginError::msg(format!(
+                                        "read_input_registers: {}",
+                                        e
+                                    )));
+                                    break 'read;
+                                }
+                            },
+                            ModbusArea::HoldingRegister => match ctx
+                                .read_holding_registers(parsed.start, parsed.count)
+                                .await
+                            {
+                                Ok(Ok(regs)) => {
+                                    register_to_value_ext(&regs, dt, &parsed.endian, parsed.bit_index)
+                                }
+                                Ok(Err(e)) => {
+                                    failure = Some(PluginError::msg(format!(
+                                        "read_holding_registers exception: {}",
+                                        e
+                                    )));
+                                    break 'read;
+                                }
+                                Err(e) => {
+                                    failure = Some(PluginError::msg(format!(
+                                        "read_holding_registers: {}",
+                                        e
+                                    )));
+                                    break 'read;
+                                }
+                            },
                         };
                         tokio::time::sleep(send_interval).await;
-                        (tag.id, v)
+                        v
                     }
-                    None => (tag.id, DataValue::UInt16(0)),
+                    None => DataValue::UInt16(0),
                 };
-                out.push((tag_id, value));
+                out.push((tag.id, value));
             }
-            Ok(out)
+
+            match failure {
+                // 读取失败通常意味着连接已不可用：丢弃并退避，下次采集重建
+                Some(e) => {
+                    cst.on_failure();
+                    Err(e)
+                }
+                None => {
+                    cst.on_success();
+                    Ok(out)
+                }
+            }
         }
 
         #[cfg(not(feature = "modbus-client"))]
@@ -546,21 +644,18 @@ impl SouthPlugin for ModbusTcpPlugin {
 
         #[cfg(feature = "modbus-client")]
         {
-            use tokio::net::TcpStream;
-            use tokio_modbus::client::tcp::attach_slave;
             use tokio_modbus::prelude::*;
-            use tokio_modbus::slave::Slave;
 
-            let addr = (s.host.as_str(), s.port);
-            let timeout_dur = Duration::from_millis(s.connection_timeout_ms.min(60000));
-            let stream = tokio::time::timeout(timeout_dur, TcpStream::connect(addr))
-                .await
-                .map_err(|_| PluginError::msg("tcp connect timeout"))?
-                .map_err(|e| PluginError::msg(format!("tcp connect: {}", e)))?;
-            let mut ctx = attach_slave(stream, Slave(s.slave_id));
+            // 写值与采集共用同一条长连接，避免每次写都重新建连
+            let mut cst = ensure_connection(s).await?;
+            let ctx = cst
+                .conn
+                .as_mut()
+                .ok_or_else(|| PluginError::msg("modbus connection unavailable"))?;
             let interval = Duration::from_millis(s.send_interval_ms.min(5000));
+            let mut failure: Option<PluginError> = None;
 
-            for (tag, value) in values {
+            'write: for (tag, value) in values {
                 let Some(parsed) = parse_address_full(&tag.address, s.start_address) else {
                     continue;
                 };
@@ -569,33 +664,58 @@ impl SouthPlugin for ModbusTcpPlugin {
                         let b = value.as_bool().unwrap_or(false);
                         if parsed.count == 1 {
                             if let Err(e) = ctx.write_single_coil(parsed.start, b).await {
-                                return Err(PluginError::msg(format!("write_single_coil: {}", e)));
+                                failure = Some(PluginError::msg(format!("write_single_coil: {}", e)));
+                                break 'write;
                             }
                         } else {
                             let coils: Vec<bool> = (0..parsed.count).map(|_| b).collect();
                             if let Err(e) = ctx.write_multiple_coils(parsed.start, &coils).await {
-                                return Err(PluginError::msg(format!("write_multiple_coils: {}", e)));
+                                failure =
+                                    Some(PluginError::msg(format!("write_multiple_coils: {}", e)));
+                                break 'write;
                             }
                         }
                     }
                     ModbusArea::HoldingRegister => {
-                        let regs = value_to_registers(value, tag.data_type.as_deref().unwrap_or("uint16"));
+                        let regs =
+                            value_to_registers(value, tag.data_type.as_deref().unwrap_or("uint16"));
                         if regs.is_empty() {
                             continue;
                         }
                         if regs.len() == 1 {
                             if let Err(e) = ctx.write_single_register(parsed.start, regs[0]).await {
-                                return Err(PluginError::msg(format!("write_single_register: {}", e)));
+                                failure =
+                                    Some(PluginError::msg(format!("write_single_register: {}", e)));
+                                break 'write;
                             }
-                        } else if let Err(e) = ctx.write_multiple_registers(parsed.start, &regs).await {
-                            return Err(PluginError::msg(format!("write_multiple_registers: {}", e)));
+                        } else if let Err(e) =
+                            ctx.write_multiple_registers(parsed.start, &regs).await
+                        {
+                            failure =
+                                Some(PluginError::msg(format!("write_multiple_registers: {}", e)));
+                            break 'write;
                         }
                     }
-                    _ => return Err(PluginError::tag_invalid("only coil and holding register support write")),
+                    _ => {
+                        failure = Some(PluginError::tag_invalid(
+                            "only coil and holding register support write",
+                        ));
+                        break 'write;
+                    }
                 }
                 tokio::time::sleep(interval).await;
             }
-            Ok(())
+
+            match failure {
+                Some(e) => {
+                    cst.on_failure();
+                    Err(e)
+                }
+                None => {
+                    cst.on_success();
+                    Ok(())
+                }
+            }
         }
 
         #[cfg(not(feature = "modbus-client"))]
