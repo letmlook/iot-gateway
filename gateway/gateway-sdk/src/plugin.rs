@@ -3,8 +3,8 @@
 use crate::error::{PluginError, PluginResult};
 use crate::messages::{GroupData, GroupSubscription};
 use crate::schema::{ConfigSchema, TagSchema};
-use crate::types::{Group, GroupId, NodeId, Tag, TagId};
 use crate::types::PluginConfig;
+use crate::types::{Group, GroupId, NodeId, Tag, TagId};
 use async_trait::async_trait;
 use serde::Serialize;
 use std::sync::Arc;

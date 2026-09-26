@@ -1,8 +1,8 @@
 //! OPC UA 客户端读写（需启用 opcua-client feature）。
 
+use gateway_sdk::types::DataValue;
 use gateway_sdk::{PluginError, PluginResult};
 use gateway_sdk::{Tag, TagId};
-use gateway_sdk::types::DataValue;
 
 use crate::address::{parse_address, OpcNodeId};
 
@@ -90,7 +90,12 @@ pub fn opcua_read(
 
     let out: Vec<(TagId, DataValue)> = tags
         .iter()
-        .map(|(id, _)| (*id, value_map.get(id).copied().unwrap_or(DataValue::UInt32(0))))
+        .map(|(id, _)| {
+            (
+                *id,
+                value_map.get(id).copied().unwrap_or(DataValue::UInt32(0)),
+            )
+        })
         .collect();
     Ok(out)
 }
@@ -180,8 +185,7 @@ pub fn opcua_write(
             if !code.is_good() {
                 return Err(PluginError::msg(format!(
                     "write node {} failed: {}",
-                    tag.address,
-                    code
+                    tag.address, code
                 )));
             }
         }

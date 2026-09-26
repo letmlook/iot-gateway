@@ -34,8 +34,14 @@ pub fn topic_from_template(
 pub fn data_value_ecp_type(v: &DataValue) -> u8 {
     match v {
         DataValue::Bool(_) => 1,
-        DataValue::Int8(_) | DataValue::Int16(_) | DataValue::Int32(_) | DataValue::Int64(_)
-        | DataValue::UInt8(_) | DataValue::UInt16(_) | DataValue::UInt32(_) | DataValue::UInt64(_) => 2,
+        DataValue::Int8(_)
+        | DataValue::Int16(_)
+        | DataValue::Int32(_)
+        | DataValue::Int64(_)
+        | DataValue::UInt8(_)
+        | DataValue::UInt16(_)
+        | DataValue::UInt32(_)
+        | DataValue::UInt64(_) => 2,
         DataValue::Float32(_) | DataValue::Float64(_) => 3,
         DataValue::String(_) | DataValue::Bytes(_) => 4,
     }

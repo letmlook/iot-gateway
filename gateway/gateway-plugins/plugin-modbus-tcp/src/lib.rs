@@ -10,12 +10,12 @@ mod merge;
 mod state;
 mod value;
 
+use gateway_sdk::log;
+use gateway_sdk::types::{DataValue, PluginKind};
 use gateway_sdk::{
     ConfigSchema, Group, GroupId, NodeId, ParamOption, ParamSchema, ParamType, ParamValid,
     PluginMeta, SouthPlugin, Tag, TagId, TagRegexEntry, TagSchema,
 };
-use gateway_sdk::log;
-use gateway_sdk::types::{DataValue, PluginKind};
 use gateway_sdk::{PluginConfig, PluginError, PluginResult};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,7 +28,6 @@ use value::{register_to_value_ext, value_to_registers};
 
 #[cfg(feature = "modbus-client")]
 use std::time::Duration;
-
 
 /// 建立一条新的 Modbus TCP 连接（带连接超时）
 #[cfg(feature = "modbus-client")]
@@ -383,10 +382,17 @@ impl SouthPlugin for ModbusTcpPlugin {
                 "bytes".to_string(),
             ]),
             address_format: Some(
-                "0x!addr/1x!addr/3x!addr/4x!addr 或 1!400001[.BIT][#ENDIAN]，.LEN 用于 STRING".to_string(),
+                "0x!addr/1x!addr/3x!addr/4x!addr 或 1!400001[.BIT][#ENDIAN]，.LEN 用于 STRING"
+                    .to_string(),
             ),
-            address_format_zh: Some("0x!addr/1x!addr/3x!addr/4x!addr 或 1!400001[.BIT][#ENDIAN]，.LEN 用于 STRING".to_string()),
-            address_format_en: Some("0x!addr/1x!addr/3x!addr/4x!addr or 1!400001[.BIT][#ENDIAN], .LEN for STRING".to_string()),
+            address_format_zh: Some(
+                "0x!addr/1x!addr/3x!addr/4x!addr 或 1!400001[.BIT][#ENDIAN]，.LEN 用于 STRING"
+                    .to_string(),
+            ),
+            address_format_en: Some(
+                "0x!addr/1x!addr/3x!addr/4x!addr or 1!400001[.BIT][#ENDIAN], .LEN for STRING"
+                    .to_string(),
+            ),
         })
     }
 
@@ -394,36 +400,60 @@ impl SouthPlugin for ModbusTcpPlugin {
         if tag.name.is_empty() {
             return Err(PluginError::tag_invalid("tag name required"));
         }
-        parse_address(&tag.address)
-            .ok_or_else(|| PluginError::tag_invalid("address format: 0x!addr / 1x!addr / 3x!addr / 4x!addr"))?;
+        parse_address(&tag.address).ok_or_else(|| {
+            PluginError::tag_invalid("address format: 0x!addr / 1x!addr / 3x!addr / 4x!addr")
+        })?;
         Ok(())
     }
 
     async fn open(&self, node_id: NodeId, config: PluginConfig) -> PluginResult<()> {
         let host = config_str(&config, "host", "127.0.0.1");
         let port = config_u16(&config, "port", 502);
-        log::info(node_id, format!("open modbus-tcp: host={}, port={}", host, port));
-        let slave_id = config.get("slave_id").and_then(|v| v.as_u64()).map(|n| n as u8).unwrap_or(1);
-        let connection_timeout_ms = config.get("connection_timeout_ms").and_then(|v| v.as_u64()).unwrap_or(3000);
-        let send_interval_ms = config.get("send_interval_ms").and_then(|v| v.as_u64()).unwrap_or(20);
-        let max_retry_times = config.get("max_retry_times").and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(0);
-        let retry_interval_ms = config.get("retry_interval_ms").and_then(|v| v.as_u64()).unwrap_or(0);
-        let start_address = config.get("start_address").and_then(|v| v.as_u64()).map(|n| n as u8).unwrap_or(1).min(1);
+        log::info(
+            node_id,
+            format!("open modbus-tcp: host={}, port={}", host, port),
+        );
+        let slave_id = config
+            .get("slave_id")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u8)
+            .unwrap_or(1);
+        let connection_timeout_ms = config
+            .get("connection_timeout_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(3000);
+        let send_interval_ms = config
+            .get("send_interval_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(20);
+        let max_retry_times = config
+            .get("max_retry_times")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32)
+            .unwrap_or(0);
+        let retry_interval_ms = config
+            .get("retry_interval_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let start_address = config
+            .get("start_address")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u8)
+            .unwrap_or(1)
+            .min(1);
         let groups = Self::default_groups();
         let tags = groups
             .iter()
             .flat_map(|g| {
-                vec![
-                    Tag {
-                        id: TagId::new(),
-                        name: "holding_0".to_string(),
-                        address: "4x!0".to_string(),
-                        attr: gateway_sdk::TagAttr::Read,
-                        data_type: Some("uint16".to_string()),
-                        description: Some("保持寄存器 0".to_string()),
-                        group_id: g.id,
-                    },
-                ]
+                vec![Tag {
+                    id: TagId::new(),
+                    name: "holding_0".to_string(),
+                    address: "4x!0".to_string(),
+                    attr: gateway_sdk::TagAttr::Read,
+                    data_type: Some("uint16".to_string()),
+                    description: Some("保持寄存器 0".to_string()),
+                    group_id: g.id,
+                }]
             })
             .collect::<Vec<_>>();
         let mut state = self.state.write().await;
@@ -472,12 +502,34 @@ impl SouthPlugin for ModbusTcpPlugin {
         if let Some(s) = state.get_mut(&node_id) {
             s.host = host;
             s.port = port;
-            s.slave_id = config.get("slave_id").and_then(|v| v.as_u64()).map(|n| n as u8).unwrap_or(s.slave_id);
-            s.connection_timeout_ms = config.get("connection_timeout_ms").and_then(|v| v.as_u64()).unwrap_or(s.connection_timeout_ms);
-            s.send_interval_ms = config.get("send_interval_ms").and_then(|v| v.as_u64()).unwrap_or(s.send_interval_ms);
-            s.max_retry_times = config.get("max_retry_times").and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(s.max_retry_times);
-            s.retry_interval_ms = config.get("retry_interval_ms").and_then(|v| v.as_u64()).unwrap_or(s.retry_interval_ms);
-            s.start_address = config.get("start_address").and_then(|v| v.as_u64()).map(|n| n as u8).unwrap_or(s.start_address).min(1);
+            s.slave_id = config
+                .get("slave_id")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u8)
+                .unwrap_or(s.slave_id);
+            s.connection_timeout_ms = config
+                .get("connection_timeout_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(s.connection_timeout_ms);
+            s.send_interval_ms = config
+                .get("send_interval_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(s.send_interval_ms);
+            s.max_retry_times = config
+                .get("max_retry_times")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u32)
+                .unwrap_or(s.max_retry_times);
+            s.retry_interval_ms = config
+                .get("retry_interval_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(s.retry_interval_ms);
+            s.start_address = config
+                .get("start_address")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u8)
+                .unwrap_or(s.start_address)
+                .min(1);
         }
         Ok(())
     }
@@ -489,7 +541,9 @@ impl SouthPlugin for ModbusTcpPlugin {
         tags: &[Tag],
     ) -> PluginResult<Vec<(TagId, DataValue)>> {
         let state = self.state.read().await;
-        let s = state.get(&node_id).ok_or_else(|| PluginError::msg("node not open"))?;
+        let s = state
+            .get(&node_id)
+            .ok_or_else(|| PluginError::msg("node not open"))?;
 
         #[cfg(feature = "modbus-client")]
         {
@@ -546,8 +600,10 @@ impl SouthPlugin for ModbusTcpPlugin {
                                 break 'plan;
                             }
                             Err(e) => {
-                                failure =
-                                    Some(PluginError::msg(format!("read_holding_registers: {}", e)));
+                                failure = Some(PluginError::msg(format!(
+                                    "read_holding_registers: {}",
+                                    e
+                                )));
                                 break 'plan;
                             }
                         }
@@ -597,25 +653,23 @@ impl SouthPlugin for ModbusTcpPlugin {
                         Some(p) => {
                             let dt = tag.data_type.as_deref().unwrap_or("uint16");
                             match p.area {
-                                ModbusArea::Coil => {
-                                    match ctx.read_coils(p.start, p.count).await {
-                                        Ok(Ok(v)) => {
-                                            DataValue::Bool(v.first().copied().unwrap_or(false))
-                                        }
-                                        Ok(Err(e)) => {
-                                            failure = Some(PluginError::msg(format!(
-                                                "read_coils exception: {}",
-                                                e
-                                            )));
-                                            break 'single;
-                                        }
-                                        Err(e) => {
-                                            failure =
-                                                Some(PluginError::msg(format!("read_coils: {}", e)));
-                                            break 'single;
-                                        }
+                                ModbusArea::Coil => match ctx.read_coils(p.start, p.count).await {
+                                    Ok(Ok(v)) => {
+                                        DataValue::Bool(v.first().copied().unwrap_or(false))
                                     }
-                                }
+                                    Ok(Err(e)) => {
+                                        failure = Some(PluginError::msg(format!(
+                                            "read_coils exception: {}",
+                                            e
+                                        )));
+                                        break 'single;
+                                    }
+                                    Err(e) => {
+                                        failure =
+                                            Some(PluginError::msg(format!("read_coils: {}", e)));
+                                        break 'single;
+                                    }
+                                },
                                 ModbusArea::DiscreteInput => {
                                     match ctx.read_discrete_inputs(p.start, p.count).await {
                                         Ok(Ok(v)) => {
@@ -639,12 +693,9 @@ impl SouthPlugin for ModbusTcpPlugin {
                                 }
                                 ModbusArea::InputRegister => {
                                     match ctx.read_input_registers(p.start, p.count).await {
-                                        Ok(Ok(regs)) => register_to_value_ext(
-                                            &regs,
-                                            dt,
-                                            &p.endian,
-                                            p.bit_index,
-                                        ),
+                                        Ok(Ok(regs)) => {
+                                            register_to_value_ext(&regs, dt, &p.endian, p.bit_index)
+                                        }
                                         Ok(Err(e)) => {
                                             failure = Some(PluginError::msg(format!(
                                                 "read_input_registers exception: {}",
@@ -663,12 +714,9 @@ impl SouthPlugin for ModbusTcpPlugin {
                                 }
                                 ModbusArea::HoldingRegister => {
                                     match ctx.read_holding_registers(p.start, p.count).await {
-                                        Ok(Ok(regs)) => register_to_value_ext(
-                                            &regs,
-                                            dt,
-                                            &p.endian,
-                                            p.bit_index,
-                                        ),
+                                        Ok(Ok(regs)) => {
+                                            register_to_value_ext(&regs, dt, &p.endian, p.bit_index)
+                                        }
                                         Ok(Err(e)) => {
                                             failure = Some(PluginError::msg(format!(
                                                 "read_holding_registers exception: {}",
@@ -725,13 +773,17 @@ impl SouthPlugin for ModbusTcpPlugin {
 
     async fn list_groups(&self, node_id: NodeId) -> PluginResult<Vec<Group>> {
         let state = self.state.read().await;
-        let s = state.get(&node_id).ok_or_else(|| PluginError::msg("node not open"))?;
+        let s = state
+            .get(&node_id)
+            .ok_or_else(|| PluginError::msg("node not open"))?;
         Ok(s.groups.clone())
     }
 
     async fn list_tags(&self, node_id: NodeId, group_id: GroupId) -> PluginResult<Vec<Tag>> {
         let state = self.state.read().await;
-        let s = state.get(&node_id).ok_or_else(|| PluginError::msg("node not open"))?;
+        let s = state
+            .get(&node_id)
+            .ok_or_else(|| PluginError::msg("node not open"))?;
         Ok(s.tags
             .iter()
             .filter(|t| t.group_id == group_id)
@@ -744,7 +796,9 @@ impl SouthPlugin for ModbusTcpPlugin {
             return Ok(());
         }
         let state = self.state.read().await;
-        let s = state.get(&node_id).ok_or_else(|| PluginError::msg("node not open"))?;
+        let s = state
+            .get(&node_id)
+            .ok_or_else(|| PluginError::msg("node not open"))?;
 
         #[cfg(feature = "modbus-client")]
         {
@@ -768,7 +822,8 @@ impl SouthPlugin for ModbusTcpPlugin {
                         let b = value.as_bool().unwrap_or(false);
                         if parsed.count == 1 {
                             if let Err(e) = ctx.write_single_coil(parsed.start, b).await {
-                                failure = Some(PluginError::msg(format!("write_single_coil: {}", e)));
+                                failure =
+                                    Some(PluginError::msg(format!("write_single_coil: {}", e)));
                                 break 'write;
                             }
                         } else {
@@ -825,7 +880,9 @@ impl SouthPlugin for ModbusTcpPlugin {
         #[cfg(not(feature = "modbus-client"))]
         {
             let _ = (node_id, s, values);
-            Err(PluginError::not_supported("write requires modbus-client feature"))
+            Err(PluginError::not_supported(
+                "write requires modbus-client feature",
+            ))
         }
     }
 }

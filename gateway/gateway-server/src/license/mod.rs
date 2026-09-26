@@ -8,5 +8,5 @@ mod license;
 
 pub use feature::FeatureManager;
 pub use hardware::machine_id;
-pub use license::{load_and_verify_license, LicensePayload};
 pub use license::LICENSE_FILENAME;
+pub use license::{load_and_verify_license, LicensePayload};

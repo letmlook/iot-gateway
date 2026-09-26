@@ -119,6 +119,10 @@ mod tests {
 
         c.on_success();
         assert_eq!(c.failures, 0);
-        assert_eq!(c.backoff_remaining_ms(), 0, "success clears the backoff window");
+        assert_eq!(
+            c.backoff_remaining_ms(),
+            0,
+            "success clears the backoff window"
+        );
     }
 }

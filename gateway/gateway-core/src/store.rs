@@ -95,7 +95,8 @@ impl Store {
     /// 同节点下组名唯一：按名称查找组
     pub fn group_get_by_name(&self, node_id: NodeId, name: &str) -> Option<Group> {
         self.groups
-            .iter().find(|r| r.key().0 == node_id && r.value().name == name)
+            .iter()
+            .find(|r| r.key().0 == node_id && r.value().name == name)
             .map(|r| r.value().clone())
     }
 
@@ -128,10 +129,7 @@ impl Store {
         let id = t.id;
         self.tag_location.insert(id, (node_id, gid));
         self.tags.insert(id, t);
-        self.group_tags
-            .entry((node_id, gid))
-            .or_default()
-            .push(id);
+        self.group_tags.entry((node_id, gid)).or_default().push(id);
     }
 
     pub fn link_tag_to_group(&self, node_id: NodeId, group_id: GroupId, tag_id: TagId) {
@@ -144,10 +142,14 @@ impl Store {
     pub fn tag_remove(&self, id: TagId) -> Option<Tag> {
         let loc = self.tag_location.remove(&id).map(|(_, v)| v);
         if let Some(loc) = loc {
-            let empty = self.group_tags.get_mut(&loc).map(|mut v| {
-                v.retain(|x| *x != id);
-                v.is_empty()
-            }).unwrap_or(false);
+            let empty = self
+                .group_tags
+                .get_mut(&loc)
+                .map(|mut v| {
+                    v.retain(|x| *x != id);
+                    v.is_empty()
+                })
+                .unwrap_or(false);
             if empty {
                 self.group_tags.remove(&loc);
             }
@@ -185,12 +187,7 @@ impl Store {
     }
 
     /// 同组内标签名唯一：按名称查找标签
-    pub fn tag_get_by_name(
-        &self,
-        node_id: NodeId,
-        group_id: GroupId,
-        name: &str,
-    ) -> Option<Tag> {
+    pub fn tag_get_by_name(&self, node_id: NodeId, group_id: GroupId, name: &str) -> Option<Tag> {
         self.tags_by_group(node_id, group_id)
             .into_iter()
             .find(|t| t.name == name)

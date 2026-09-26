@@ -102,23 +102,22 @@ impl Default for Bus {
 }
 
 /// 北向订阅表：node_id -> [(south_node_id, group_id), ...]
-pub type SubscriptionTable = std::collections::HashMap<
-    gateway_sdk::NodeId,
-    Vec<GroupSubscription>,
->;
+pub type SubscriptionTable = std::collections::HashMap<gateway_sdk::NodeId, Vec<GroupSubscription>>;
 
 /// 将订阅列表转为 (south_node_id, group_id) 集合，用于北向过滤总线消息。
 #[inline]
-pub fn subscription_set(subs: &[GroupSubscription]) -> HashSet<(gateway_sdk::NodeId, gateway_sdk::GroupId)> {
+pub fn subscription_set(
+    subs: &[GroupSubscription],
+) -> HashSet<(gateway_sdk::NodeId, gateway_sdk::GroupId)> {
     subs.iter().map(|s| (s.south_node_id, s.group_id)).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use gateway_sdk::types::DataValue;
     use gateway_sdk::TagId;
-    use chrono::Utc;
 
     fn data(node: NodeId, group: GroupId, v: i32) -> Arc<GroupData> {
         Arc::new(GroupData {
@@ -136,7 +135,10 @@ mod tests {
     async fn publish_without_subscribers_is_reported() {
         let bus = Bus::new();
         let d = data(NodeId::new(), GroupId::new(), 1);
-        assert!(bus.publish(d).is_err(), "no subscriber means the message is dropped");
+        assert!(
+            bus.publish(d).is_err(),
+            "no subscriber means the message is dropped"
+        );
     }
 
     #[tokio::test]
@@ -199,7 +201,11 @@ mod tests {
         assert_eq!(bus.partition_count(), 3);
 
         bus.forget_node(south);
-        assert_eq!(bus.partition_count(), 1, "only the other node's group remains");
+        assert_eq!(
+            bus.partition_count(),
+            1,
+            "only the other node's group remains"
+        );
     }
 
     #[tokio::test]

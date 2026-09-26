@@ -17,7 +17,9 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
 fn result_json(r: gateway_sdk::PluginResult<()>) -> *mut c_char {
     match r {
         Ok(()) => alloc_c_string(&serde_json::to_string(&FfiResult::success()).unwrap_or_default()),
-        Err(e) => alloc_c_string(&serde_json::to_string(&FfiResult::failure(e.to_string())).unwrap_or_default()),
+        Err(e) => alloc_c_string(
+            &serde_json::to_string(&FfiResult::failure(e.to_string())).unwrap_or_default(),
+        ),
     }
 }
 
@@ -163,7 +165,12 @@ pub unsafe extern "C-unwind" fn gateway_north_plugin_on_group_data(
     let node_id: NodeId = serde_json::from_str(&n).unwrap_or_default();
     let data: GroupData = match serde_json::from_str(&d) {
         Ok(x) => x,
-        Err(_) => return alloc_c_string(&serde_json::to_string(&FfiResult::failure("invalid group_data json")).unwrap_or_default()),
+        Err(_) => {
+            return alloc_c_string(
+                &serde_json::to_string(&FfiResult::failure("invalid group_data json"))
+                    .unwrap_or_default(),
+            )
+        }
     };
     let p = north(handle);
     result_json(block_on(p.on_group_data(node_id, Arc::new(data))))
@@ -187,7 +194,9 @@ pub unsafe extern "C-unwind" fn gateway_north_plugin_connection_status(
 }
 
 #[no_mangle]
-pub unsafe extern "C-unwind" fn gateway_north_plugin_config_schema(handle: *mut c_void) -> *mut c_char {
+pub unsafe extern "C-unwind" fn gateway_north_plugin_config_schema(
+    handle: *mut c_void,
+) -> *mut c_char {
     if handle.is_null() {
         return std::ptr::null_mut();
     }

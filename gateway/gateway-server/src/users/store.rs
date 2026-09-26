@@ -1,6 +1,8 @@
 //! 用户存储：SQLite 表 users（每次操作在 spawn_blocking 中打开连接，保证 AppState: Send），密码 argon2，登录 token 内存缓存。
 
-use argon2::password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::password_hash::{
+    rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
+};
 use argon2::{Algorithm, Argon2, Params, Version};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -34,8 +36,7 @@ const LOGIN_LOCK_SECS: i64 = 300;
 /// 生成高强度随机口令（20 位：大小写字母 + 数字 + 符号，已剔除易混淆字符）
 fn generate_random_password() -> String {
     use rand::Rng;
-    const ALPHABET: &[u8] =
-        b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*-_";
+    const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*-_";
     let mut rng = rand::thread_rng();
     (0..20)
         .map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char)
@@ -157,30 +158,35 @@ impl UserStore {
         self.db_path.clone()
     }
 
-/// 把随机初始口令写入数据目录下的 `.admin_initial_password`（0600），失败仅告警不影响启动。
-fn write_initial_password_file(db_path: &Path, pwd: &str) {
-    let Some(dir) = db_path.parent() else { return };
-    let file = dir.join(".admin_initial_password");
-    if let Err(e) = std::fs::write(&file, pwd) {
-        tracing::warn!("write {} failed: {}", file.display(), e);
-        return;
+    /// 把随机初始口令写入数据目录下的 `.admin_initial_password`（0600），失败仅告警不影响启动。
+    fn write_initial_password_file(db_path: &Path, pwd: &str) {
+        let Some(dir) = db_path.parent() else { return };
+        let file = dir.join(".admin_initial_password");
+        if let Err(e) = std::fs::write(&file, pwd) {
+            tracing::warn!("write {} failed: {}", file.display(), e);
+            return;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+        }
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
-    }
-}
 
-/// 打开或创建数据库并确保 users 表存在；若不存在 admin 用户则创建，**口令为随机生成**
+    /// 打开或创建数据库并确保 users 表存在；若不存在 admin 用户则创建，**口令为随机生成**
     /// （写入数据目录 `.admin_initial_password`，权限 0600，首次登录后应删除并修改口令）。
     pub fn open(db_path: &Path) -> Result<Self, String> {
         let path = db_path.to_path_buf();
         let (tokens, generated) = tokio::task::block_in_place(|| {
             let conn = rusqlite::Connection::open(&path).map_err(|e| e.to_string())?;
-            conn.execute_batch(USERS_SCHEMA).map_err(|e| e.to_string())?;
-            let mut stmt = conn.prepare("SELECT 1 FROM users WHERE username = ?1 LIMIT 1").map_err(|e| e.to_string())?;
-            let has_admin = stmt.exists([DEFAULT_ADMIN_USERNAME]).map_err(|e| e.to_string())?;
+            conn.execute_batch(USERS_SCHEMA)
+                .map_err(|e| e.to_string())?;
+            let mut stmt = conn
+                .prepare("SELECT 1 FROM users WHERE username = ?1 LIMIT 1")
+                .map_err(|e| e.to_string())?;
+            let has_admin = stmt
+                .exists([DEFAULT_ADMIN_USERNAME])
+                .map_err(|e| e.to_string())?;
             drop(stmt);
             let mut generated: Option<String> = None;
             if !has_admin {
@@ -195,7 +201,10 @@ fn write_initial_password_file(db_path: &Path, pwd: &str) {
                 Self::write_initial_password_file(&path, &pwd);
                 tracing::info!("default admin created with a RANDOM password (see .admin_initial_password in data dir); change it after first login");
                 generated = Some(pwd);
-            } else if std::env::var("GATEWAY_RESET_ADMIN_PASSWORD").map(|s| s == "1" || s.eq_ignore_ascii_case("true")).unwrap_or(false) {
+            } else if std::env::var("GATEWAY_RESET_ADMIN_PASSWORD")
+                .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+            {
                 let pwd = generate_random_password();
                 let hash = hash_password(&pwd)?;
                 let now = now_iso();
@@ -209,10 +218,12 @@ fn write_initial_password_file(db_path: &Path, pwd: &str) {
                     generated = Some(pwd);
                 }
             }
-            let mut stmt = conn.prepare("SELECT token, role FROM users WHERE token IS NOT NULL AND token != ''").map_err(|e| e.to_string())?;
-            let rows = stmt.query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            }).map_err(|e| e.to_string())?;
+            let mut stmt = conn
+                .prepare("SELECT token, role FROM users WHERE token IS NOT NULL AND token != ''")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .map_err(|e| e.to_string())?;
             let mut map = std::collections::HashMap::new();
             for (t, role) in rows.flatten() {
                 map.insert(t, UserRole::from_str(&role));
@@ -230,7 +241,6 @@ fn write_initial_password_file(db_path: &Path, pwd: &str) {
             failed_logins: RwLock::new(std::collections::HashMap::new()),
         })
     }
-
 
     fn row_to_user(r: &UserRow) -> User {
         User {
@@ -263,7 +273,11 @@ fn write_initial_password_file(db_path: &Path, pwd: &str) {
             if let Some((count, last)) = fl.get(username.as_str()) {
                 if *count >= MAX_FAILED_LOGINS && now - *last < LOGIN_LOCK_SECS {
                     let left = LOGIN_LOCK_SECS - (now - *last);
-                    tracing::warn!("login blocked: account '{}' locked ({}s left)", username, left);
+                    tracing::warn!(
+                        "login blocked: account '{}' locked ({}s left)",
+                        username,
+                        left
+                    );
                     return Err(format!("account temporarily locked, retry after {}s", left));
                 }
             }
@@ -379,7 +393,10 @@ fn write_initial_password_file(db_path: &Path, pwd: &str) {
 
     /// 取 token 对应用户的角色，供授权（RBAC）判定使用
     pub fn role_of(&self, token: &str) -> Option<UserRole> {
-        self.tokens.try_read().ok().and_then(|t| t.get(token).copied())
+        self.tokens
+            .try_read()
+            .ok()
+            .and_then(|t| t.get(token).copied())
     }
 
     pub async fn list(&self) -> Result<Vec<User>, String> {
@@ -445,7 +462,12 @@ fn write_initial_password_file(db_path: &Path, pwd: &str) {
         .map_err(|e| e.to_string())?
     }
 
-    pub async fn create(&self, username: &str, password: &str, role: UserRole) -> Result<User, String> {
+    pub async fn create(
+        &self,
+        username: &str,
+        password: &str,
+        role: UserRole,
+    ) -> Result<User, String> {
         let path = match self.path() {
             Some(p) => p,
             None => return Err("user management disabled".into()),
@@ -472,17 +494,26 @@ fn write_initial_password_file(db_path: &Path, pwd: &str) {
         })
         .await
         .map_err(|e| e.to_string())??;
-        self.get(&id).await.and_then(|o| o.ok_or_else(|| "user not found".into()))
+        self.get(&id)
+            .await
+            .and_then(|o| o.ok_or_else(|| "user not found".into()))
     }
 
-    pub async fn update_simple(&self, id: &str, username: Option<&str>, role: Option<UserRole>) -> Result<User, String> {
+    pub async fn update_simple(
+        &self,
+        id: &str,
+        username: Option<&str>,
+        role: Option<UserRole>,
+    ) -> Result<User, String> {
         let path = match self.path() {
             Some(p) => p,
             None => return Err("user management disabled".into()),
         };
         let id = id.to_string();
         let id_clone = id.clone();
-        let username = username.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let username = username
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         let role_str = role.map(|r| r.as_str().to_string());
         tokio::task::spawn_blocking(move || {
             let conn = rusqlite::Connection::open(path.as_path()).map_err(|e| e.to_string())?;
@@ -511,7 +542,9 @@ fn write_initial_password_file(db_path: &Path, pwd: &str) {
         })
         .await
         .map_err(|e| e.to_string())??;
-        self.get(&id).await.and_then(|o| o.ok_or_else(|| "user not found".into()))
+        self.get(&id)
+            .await
+            .and_then(|o| o.ok_or_else(|| "user not found".into()))
     }
 
     pub async fn delete(&self, id: &str) -> Result<bool, String> {
@@ -524,8 +557,16 @@ fn write_initial_password_file(db_path: &Path, pwd: &str) {
             let path = Arc::clone(&path);
             move || {
                 let conn = rusqlite::Connection::open(path.as_path()).map_err(|e| e.to_string())?;
-                let old_token: Option<String> = conn.query_row("SELECT token FROM users WHERE id = ?1", [id.as_str()], |r| r.get(0)).ok();
-                let n = conn.execute("DELETE FROM users WHERE id = ?1", [id.as_str()]).map_err(|e| e.to_string())?;
+                let old_token: Option<String> = conn
+                    .query_row(
+                        "SELECT token FROM users WHERE id = ?1",
+                        [id.as_str()],
+                        |r| r.get(0),
+                    )
+                    .ok();
+                let n = conn
+                    .execute("DELETE FROM users WHERE id = ?1", [id.as_str()])
+                    .map_err(|e| e.to_string())?;
                 Ok::<_, String>((old_token, n > 0))
             }
         })
@@ -587,7 +628,9 @@ fn write_initial_password_file(db_path: &Path, pwd: &str) {
         };
         tokio::task::spawn_blocking(move || {
             let conn = rusqlite::Connection::open(path.as_path()).map_err(|e| e.to_string())?;
-            let n: i64 = conn.query_row("SELECT COUNT(1) FROM users", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+            let n: i64 = conn
+                .query_row("SELECT COUNT(1) FROM users", [], |r| r.get(0))
+                .map_err(|e| e.to_string())?;
             Ok(n > 0)
         })
         .await

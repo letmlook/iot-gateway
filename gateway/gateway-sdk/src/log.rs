@@ -39,11 +39,17 @@ pub fn node_log(level: NodeLogLevel, node_id: NodeId, message: impl Display) {
     let node_id_str = node_id.0.to_string();
     let msg = message.to_string();
     match level {
-        NodeLogLevel::Error => tracing::event!(Level::ERROR, node_id = %node_id_str, message = %msg),
+        NodeLogLevel::Error => {
+            tracing::event!(Level::ERROR, node_id = %node_id_str, message = %msg)
+        }
         NodeLogLevel::Warn => tracing::event!(Level::WARN, node_id = %node_id_str, message = %msg),
         NodeLogLevel::Info => tracing::event!(Level::INFO, node_id = %node_id_str, message = %msg),
-        NodeLogLevel::Debug => tracing::event!(Level::DEBUG, node_id = %node_id_str, message = %msg),
-        NodeLogLevel::Trace => tracing::event!(Level::TRACE, node_id = %node_id_str, message = %msg),
+        NodeLogLevel::Debug => {
+            tracing::event!(Level::DEBUG, node_id = %node_id_str, message = %msg)
+        }
+        NodeLogLevel::Trace => {
+            tracing::event!(Level::TRACE, node_id = %node_id_str, message = %msg)
+        }
     }
 }
 

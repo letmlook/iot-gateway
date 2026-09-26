@@ -32,7 +32,9 @@ pub struct VirbState {
     pub _config: PluginConfig,
     pub groups: Vec<Group>,
     pub tags: Vec<Tag>,
-    pub packet_queue: std::sync::Arc<tokio::sync::RwLock<std::collections::VecDeque<crate::protocol::VirbPacket>>>,
+    pub packet_queue: std::sync::Arc<
+        tokio::sync::RwLock<std::collections::VecDeque<crate::protocol::VirbPacket>>,
+    >,
     pub socket: Option<std::sync::Arc<tokio::net::UdpSocket>>,
     pub recv_handle: Option<tokio::task::JoinHandle<()>>,
     pub cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
@@ -44,7 +46,11 @@ pub fn parse_channel_params(s: &str, channels: usize, model_factor: f64) -> Vec<
     for part in s.split(',').take(channels) {
         let part = part.trim();
         let v: f64 = part.parse().unwrap_or(1.0);
-        let factor = if v > 0.0 { (1.0 / v) * model_factor } else { model_factor };
+        let factor = if v > 0.0 {
+            (1.0 / v) * model_factor
+        } else {
+            model_factor
+        };
         out.push(factor);
     }
     while out.len() < channels {

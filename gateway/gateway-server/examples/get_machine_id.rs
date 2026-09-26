@@ -1,7 +1,7 @@
 //! 获取当前设备的机器码。
 //! 运行：cargo run --example get_machine_id -p gateway-server
 
-use machineid_rs::{Encryption, IdBuilder, HWIDComponent};
+use machineid_rs::{Encryption, HWIDComponent, IdBuilder};
 use sha2::{Digest, Sha256};
 
 fn main() {

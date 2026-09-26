@@ -12,15 +12,15 @@ mod format;
 mod state;
 
 use config::{
-    config_bool, config_schema, config_str, config_u16, config_usize,
-    DEFAULT_CACHE_MEMORY_SIZE, DEFAULT_CACHE_SYNC_INTERVAL_MS, DEFAULT_HOST, DEFAULT_KEEP_ALIVE_SECS,
-    DEFAULT_PORT, DEFAULT_TOPIC_TEMPLATE, DEFAULT_QOS, UPLOAD_FORMAT_VALUES_FORMAT,
+    config_bool, config_schema, config_str, config_u16, config_usize, DEFAULT_CACHE_MEMORY_SIZE,
+    DEFAULT_CACHE_SYNC_INTERVAL_MS, DEFAULT_HOST, DEFAULT_KEEP_ALIVE_SECS, DEFAULT_PORT,
+    DEFAULT_QOS, DEFAULT_TOPIC_TEMPLATE, UPLOAD_FORMAT_VALUES_FORMAT,
 };
 use format::{payload_for_format, topic_from_template};
 use gateway_sdk::log;
-use gateway_sdk::{GroupData, GroupSubscription, NodeId, NorthPlugin, PluginConfig, PluginMeta};
 use gateway_sdk::types::PluginKind;
 use gateway_sdk::PluginResult;
+use gateway_sdk::{GroupData, GroupSubscription, NodeId, NorthPlugin, PluginConfig, PluginMeta};
 use state::{MqttConnectionStatus, MqttState, NodeMqttState, PublishQos};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -72,26 +72,44 @@ impl NorthPlugin for MqttPlugin {
     async fn open(&self, node_id: NodeId, config: PluginConfig) -> PluginResult<()> {
         let host = config_str(&config, "host", DEFAULT_HOST);
         let port = config_u16(&config, "port", DEFAULT_PORT);
-        log::info(node_id, format!("open mqtt: {}:{}, connecting...", host, port));
+        log::info(
+            node_id,
+            format!("open mqtt: {}:{}, connecting...", host, port),
+        );
         let client_id = config_str(
             &config,
             "client_id",
             &format!("gateway-{}", uuid::Uuid::from_u128(node_id.0.as_u128())),
         );
-        let topic_template = if let Some(t) = config.get("topic_template").and_then(|v| v.as_str()) {
+        let topic_template = if let Some(t) = config.get("topic_template").and_then(|v| v.as_str())
+        {
             t.to_string()
         } else if let Some(prefix) = config.get("topic_prefix").and_then(|v| v.as_str()) {
-            format!("{}/${{node_id}}/${{group_id}}", prefix.trim_end_matches('/'))
+            format!(
+                "{}/${{node_id}}/${{group_id}}",
+                prefix.trim_end_matches('/')
+            )
         } else {
             DEFAULT_TOPIC_TEMPLATE.to_string()
         };
-        let qos_u8 = config.get("qos").and_then(|v| v.as_u64()).map(|n| n as u8).unwrap_or(DEFAULT_QOS);
+        let qos_u8 = config
+            .get("qos")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u8)
+            .unwrap_or(DEFAULT_QOS);
         let qos = PublishQos(qos_u8.min(2));
         let retain = config_bool(&config, "retain", false);
         let upload_format = config_str(&config, "upload_format", UPLOAD_FORMAT_VALUES_FORMAT);
-        let keep_alive_secs = config.get("keep_alive_secs").and_then(|v| v.as_u64()).unwrap_or(DEFAULT_KEEP_ALIVE_SECS);
-        let cache_memory_size = config_usize(&config, "cache_memory_size", DEFAULT_CACHE_MEMORY_SIZE);
-        let cache_sync_interval_ms = config.get("cache_sync_interval_ms").and_then(|v| v.as_u64()).unwrap_or(DEFAULT_CACHE_SYNC_INTERVAL_MS);
+        let keep_alive_secs = config
+            .get("keep_alive_secs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(DEFAULT_KEEP_ALIVE_SECS);
+        let cache_memory_size =
+            config_usize(&config, "cache_memory_size", DEFAULT_CACHE_MEMORY_SIZE);
+        let cache_sync_interval_ms = config
+            .get("cache_sync_interval_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(DEFAULT_CACHE_SYNC_INTERVAL_MS);
         let ssl = config_bool(&config, "ssl", false);
 
         let mut state = self.state.write().await;
@@ -109,7 +127,9 @@ impl NorthPlugin for MqttPlugin {
                 }
             }
             if ssl {
-                let ca = config.get("ca_file").and_then(|v| v.as_str())
+                let ca = config
+                    .get("ca_file")
+                    .and_then(|v| v.as_str())
                     .and_then(|p| std::fs::read(p).ok())
                     .unwrap_or_default();
                 let client_auth = match (
@@ -208,7 +228,9 @@ impl NorthPlugin for MqttPlugin {
                 state.open_nodes.remove(&node_id);
                 state.subscriptions.remove(&node_id);
                 let node_state = state.nodes.remove(&node_id);
-                node_state.map(|ns| (Some(ns.client), ns.cancel_tx, ns.event_loop_handle)).unwrap_or((None, None, None))
+                node_state
+                    .map(|ns| (Some(ns.client), ns.cancel_tx, ns.event_loop_handle))
+                    .unwrap_or((None, None, None))
             };
             if let Some(client) = client_opt {
                 let _ = client.disconnect().await;
@@ -257,11 +279,12 @@ impl NorthPlugin for MqttPlugin {
         node_id: NodeId,
         subscriptions: &[GroupSubscription],
     ) -> PluginResult<()> {
-        log::info(node_id, format!("set_subscriptions: {} group(s)", subscriptions.len()));
+        log::info(
+            node_id,
+            format!("set_subscriptions: {} group(s)", subscriptions.len()),
+        );
         let mut state = self.state.write().await;
-        state
-            .subscriptions
-            .insert(node_id, subscriptions.to_vec());
+        state.subscriptions.insert(node_id, subscriptions.to_vec());
         Ok(())
     }
 
@@ -278,7 +301,10 @@ impl NorthPlugin for MqttPlugin {
     async fn on_group_data(&self, node_id: NodeId, data: Arc<GroupData>) -> PluginResult<()> {
         let state = self.state.read().await;
         let Some(node_state) = state.nodes.get(&node_id) else {
-            log::warn(node_id, "on_group_data: north node not open (no MQTT client), skip publish");
+            log::warn(
+                node_id,
+                "on_group_data: north node not open (no MQTT client), skip publish",
+            );
             return Ok(());
         };
         let topic = topic_from_template(
@@ -294,10 +320,20 @@ impl NorthPlugin for MqttPlugin {
         #[cfg(feature = "mqtt-client")]
         {
             let qos = node_state.qos.to_rumqttc();
-            match node_state.client.publish(&topic, qos, node_state.retain, payload.clone()).await {
+            match node_state
+                .client
+                .publish(&topic, qos, node_state.retain, payload.clone())
+                .await
+            {
                 Ok(()) => {}
                 Err(e) => {
-                    log::warn(node_id, format!("mqtt publish failed, enqueue cache: {} (topic={})", e, topic));
+                    log::warn(
+                        node_id,
+                        format!(
+                            "mqtt publish failed, enqueue cache: {} (topic={})",
+                            e, topic
+                        ),
+                    );
                     let mut cache = node_state.cache.write().await;
                     if cache.len() < node_state.cache_max {
                         cache.push_back((topic, payload));
@@ -334,7 +370,10 @@ async fn run_event_loop(
     use rumqttc::mqttbytes::v4::ConnectReturnCode;
     use rumqttc::{Event, Packet};
     let addr = format!("{}:{}", host, port);
-    log::info(node_id, format!("mqtt event loop 已启动, 正在连接 broker={}", addr));
+    log::info(
+        node_id,
+        format!("mqtt event loop 已启动, 正在连接 broker={}", addr),
+    );
     let qos_r = qos.to_rumqttc();
     let interval = Duration::from_millis(cache_sync_interval_ms.max(10));
     loop {

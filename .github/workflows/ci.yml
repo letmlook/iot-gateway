@@ -47,9 +47,8 @@ jobs:
             -A clippy::needless_range_loop \
             -A clippy::doc_markdown \
             -A clippy::doc_lazy_continuation
-      - name: cargo fmt (advisory)
-        # 仓库尚未整体格式化（存量 52 文件差异），先作为提示；执行 `cargo fmt --all` 后可改为强制
-        continue-on-error: true
+      - name: cargo fmt
+        # 代码库已完成一次性格式化，此后格式问题作为强制门禁
         run: cargo fmt --all -- --check
 
   frontend:

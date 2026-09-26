@@ -24,7 +24,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(&private_path, private_pem.as_bytes())?;
     eprintln!("已写入私钥: {}", private_path.display());
 
-    eprintln!("\n请将以下公钥粘贴到 gateway-server/src/license/license.rs 的 BUILTIN_PUBLIC_KEY_PEM：\n");
+    eprintln!(
+        "\n请将以下公钥粘贴到 gateway-server/src/license/license.rs 的 BUILTIN_PUBLIC_KEY_PEM：\n"
+    );
     println!("{}", public_pem.trim());
     Ok(())
 }

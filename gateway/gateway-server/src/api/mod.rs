@@ -88,7 +88,8 @@ async fn request_id_middleware(request: Request, next: Next) -> Response {
     tracing::Span::current().record("request_id", tracing::field::display(&id));
     let mut res = next.run(request).await;
     if let Ok(v) = header::HeaderValue::try_from(id) {
-        res.headers_mut().insert(header::HeaderName::from_static("x-request-id"), v);
+        res.headers_mut()
+            .insert(header::HeaderName::from_static("x-request-id"), v);
     }
     res
 }
@@ -109,23 +110,38 @@ async fn auth_middleware(
         return next.run(request).await;
     }
     // 嵌套路由中 URI 可能是 /auth/login 或 /api/auth/login，统一处理
-    let path = request.uri().path()
+    let path = request
+        .uri()
+        .path()
         .trim_start_matches("/api/")
         .trim_start_matches("/api")
         .trim_start_matches('/')
         .trim_end_matches('/');
-    if path == "health" || path == "metrics" || path == "version"
-        || path == "license/machine-id" || path == "license/status"
-        || path == "auth/login" || path == "login"
+    if path == "health"
+        || path == "metrics"
+        || path == "version"
+        || path == "license/machine-id"
+        || path == "license/status"
+        || path == "auth/login"
+        || path == "login"
     {
         return next.run(request).await;
     }
-    let auth = request.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
+    let auth = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
     let bearer = auth.and_then(|s| s.strip_prefix("Bearer ").map(|t| t.to_string()));
     let ctx = match bearer {
         Some(t) if !t.is_empty() => {
             // 静态 token 视为管理员；用户 token 携带其角色，供授权中间件判定
-            if state.config.token.as_ref().map(|c| constant_time_eq(c, &t)).unwrap_or(false) {
+            if state
+                .config
+                .token
+                .as_ref()
+                .map(|c| constant_time_eq(c, &t))
+                .unwrap_or(false)
+            {
                 Some(AuthContext {
                     role: crate::users::UserRole::Admin,
                     username: Some("static-token".to_string()),
@@ -187,49 +203,93 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/metrics", get(handlers::metrics))
         .route("/data-flow", get(handlers::data_flow))
         .route("/hardware", get(handlers::hardware))
-        .route("/logs/config", get(handlers::get_log_config).put(handlers::put_log_config))
+        .route(
+            "/logs/config",
+            get(handlers::get_log_config).put(handlers::put_log_config),
+        )
         .route("/logs/download", get(handlers::download_log))
-        .route("/system/config", get(handlers::get_system_config).put(handlers::put_system_config))
+        .route(
+            "/system/config",
+            get(handlers::get_system_config).put(handlers::put_system_config),
+        )
         .route("/version", get(handlers::version))
         .route("/license/machine-id", get(handlers::license_machine_id))
         .route("/license/status", get(handlers::license_status))
         .route("/license/upload", post(handlers::upload_license))
         .route("/license/reset", post(handlers::reset_license))
         .route("/license/pro-tool", get(handlers::license_pro_tool))
-        .route("/users", get(handlers::list_users).post(handlers::create_user))
-        .route("/users/:id", get(handlers::get_user).put(handlers::update_user).delete(handlers::delete_user))
+        .route(
+            "/users",
+            get(handlers::list_users).post(handlers::create_user),
+        )
+        .route(
+            "/users/:id",
+            get(handlers::get_user)
+                .put(handlers::update_user)
+                .delete(handlers::delete_user),
+        )
         .route("/users/:id/password", put(handlers::change_password))
         .route("/backup", post(handlers::backup))
         .route("/restore", post(handlers::restore))
         .route("/plugins/south", get(handlers::list_south_plugins))
-        .route("/plugins/south/:name/config_schema", get(handlers::south_plugin_config_schema))
-        .route("/plugins/south/:name/tag_schema", get(handlers::south_plugin_tag_schema))
+        .route(
+            "/plugins/south/:name/config_schema",
+            get(handlers::south_plugin_config_schema),
+        )
+        .route(
+            "/plugins/south/:name/tag_schema",
+            get(handlers::south_plugin_tag_schema),
+        )
         .route("/plugins/north", get(handlers::list_north_plugins))
-        .route("/plugins/north/:name/config_schema", get(handlers::north_plugin_config_schema))
-        .route("/nodes", get(handlers::list_nodes).post(handlers::create_node))
+        .route(
+            "/plugins/north/:name/config_schema",
+            get(handlers::north_plugin_config_schema),
+        )
+        .route(
+            "/nodes",
+            get(handlers::list_nodes).post(handlers::create_node),
+        )
         .route(
             "/nodes/:id",
-            get(handlers::get_node).put(handlers::update_node).delete(handlers::delete_node),
+            get(handlers::get_node)
+                .put(handlers::update_node)
+                .delete(handlers::delete_node),
         )
         .route("/nodes/:id/start", post(handlers::start_node))
         .route("/nodes/:id/stop", post(handlers::stop_node))
-        .route("/nodes/:id/connection-status", get(handlers::get_node_connection_status))
-        .route("/nodes/:id/groups", get(handlers::list_groups).post(handlers::add_group))
+        .route(
+            "/nodes/:id/connection-status",
+            get(handlers::get_node_connection_status),
+        )
+        .route(
+            "/nodes/:id/groups",
+            get(handlers::list_groups).post(handlers::add_group),
+        )
         .route(
             "/nodes/:id/groups/:gid",
-            get(handlers::get_group).put(handlers::update_group).delete(handlers::remove_group),
+            get(handlers::get_group)
+                .put(handlers::update_group)
+                .delete(handlers::remove_group),
         )
-        .route("/nodes/:id/tags", get(handlers::list_tags).post(handlers::add_tag))
+        .route(
+            "/nodes/:id/tags",
+            get(handlers::list_tags).post(handlers::add_tag),
+        )
         .route("/nodes/:id/tags/batch", post(handlers::batch_add_tags))
         .route(
             "/nodes/:id/tags/:tid",
-            get(handlers::get_tag).put(handlers::update_tag).delete(handlers::remove_tag),
+            get(handlers::get_tag)
+                .put(handlers::update_tag)
+                .delete(handlers::remove_tag),
         )
         .route(
             "/nodes/:id/subscriptions",
             get(handlers::get_subscriptions).put(handlers::set_subscriptions),
         )
-        .route("/nodes/:id/setting", get(handlers::get_node_setting).put(handlers::node_setting))
+        .route(
+            "/nodes/:id/setting",
+            get(handlers::get_node_setting).put(handlers::node_setting),
+        )
         .route("/nodes/:id/read_tags", post(handlers::read_tags))
         .route("/nodes/:id/write_tags", post(handlers::write_tags))
         .route("/upload", post(handlers::upload_config_file))
@@ -280,11 +340,7 @@ pub async fn serve_static_or_index(uri: axum::http::Uri) -> axum::response::Resp
     }
 
     // 2) 路径穿越防护：拒绝绝对路径与含 `..` 的路径，并要求规范化后仍位于 base 之内
-    if !raw.is_empty()
-        && !raw.contains("..")
-        && !raw.starts_with('/')
-        && !raw.contains('\\')
-    {
+    if !raw.is_empty() && !raw.contains("..") && !raw.starts_with('/') && !raw.contains('\\') {
         let candidate = base.join(raw);
         if let Ok(real) = std::fs::canonicalize(&candidate) {
             if real.starts_with(&base) && real.is_file() {
@@ -346,7 +402,9 @@ mod tests {
     }
 
     async fn body_of(res: Response) -> String {
-        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
         String::from_utf8_lossy(&bytes).to_string()
     }
 
@@ -363,7 +421,9 @@ mod tests {
         };
         let res = ServiceExt::oneshot(app, req).await.unwrap();
         let status = res.status().as_u16();
-        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
         (status, String::from_utf8_lossy(&bytes).to_string())
     }
 
@@ -403,7 +463,10 @@ mod tests {
         let app = super::router(st.clone()).with_state(st).into_service();
         let res = ServiceExt::oneshot(
             app,
-            axum::http::Request::builder().uri("/nodes").body(Body::empty()).unwrap(),
+            axum::http::Request::builder()
+                .uri("/nodes")
+                .body(Body::empty())
+                .unwrap(),
         )
         .await
         .unwrap();
@@ -440,7 +503,11 @@ mod tests {
         // 3) 路径穿越：不得读到 base 之外的文件
         for probe in ["/../secret.txt", "/../../secret.txt"] {
             let body = body_of(serve_static_or_index(probe.parse().unwrap()).await).await;
-            assert!(!body.contains("TOP-SECRET"), "traversal leaked via {}", probe);
+            assert!(
+                !body.contains("TOP-SECRET"),
+                "traversal leaked via {}",
+                probe
+            );
         }
 
         // 4) 前端路由仍正常回退到 index.html
@@ -462,9 +529,8 @@ mod tests {
     async fn rbac_env() -> RbacEnv {
         let dir = std::env::temp_dir().join(format!("gw-rbac-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let store = Arc::new(
-            crate::users::UserStore::open(&dir.join("data.db")).expect("open user store"),
-        );
+        let store =
+            Arc::new(crate::users::UserStore::open(&dir.join("data.db")).expect("open user store"));
         let mut cfg = crate::config::Config::default();
         cfg.disable_auth = false;
         cfg.token = None;
@@ -483,11 +549,7 @@ mod tests {
     async fn login_as(env: &RbacEnv, user: &str, role: crate::users::UserRole) -> String {
         let pw = "pw-for-test-123";
         env.store.create(user, pw, role).await.expect("create user");
-        env.store
-            .login(user, pw)
-            .await
-            .expect("login")
-            .0
+        env.store.login(user, pw).await.expect("login").0
     }
 
     async fn status_of(env: &RbacEnv, method: &str, uri: &str, token: Option<&str>) -> u16 {
@@ -512,14 +574,23 @@ mod tests {
         assert!(!role_satisfies(Viewer, Operator));
         assert!(!role_satisfies(Operator, Admin));
         // 路径 -> 角色映射
-        assert_eq!(required_role(&axum::http::Method::GET, "/api/nodes"), Viewer);
-        assert_eq!(required_role(&axum::http::Method::POST, "/api/nodes"), Operator);
+        assert_eq!(
+            required_role(&axum::http::Method::GET, "/api/nodes"),
+            Viewer
+        );
+        assert_eq!(
+            required_role(&axum::http::Method::POST, "/api/nodes"),
+            Operator
+        );
         assert_eq!(
             required_role(&axum::http::Method::POST, "/api/nodes/abc/write_tags"),
             Operator
         );
         assert_eq!(required_role(&axum::http::Method::GET, "/api/users"), Admin);
-        assert_eq!(required_role(&axum::http::Method::POST, "/api/restore"), Admin);
+        assert_eq!(
+            required_role(&axum::http::Method::POST, "/api/restore"),
+            Admin
+        );
         assert_eq!(
             required_role(&axum::http::Method::PUT, "/api/license/reset"),
             Admin
@@ -539,7 +610,13 @@ mod tests {
         assert_eq!(status_of(&env, "GET", "/nodes", Some(&token)).await, 200);
         // 写值（反控 PLC）必须被拒 —— B2 的核心目标
         assert_eq!(
-            status_of(&env, "POST", "/nodes/00000000-0000-0000-0000-000000000001/write_tags", Some(&token)).await,
+            status_of(
+                &env,
+                "POST",
+                "/nodes/00000000-0000-0000-0000-000000000001/write_tags",
+                Some(&token)
+            )
+            .await,
             403
         );
         // 创建/修改节点被拒
@@ -548,7 +625,10 @@ mod tests {
         assert_eq!(status_of(&env, "GET", "/users", Some(&token)).await, 403);
         assert_eq!(status_of(&env, "POST", "/restore", Some(&token)).await, 403);
         // 登出允许任何已认证用户
-        assert_eq!(status_of(&env, "POST", "/auth/logout", Some(&token)).await, 200);
+        assert_eq!(
+            status_of(&env, "POST", "/auth/logout", Some(&token)).await,
+            200
+        );
 
         let _ = std::fs::remove_dir_all(&env.dir);
     }
@@ -606,7 +686,9 @@ mod tests {
             None,
         );
         // 灰度开关关闭时，静态 token 可访问管理员接口
-        let app = super::router(state.clone()).with_state(state).into_service();
+        let app = super::router(state.clone())
+            .with_state(state)
+            .into_service();
         let res = ServiceExt::oneshot(
             app,
             axum::http::Request::builder()
@@ -649,7 +731,10 @@ mod tests {
         state.persist().await;
         state.persist().await;
         assert!(state.persist_pending(), "changes should be pending");
-        assert!(!db.exists(), "write must be deferred inside the debounce window");
+        assert!(
+            !db.exists(),
+            "write must be deferred inside the debounce window"
+        );
 
         // 一次 flush 把所有变更合并落盘
         state.flush().await;
@@ -674,7 +759,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let state = persist_state(&dir, 0);
         state.persist().await;
-        assert!(dir.join("data.db").exists(), "debounce=0 should write immediately");
+        assert!(
+            dir.join("data.db").exists(),
+            "debounce=0 should write immediately"
+        );
         assert!(!state.persist_pending());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -686,6 +774,9 @@ mod tests {
         assert!(validate_interval_ms(10).is_ok());
         assert!(validate_interval_ms(1000).is_ok());
         assert!(validate_interval_ms(9).is_err());
-        assert!(validate_interval_ms(0).is_err(), "interval_ms=0 must be rejected");
+        assert!(
+            validate_interval_ms(0).is_err(),
+            "interval_ms=0 must be rejected"
+        );
     }
 }

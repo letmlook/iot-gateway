@@ -76,7 +76,12 @@ impl DataFlowMetrics {
     }
 
     /// 南向 publish 成功后，记录每个 tag 的发布次数
-    pub fn record_south_published_tags(&self, south_node_id: NodeId, group_id: GroupId, values: &[(TagId, gateway_sdk::types::DataValue)]) {
+    pub fn record_south_published_tags(
+        &self,
+        south_node_id: NodeId,
+        group_id: GroupId,
+        values: &[(TagId, gateway_sdk::types::DataValue)],
+    ) {
         for (tag_id, _) in values {
             let key = (south_node_id, group_id, *tag_id);
             self.published_per_tag
@@ -269,20 +274,33 @@ mod tests {
         // 删除单个组：只清掉该组
         m.forget_group(south, g1);
         let snap = m.snapshot();
-        assert_eq!(snap.published_per_tag.len(), 2, "other group/node entries must remain");
+        assert_eq!(
+            snap.published_per_tag.len(),
+            2,
+            "other group/node entries must remain"
+        );
 
         // 删除南向节点：清掉它名下所有点位统计
         m.forget_south_node(south);
         let snap = m.snapshot();
         assert_eq!(snap.published_per_tag.len(), 1);
-        assert!(snap.published_per_tag.iter().all(|s| s.south_node_id == other_south));
-        assert!(snap.forwarded_per_tag.is_empty(), "south-side removal also clears forwarded stats");
+        assert!(snap
+            .published_per_tag
+            .iter()
+            .all(|s| s.south_node_id == other_south));
+        assert!(
+            snap.forwarded_per_tag.is_empty(),
+            "south-side removal also clears forwarded stats"
+        );
 
         // 删除北向节点：清掉其转发与 lagged 记录
         m.forget_north_node(north);
         let snap = m.snapshot();
         assert!(snap.lagged_by_node.is_empty());
-        assert_eq!(snap.north_lagged, 1, "global counter stays as a historical total");
+        assert_eq!(
+            snap.north_lagged, 1,
+            "global counter stays as a historical total"
+        );
     }
 
     #[test]

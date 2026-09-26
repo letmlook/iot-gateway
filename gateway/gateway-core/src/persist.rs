@@ -10,8 +10,8 @@
 
 use crate::node::Node;
 use crate::store::Store;
-use gateway_sdk::{Group, GroupSubscription, NodeId, Tag};
 use gateway_sdk::types::{GroupId, NodeKind, NodeState, TagAttr, TagId};
+use gateway_sdk::{Group, GroupSubscription, NodeId, Tag};
 use rusqlite::{params, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -191,7 +191,10 @@ fn str_to_node_kind(s: &str) -> Result<NodeKind, PersistError> {
     match s {
         "south" => Ok(NodeKind::South),
         "north" => Ok(NodeKind::North),
-        _ => Err(PersistError::Validation(format!("unknown node kind: {}", s))),
+        _ => Err(PersistError::Validation(format!(
+            "unknown node kind: {}",
+            s
+        ))),
     }
 }
 
@@ -208,7 +211,10 @@ fn str_to_node_state(s: &str) -> Result<NodeState, PersistError> {
         "stopped" => Ok(NodeState::Stopped),
         "running" => Ok(NodeState::Running),
         "error" => Ok(NodeState::Error),
-        _ => Err(PersistError::Validation(format!("unknown node state: {}", s))),
+        _ => Err(PersistError::Validation(format!(
+            "unknown node state: {}",
+            s
+        ))),
     }
 }
 
@@ -254,9 +260,7 @@ fn load_from_db(conn: &Connection) -> Result<Snapshot, PersistError> {
     }
 
     let mut nodes = Vec::new();
-    let mut stmt = conn.prepare(
-        "SELECT id, name, kind, plugin_name, config, state FROM nodes",
-    )?;
+    let mut stmt = conn.prepare("SELECT id, name, kind, plugin_name, config, state FROM nodes")?;
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -287,9 +291,8 @@ fn load_from_db(conn: &Connection) -> Result<Snapshot, PersistError> {
     }
 
     let mut groups = Vec::new();
-    let mut stmt = conn.prepare(
-        "SELECT node_id, group_id, name, interval_ms, description FROM groups",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT node_id, group_id, name, interval_ms, description FROM groups")?;
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -352,9 +355,8 @@ fn load_from_db(conn: &Connection) -> Result<Snapshot, PersistError> {
 
     let mut sub_map: std::collections::HashMap<NodeId, Vec<GroupSubscription>> =
         std::collections::HashMap::new();
-    let mut stmt = conn.prepare(
-        "SELECT north_node_id, south_node_id, group_id FROM subscriptions",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT north_node_id, south_node_id, group_id FROM subscriptions")?;
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -367,13 +369,10 @@ fn load_from_db(conn: &Connection) -> Result<Snapshot, PersistError> {
         let north = parse_node_id(&north)?;
         let south = parse_node_id(&south)?;
         let gid = parse_group_id(&gid)?;
-        sub_map
-            .entry(north)
-            .or_default()
-            .push(GroupSubscription {
-                south_node_id: south,
-                group_id: gid,
-            });
+        sub_map.entry(north).or_default().push(GroupSubscription {
+            south_node_id: south,
+            group_id: gid,
+        });
     }
     let subscriptions = sub_map.into_iter().collect();
 
@@ -435,9 +434,7 @@ fn decrypt_secret(secret: &str, value: &str) -> Option<String> {
     }
     let (nonce_bytes, ct) = blob.split_at(NONCE_LEN);
     let cipher = Aes256Gcm::new_from_slice(&secret_key(secret)).ok()?;
-    let pt = cipher
-        .decrypt(Nonce::from_slice(nonce_bytes), ct)
-        .ok()?;
+    let pt = cipher.decrypt(Nonce::from_slice(nonce_bytes), ct).ok()?;
     String::from_utf8(pt).ok()
 }
 
@@ -686,7 +683,10 @@ fn maybe_backup(conn: &Connection, path: &Path) -> Result<(), PersistError> {
         .unwrap_or_else(|| PathBuf::from(path.to_string_lossy().to_string() + ".bak"));
     // VACUUM INTO 要求目标文件不存在
     let _ = std::fs::remove_file(&backup_path);
-    conn.execute("VACUUM INTO ?1", [backup_path.to_string_lossy().to_string()])?;
+    conn.execute(
+        "VACUUM INTO ?1",
+        [backup_path.to_string_lossy().to_string()],
+    )?;
     info!(path = %backup_path.display(), "database snapshot created");
     Ok(())
 }
@@ -770,7 +770,12 @@ mod tests {
     }
 
     fn node_with(name: &str, config: serde_json::Value) -> Node {
-        let mut n = Node::new(name, NodeKind::South, "sim", serde_json::from_value(config).unwrap());
+        let mut n = Node::new(
+            name,
+            NodeKind::South,
+            "sim",
+            serde_json::from_value(config).unwrap(),
+        );
         n.state = NodeState::Running;
         n
     }
@@ -795,7 +800,10 @@ mod tests {
         let node_id = snap.nodes[0].config.id;
         save(&path, &snap).await.expect("save failed");
 
-        let loaded = load(&path).await.expect("load failed").expect("no snapshot");
+        let loaded = load(&path)
+            .await
+            .expect("load failed")
+            .expect("no snapshot");
         assert_eq!(loaded.nodes.len(), 1);
         assert_eq!(loaded.nodes[0].config.id, node_id);
         assert_eq!(loaded.nodes[0].config.name, "mqtt-app");
@@ -807,14 +815,19 @@ mod tests {
     async fn secret_is_encrypted_at_rest_and_decrypted_on_load() {
         let path = temp_db("enc");
         let snap = snapshot_with_mqtt_password();
-        save_secret(&path, &snap, Some("unit-test-secret")).await.expect("save failed");
+        save_secret(&path, &snap, Some("unit-test-secret"))
+            .await
+            .expect("save failed");
 
         // 数据库中不应出现明文口令
         let conn = Connection::open(&path).unwrap();
         let cfg: String = conn
             .query_row("SELECT config FROM nodes LIMIT 1", [], |r| r.get(0))
             .unwrap();
-        assert!(!cfg.contains("p@ssw0rd"), "plaintext password leaked into db");
+        assert!(
+            !cfg.contains("p@ssw0rd"),
+            "plaintext password leaked into db"
+        );
         assert!(cfg.contains(ENC_PREFIX), "value was not encrypted");
         drop(conn);
 
@@ -839,7 +852,9 @@ mod tests {
     async fn wrong_secret_keeps_ciphertext_without_panic() {
         let path = temp_db("wrongkey");
         let snap = snapshot_with_mqtt_password();
-        save_secret(&path, &snap, Some("right-secret")).await.unwrap();
+        save_secret(&path, &snap, Some("right-secret"))
+            .await
+            .unwrap();
 
         let loaded = load_secret(&path, Some("wrong-secret"))
             .await
@@ -917,13 +932,21 @@ mod tests {
     #[tokio::test]
     async fn wal_mode_is_enabled() {
         let path = temp_db("wal");
-        save(&path, &snapshot_with_mqtt_password()).await.expect("save");
+        save(&path, &snapshot_with_mqtt_password())
+            .await
+            .expect("save");
         let conn = Connection::open(&path).unwrap();
         let mode: String = conn
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(mode.to_lowercase(), "wal", "WAL should be enabled for concurrent access");
-        let busy: i64 = conn.query_row("PRAGMA busy_timeout", [], |r| r.get(0)).unwrap();
+        assert_eq!(
+            mode.to_lowercase(),
+            "wal",
+            "WAL should be enabled for concurrent access"
+        );
+        let busy: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(busy, 5000, "busy_timeout should be configured");
         drop(conn);
         cleanup_db(&path);
@@ -945,9 +968,16 @@ mod tests {
         save(&path, &snap).await.expect("second save");
 
         let loaded = load(&path).await.unwrap().unwrap();
-        assert_eq!(loaded.nodes.len(), 1, "removed node must not survive an incremental save");
+        assert_eq!(
+            loaded.nodes.len(),
+            1,
+            "removed node must not survive an incremental save"
+        );
         assert_eq!(loaded.nodes[0].config.id, keep_id);
-        assert_eq!(loaded.nodes[0].config.name, "renamed", "upsert should apply updates");
+        assert_eq!(
+            loaded.nodes[0].config.name, "renamed",
+            "upsert should apply updates"
+        );
 
         // 重复保存同一快照不应产生重复行
         save(&path, &snap).await.expect("third save");
@@ -959,7 +989,9 @@ mod tests {
     #[tokio::test]
     async fn throttled_backup_creates_consistent_snapshot() {
         let path = temp_db("bak");
-        save(&path, &snapshot_with_mqtt_password()).await.expect("save");
+        save(&path, &snapshot_with_mqtt_password())
+            .await
+            .expect("save");
         // 重置节流计时，确保本次一定执行备份
         super::LAST_BACKUP_SECS.store(0, std::sync::atomic::Ordering::Relaxed);
 
@@ -980,7 +1012,10 @@ mod tests {
         let before = std::fs::metadata(&bak).unwrap().modified().unwrap();
         maybe_backup(&conn, &path).expect("second backup call");
         let after = std::fs::metadata(&bak).unwrap().modified().unwrap();
-        assert_eq!(before, after, "backup should be throttled within the interval");
+        assert_eq!(
+            before, after,
+            "backup should be throttled within the interval"
+        );
 
         drop(bak_conn);
         drop(conn);

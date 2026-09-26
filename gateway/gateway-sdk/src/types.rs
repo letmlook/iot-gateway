@@ -275,4 +275,3 @@ pub enum NodeKind {
 
 /// 插件配置（JSON）。各插件自行解析。
 pub type PluginConfig = HashMap<String, serde_json::Value>;
-

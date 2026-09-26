@@ -11,18 +11,18 @@ mod state;
 #[cfg(feature = "opcua-client")]
 mod client;
 
+use gateway_sdk::log;
+use gateway_sdk::types::{DataValue, PluginKind};
 use gateway_sdk::{
     ConfigSchema, Group, GroupId, NodeId, PluginMeta, SouthPlugin, Tag, TagId, TagSchema,
 };
-use gateway_sdk::log;
-use gateway_sdk::types::{DataValue, PluginKind};
 use gateway_sdk::{PluginConfig, PluginError, PluginResult};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use address::parse_address;
-use config::{config_str, tag_schema as config_tag_schema, TAG_DATA_TYPES, DEFAULT_ENDPOINT};
+use config::{config_str, tag_schema as config_tag_schema, DEFAULT_ENDPOINT, TAG_DATA_TYPES};
 use state::OpcuaState;
 
 /// OPC UA 南向插件
@@ -64,7 +64,9 @@ impl SouthPlugin for OpcuaPlugin {
             name_zh: Some("OPC UA"),
             name_en: Some("OPC UA"),
             description_zh: Some("OPC UA 南向驱动，连接 OPC UA 服务器采集与写点位"),
-            description_en: Some("OPC UA south driver, connect to OPC UA server for read/write tags"),
+            description_en: Some(
+                "OPC UA south driver, connect to OPC UA server for read/write tags",
+            ),
         }
     }
 
@@ -80,8 +82,9 @@ impl SouthPlugin for OpcuaPlugin {
         if tag.name.is_empty() {
             return Err(PluginError::tag_invalid("tag name required"));
         }
-        parse_address(&tag.address)
-            .ok_or_else(|| PluginError::tag_invalid("address format: NS!NODEID (e.g. 0!2258 or 2!Device1.Tag1)"))?;
+        parse_address(&tag.address).ok_or_else(|| {
+            PluginError::tag_invalid("address format: NS!NODEID (e.g. 0!2258 or 2!Device1.Tag1)")
+        })?;
         if let Some(ref dt) = tag.data_type {
             let ok = TAG_DATA_TYPES
                 .iter()
@@ -99,9 +102,18 @@ impl SouthPlugin for OpcuaPlugin {
     async fn open(&self, node_id: NodeId, config: PluginConfig) -> PluginResult<()> {
         let endpoint_url = config_str(&config, "endpoint_url", DEFAULT_ENDPOINT);
         log::info(node_id, format!("open opcua: endpoint={}", endpoint_url));
-        let username = config.get("username").and_then(|v| v.as_str()).map(String::from);
-        let password = config.get("password").and_then(|v| v.as_str()).map(String::from);
-        let certificate = config.get("certificate").and_then(|v| v.as_str()).map(String::from);
+        let username = config
+            .get("username")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let password = config
+            .get("password")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let certificate = config
+            .get("certificate")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         let key = config.get("key").and_then(|v| v.as_str()).map(String::from);
         let groups = Self::default_groups();
         let tags = groups
@@ -157,9 +169,18 @@ impl SouthPlugin for OpcuaPlugin {
         let mut state = self.state.write().await;
         if let Some(s) = state.get_mut(&node_id) {
             s.endpoint_url = endpoint_url;
-            s.username = config.get("username").and_then(|v| v.as_str()).map(String::from);
-            s.password = config.get("password").and_then(|v| v.as_str()).map(String::from);
-            s.certificate = config.get("certificate").and_then(|v| v.as_str()).map(String::from);
+            s.username = config
+                .get("username")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            s.password = config
+                .get("password")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            s.certificate = config
+                .get("certificate")
+                .and_then(|v| v.as_str())
+                .map(String::from);
             s.key = config.get("key").and_then(|v| v.as_str()).map(String::from);
         }
         Ok(())
@@ -172,7 +193,9 @@ impl SouthPlugin for OpcuaPlugin {
         tags: &[Tag],
     ) -> PluginResult<Vec<(TagId, DataValue)>> {
         let state = self.state.read().await;
-        let s = state.get(&node_id).ok_or_else(|| PluginError::msg("node not open"))?;
+        let s = state
+            .get(&node_id)
+            .ok_or_else(|| PluginError::msg("node not open"))?;
 
         #[cfg(feature = "opcua-client")]
         {
@@ -181,7 +204,12 @@ impl SouthPlugin for OpcuaPlugin {
             let password = s.password.clone();
             let tags_vec: Vec<(TagId, Tag)> = tags.iter().map(|t| (t.id, t.clone())).collect();
             let result = tokio::task::spawn_blocking(move || {
-                client::opcua_read(&endpoint_url, username.as_deref(), password.as_deref(), &tags_vec)
+                client::opcua_read(
+                    &endpoint_url,
+                    username.as_deref(),
+                    password.as_deref(),
+                    &tags_vec,
+                )
             })
             .await
             .map_err(|e| PluginError::msg(format!("spawn_blocking: {}", e)))?;
@@ -202,13 +230,17 @@ impl SouthPlugin for OpcuaPlugin {
 
     async fn list_groups(&self, node_id: NodeId) -> PluginResult<Vec<Group>> {
         let state = self.state.read().await;
-        let s = state.get(&node_id).ok_or_else(|| PluginError::msg("node not open"))?;
+        let s = state
+            .get(&node_id)
+            .ok_or_else(|| PluginError::msg("node not open"))?;
         Ok(s.groups.clone())
     }
 
     async fn list_tags(&self, node_id: NodeId, group_id: GroupId) -> PluginResult<Vec<Tag>> {
         let state = self.state.read().await;
-        let s = state.get(&node_id).ok_or_else(|| PluginError::msg("node not open"))?;
+        let s = state
+            .get(&node_id)
+            .ok_or_else(|| PluginError::msg("node not open"))?;
         Ok(s.tags
             .iter()
             .filter(|t| t.group_id == group_id)
@@ -221,7 +253,9 @@ impl SouthPlugin for OpcuaPlugin {
             return Ok(());
         }
         let state = self.state.read().await;
-        let s = state.get(&node_id).ok_or_else(|| PluginError::msg("node not open"))?;
+        let s = state
+            .get(&node_id)
+            .ok_or_else(|| PluginError::msg("node not open"))?;
 
         #[cfg(feature = "opcua-client")]
         {
@@ -230,7 +264,12 @@ impl SouthPlugin for OpcuaPlugin {
             let password = s.password.clone();
             let values_vec: Vec<(Tag, DataValue)> = values.to_vec();
             let result = tokio::task::spawn_blocking(move || {
-                client::opcua_write(&endpoint_url, username.as_deref(), password.as_deref(), &values_vec)
+                client::opcua_write(
+                    &endpoint_url,
+                    username.as_deref(),
+                    password.as_deref(),
+                    &values_vec,
+                )
             })
             .await
             .map_err(|e| PluginError::msg(format!("spawn_blocking: {}", e)))?;
@@ -240,7 +279,9 @@ impl SouthPlugin for OpcuaPlugin {
         #[cfg(not(feature = "opcua-client"))]
         {
             let _ = (node_id, s, values);
-            Err(PluginError::not_supported("write requires opcua-client feature"))
+            Err(PluginError::not_supported(
+                "write requires opcua-client feature",
+            ))
         }
     }
 }

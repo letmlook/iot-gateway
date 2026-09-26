@@ -196,10 +196,7 @@ impl ConfigSchema {
     }
 
     /// 按 Schema 校验插件配置。创建/修改节点时调用。依赖未满足的字段不参与校验。
-    pub fn validate_config(
-        &self,
-        config: &PluginConfig,
-    ) -> Result<(), String> {
+    pub fn validate_config(&self, config: &PluginConfig) -> Result<(), String> {
         use regex::Regex;
         for param in &self.params {
             if !self.param_visible(param, config) {
@@ -215,9 +212,9 @@ impl ConfigSchema {
             let v = val.unwrap();
             match param.ty {
                 ParamType::Int => {
-                    let n = v.as_i64().ok_or_else(|| {
-                        format!("config {} must be integer", param.name)
-                    })?;
+                    let n = v
+                        .as_i64()
+                        .ok_or_else(|| format!("config {} must be integer", param.name))?;
                     if let Some(ref valid) = param.valid {
                         if let Some(min) = valid.min {
                             if n < min {
@@ -232,20 +229,27 @@ impl ConfigSchema {
                     }
                 }
                 ParamType::String => {
-                    let s = v.as_str().ok_or_else(|| {
-                        format!("config {} must be string", param.name)
-                    })?;
+                    let s = v
+                        .as_str()
+                        .ok_or_else(|| format!("config {} must be string", param.name))?;
                     if let Some(ref valid) = param.valid {
                         if let Some(ref re) = valid.regex {
-                            let regex = Regex::new(re)
-                                .map_err(|e| format!("config {} regex invalid: {}", param.name, e))?;
+                            let regex = Regex::new(re).map_err(|e| {
+                                format!("config {} regex invalid: {}", param.name, e)
+                            })?;
                             if !regex.is_match(s) {
-                                return Err(format!("config {} does not match pattern", param.name));
+                                return Err(format!(
+                                    "config {} does not match pattern",
+                                    param.name
+                                ));
                             }
                         }
                         if let Some(len) = valid.length {
                             if s.len() > len {
-                                return Err(format!("config {} length exceeds {}", param.name, len));
+                                return Err(format!(
+                                    "config {} length exceeds {}",
+                                    param.name, len
+                                ));
                             }
                         }
                     }
@@ -262,15 +266,22 @@ impl ConfigSchema {
                     })?;
                     if let Some(ref valid) = param.valid {
                         if let Some(ref re) = valid.regex {
-                            let regex = Regex::new(re)
-                                .map_err(|e| format!("config {} regex invalid: {}", param.name, e))?;
+                            let regex = Regex::new(re).map_err(|e| {
+                                format!("config {} regex invalid: {}", param.name, e)
+                            })?;
                             if !regex.is_match(s) {
-                                return Err(format!("config {} does not match pattern", param.name));
+                                return Err(format!(
+                                    "config {} does not match pattern",
+                                    param.name
+                                ));
                             }
                         }
                         if let Some(len) = valid.length {
                             if s.len() > len {
-                                return Err(format!("config {} length exceeds {}", param.name, len));
+                                return Err(format!(
+                                    "config {} length exceeds {}",
+                                    param.name, len
+                                ));
                             }
                         }
                     }
@@ -279,10 +290,7 @@ impl ConfigSchema {
                     let opts = param.options.as_deref().unwrap_or(&[]);
                     let ok = opts.iter().any(|o| o.value == *v);
                     if !ok {
-                        return Err(format!(
-                            "config {} must be one of options",
-                            param.name
-                        ));
+                        return Err(format!("config {} must be one of options", param.name));
                     }
                 }
             }

@@ -10,10 +10,30 @@ pub fn regs_to_u32(regs: &[u16], e: &Endianness) -> u32 {
     }
     let (a, b) = (regs[0], regs[1]);
     let bytes = match e.order32 {
-        1 => [(b & 0xff) as u8, (b >> 8) as u8, (a & 0xff) as u8, (a >> 8) as u8],
-        2 => [(a >> 8) as u8, (a & 0xff) as u8, (b >> 8) as u8, (b & 0xff) as u8],
-        3 => [(b >> 8) as u8, (b & 0xff) as u8, (a >> 8) as u8, (a & 0xff) as u8],
-        _ => [(a & 0xff) as u8, (a >> 8) as u8, (b & 0xff) as u8, (b >> 8) as u8],
+        1 => [
+            (b & 0xff) as u8,
+            (b >> 8) as u8,
+            (a & 0xff) as u8,
+            (a >> 8) as u8,
+        ],
+        2 => [
+            (a >> 8) as u8,
+            (a & 0xff) as u8,
+            (b >> 8) as u8,
+            (b & 0xff) as u8,
+        ],
+        3 => [
+            (b >> 8) as u8,
+            (b & 0xff) as u8,
+            (a >> 8) as u8,
+            (a & 0xff) as u8,
+        ],
+        _ => [
+            (a & 0xff) as u8,
+            (a >> 8) as u8,
+            (b & 0xff) as u8,
+            (b >> 8) as u8,
+        ],
     };
     u32::from_le_bytes(bytes)
 }
@@ -24,26 +44,55 @@ pub fn regs_to_u64(regs: &[u16], e: &Endianness) -> u64 {
     }
     let bytes = match e.order32 {
         1 => [
-            (regs[1] & 0xff) as u8, (regs[1] >> 8) as u8, (regs[0] & 0xff) as u8, (regs[0] >> 8) as u8,
-            (regs[3] & 0xff) as u8, (regs[3] >> 8) as u8, (regs[2] & 0xff) as u8, (regs[2] >> 8) as u8,
+            (regs[1] & 0xff) as u8,
+            (regs[1] >> 8) as u8,
+            (regs[0] & 0xff) as u8,
+            (regs[0] >> 8) as u8,
+            (regs[3] & 0xff) as u8,
+            (regs[3] >> 8) as u8,
+            (regs[2] & 0xff) as u8,
+            (regs[2] >> 8) as u8,
         ],
         2 => [
-            (regs[0] >> 8) as u8, (regs[0] & 0xff) as u8, (regs[1] >> 8) as u8, (regs[1] & 0xff) as u8,
-            (regs[2] >> 8) as u8, (regs[2] & 0xff) as u8, (regs[3] >> 8) as u8, (regs[3] & 0xff) as u8,
+            (regs[0] >> 8) as u8,
+            (regs[0] & 0xff) as u8,
+            (regs[1] >> 8) as u8,
+            (regs[1] & 0xff) as u8,
+            (regs[2] >> 8) as u8,
+            (regs[2] & 0xff) as u8,
+            (regs[3] >> 8) as u8,
+            (regs[3] & 0xff) as u8,
         ],
         3 => [
-            (regs[3] >> 8) as u8, (regs[3] & 0xff) as u8, (regs[2] >> 8) as u8, (regs[2] & 0xff) as u8,
-            (regs[1] >> 8) as u8, (regs[1] & 0xff) as u8, (regs[0] >> 8) as u8, (regs[0] & 0xff) as u8,
+            (regs[3] >> 8) as u8,
+            (regs[3] & 0xff) as u8,
+            (regs[2] >> 8) as u8,
+            (regs[2] & 0xff) as u8,
+            (regs[1] >> 8) as u8,
+            (regs[1] & 0xff) as u8,
+            (regs[0] >> 8) as u8,
+            (regs[0] & 0xff) as u8,
         ],
         _ => [
-            (regs[0] & 0xff) as u8, (regs[0] >> 8) as u8, (regs[1] & 0xff) as u8, (regs[1] >> 8) as u8,
-            (regs[2] & 0xff) as u8, (regs[2] >> 8) as u8, (regs[3] & 0xff) as u8, (regs[3] >> 8) as u8,
+            (regs[0] & 0xff) as u8,
+            (regs[0] >> 8) as u8,
+            (regs[1] & 0xff) as u8,
+            (regs[1] >> 8) as u8,
+            (regs[2] & 0xff) as u8,
+            (regs[2] >> 8) as u8,
+            (regs[3] & 0xff) as u8,
+            (regs[3] >> 8) as u8,
         ],
     };
     u64::from_le_bytes(bytes)
 }
 
-pub fn register_to_value_ext(regs: &[u16], data_type: &str, endian: &Endianness, bit_index: Option<u8>) -> DataValue {
+pub fn register_to_value_ext(
+    regs: &[u16],
+    data_type: &str,
+    endian: &Endianness,
+    bit_index: Option<u8>,
+) -> DataValue {
     if let Some(bit) = bit_index {
         if let Some(&r) = regs.first() {
             return DataValue::Bool((r >> bit) & 1 != 0);
@@ -62,11 +111,19 @@ pub fn register_to_value_ext(regs: &[u16], data_type: &str, endian: &Endianness,
         }
         "int32" | "uint32" => {
             let v = regs_to_u32(regs, endian);
-            if data_type == "int32" { DataValue::Int32(v as i32) } else { DataValue::UInt32(v) }
+            if data_type == "int32" {
+                DataValue::Int32(v as i32)
+            } else {
+                DataValue::UInt32(v)
+            }
         }
         "int64" | "uint64" => {
             let v = regs_to_u64(regs, endian);
-            if data_type == "int64" { DataValue::Int64(v as i64) } else { DataValue::UInt64(v) }
+            if data_type == "int64" {
+                DataValue::Int64(v as i64)
+            } else {
+                DataValue::UInt64(v)
+            }
         }
         "float32" => DataValue::Float32(f32::from_bits(regs_to_u32(regs, endian))),
         "float64" => DataValue::Float64(f64::from_bits(regs_to_u64(regs, endian))),
@@ -76,7 +133,11 @@ pub fn register_to_value_ext(regs: &[u16], data_type: &str, endian: &Endianness,
                 bytes.push((r & 0xff) as u8);
                 bytes.push((r >> 8) as u8);
             }
-            DataValue::String(String::from_utf8_lossy(&bytes).trim_end_matches('\0').to_string())
+            DataValue::String(
+                String::from_utf8_lossy(&bytes)
+                    .trim_end_matches('\0')
+                    .to_string(),
+            )
         }
         "bytes" => {
             let mut bytes: Vec<u8> = Vec::new();
@@ -96,35 +157,50 @@ pub fn value_to_registers(value: &DataValue, data_type: &str) -> Vec<u16> {
         DataValue::UInt16(v) => vec![*v],
         DataValue::Int32(v) => {
             let b = (*v as u32).to_le_bytes();
-            vec![u16::from_le_bytes([b[0], b[1]]), u16::from_le_bytes([b[2], b[3]])]
+            vec![
+                u16::from_le_bytes([b[0], b[1]]),
+                u16::from_le_bytes([b[2], b[3]]),
+            ]
         }
         DataValue::UInt32(v) => {
             let b = v.to_le_bytes();
-            vec![u16::from_le_bytes([b[0], b[1]]), u16::from_le_bytes([b[2], b[3]])]
+            vec![
+                u16::from_le_bytes([b[0], b[1]]),
+                u16::from_le_bytes([b[2], b[3]]),
+            ]
         }
         DataValue::Int64(v) => {
             let b = (*v as u64).to_le_bytes();
             vec![
-                u16::from_le_bytes([b[0], b[1]]), u16::from_le_bytes([b[2], b[3]]),
-                u16::from_le_bytes([b[4], b[5]]), u16::from_le_bytes([b[6], b[7]]),
+                u16::from_le_bytes([b[0], b[1]]),
+                u16::from_le_bytes([b[2], b[3]]),
+                u16::from_le_bytes([b[4], b[5]]),
+                u16::from_le_bytes([b[6], b[7]]),
             ]
         }
         DataValue::UInt64(v) => {
             let b = v.to_le_bytes();
             vec![
-                u16::from_le_bytes([b[0], b[1]]), u16::from_le_bytes([b[2], b[3]]),
-                u16::from_le_bytes([b[4], b[5]]), u16::from_le_bytes([b[6], b[7]]),
+                u16::from_le_bytes([b[0], b[1]]),
+                u16::from_le_bytes([b[2], b[3]]),
+                u16::from_le_bytes([b[4], b[5]]),
+                u16::from_le_bytes([b[6], b[7]]),
             ]
         }
         DataValue::Float32(v) => {
             let b = v.to_bits().to_le_bytes();
-            vec![u16::from_le_bytes([b[0], b[1]]), u16::from_le_bytes([b[2], b[3]])]
+            vec![
+                u16::from_le_bytes([b[0], b[1]]),
+                u16::from_le_bytes([b[2], b[3]]),
+            ]
         }
         DataValue::Float64(v) => {
             let b = v.to_bits().to_le_bytes();
             vec![
-                u16::from_le_bytes([b[0], b[1]]), u16::from_le_bytes([b[2], b[3]]),
-                u16::from_le_bytes([b[4], b[5]]), u16::from_le_bytes([b[6], b[7]]),
+                u16::from_le_bytes([b[0], b[1]]),
+                u16::from_le_bytes([b[2], b[3]]),
+                u16::from_le_bytes([b[4], b[5]]),
+                u16::from_le_bytes([b[6], b[7]]),
             ]
         }
         DataValue::String(s) => {

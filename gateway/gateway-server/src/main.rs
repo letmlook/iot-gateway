@@ -34,9 +34,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // 从 plugins_dir 加载动态库插件（Windows: .dll，Unix: .so）；若无目录或加载后无插件则使用内置
     fn register_builtin_plugins(mgr: &mut gateway_core::Manager) {
-        use plugin_mqtt::MqttPlugin;
         use plugin_modbus_rtu::ModbusRtuPlugin;
         use plugin_modbus_tcp::ModbusTcpPlugin;
+        use plugin_mqtt::MqttPlugin;
         use plugin_sim::SimPlugin;
         mgr.register_south("sim", Arc::new(SimPlugin::new()));
         mgr.register_south("modbus-tcp", Arc::new(ModbusTcpPlugin::new()));
@@ -49,11 +49,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             loader_opt = Some(loader);
             // 若目录下未加载到任何插件（如空目录或仅有非插件库），则补充内置插件供管理页展示与使用
             if mgr.south_plugins().is_empty() && mgr.north_plugins().is_empty() {
-                tracing::info!("no plugins loaded from {}, using built-in", config.plugins_dir.display());
+                tracing::info!(
+                    "no plugins loaded from {}, using built-in",
+                    config.plugins_dir.display()
+                );
                 register_builtin_plugins(&mut mgr);
             }
         } else {
-            tracing::warn!("load plugins from {} failed, using built-in", config.plugins_dir.display());
+            tracing::warn!(
+                "load plugins from {} failed, using built-in",
+                config.plugins_dir.display()
+            );
             register_builtin_plugins(&mut mgr);
         }
     } else {
@@ -87,7 +93,10 @@ node credentials such as MQTT passwords will be stored in PLAINTEXT in data.db. 
             // 历史数据可能仍是明文口令：启用密钥后首次启动把它们加密回写
             if secret.is_some() && gateway_core::persist_has_plaintext_secrets(&snap) {
                 let _ = persist_save_secret(&db_path, &snap, secret).await;
-                tracing::info!("encrypted existing plaintext credentials in {}", db_path.display());
+                tracing::info!(
+                    "encrypted existing plaintext credentials in {}",
+                    db_path.display()
+                );
             }
             // 在 apply_snapshot 前填充 node_log_names，确保节点启动后首次写日志即用节点名称
             if let Some(ref map) = node_log_names {
@@ -154,7 +163,14 @@ Backups created now can only be restored by this running instance. Set a fixed s
         );
     }
 
-    let state = AppState::new(mgr, config.clone(), loader_opt, feature_manager, user_store, node_log_names);
+    let state = AppState::new(
+        mgr,
+        config.clone(),
+        loader_opt,
+        feature_manager,
+        user_store,
+        node_log_names,
+    );
     state.sync_node_log_names();
     // 优雅退出时需要用到状态（state 随后会被 move 进 Router）
     let shutdown_state = state.clone();
@@ -219,7 +235,10 @@ Backups created now can only be restored by this running instance. Set a fixed s
     let addr: std::net::SocketAddr = match config.bind.parse::<std::net::IpAddr>() {
         Ok(ip) => std::net::SocketAddr::from((ip, config.port)),
         Err(_) => {
-            tracing::warn!("invalid bind address '{}', falling back to 0.0.0.0", config.bind);
+            tracing::warn!(
+                "invalid bind address '{}', falling back to 0.0.0.0",
+                config.bind
+            );
             std::net::SocketAddr::from(([0, 0, 0, 0], config.port))
         }
     };

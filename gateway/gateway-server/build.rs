@@ -39,7 +39,10 @@ fn format_timestamp(secs: u64) -> String {
     let min = (rem % 3600) / 60;
     let sec = rem % 60;
     let (y, m, d) = civil_from_days(days as i64);
-    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, d, hour, min, sec)
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        y, m, d, hour, min, sec
+    )
 }
 
 /// 将「1970-01-01 起的天数」转换为年月日（civil_from_days 算法）

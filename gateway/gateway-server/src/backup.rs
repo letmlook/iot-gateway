@@ -58,9 +58,7 @@ fn gunzip_limited(compressed: &[u8]) -> Result<Vec<u8>, String> {
     let mut gz = flate2::read::GzDecoder::new(compressed);
     let mut json = Vec::new();
     let mut limited = (&mut gz).take(MAX_PLAINTEXT_BYTES);
-    limited
-        .read_to_end(&mut json)
-        .map_err(|e| e.to_string())?;
+    limited.read_to_end(&mut json).map_err(|e| e.to_string())?;
     Ok(json)
 }
 
@@ -81,7 +79,10 @@ pub fn encrypt_backup(snap: &Snapshot, secret: &str) -> Result<Vec<u8>, String> 
     let key = derive_key_argon2(secret, &salt)?;
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| e.to_string())?;
     let ciphertext = cipher
-        .encrypt(aes_gcm::Nonce::from_slice(&nonce_bytes), compressed.as_ref())
+        .encrypt(
+            aes_gcm::Nonce::from_slice(&nonce_bytes),
+            compressed.as_ref(),
+        )
         .map_err(|e| e.to_string())?;
 
     let mut out = Vec::with_capacity(4 + 1 + SALT_LEN + NONCE_LEN + ciphertext.len());
@@ -141,7 +142,10 @@ mod tests {
     #[test]
     fn v2_roundtrip_with_strong_kdf() {
         let data = encrypt_backup(&snap(), "s3cret").expect("encrypt");
-        assert!(data.starts_with(MAGIC), "new backups use the versioned format");
+        assert!(
+            data.starts_with(MAGIC),
+            "new backups use the versioned format"
+        );
         assert_eq!(data[4], FORMAT_V2);
 
         let back = decrypt_backup(&data, "s3cret").expect("decrypt");
@@ -159,7 +163,10 @@ mod tests {
         let mut data = encrypt_backup(&snap(), "s3cret").unwrap();
         let last = data.len() - 1;
         data[last] ^= 0x01;
-        assert!(decrypt_backup(&data, "s3cret").is_err(), "GCM tag must catch tampering");
+        assert!(
+            decrypt_backup(&data, "s3cret").is_err(),
+            "GCM tag must catch tampering"
+        );
     }
 
     #[test]
@@ -171,7 +178,10 @@ mod tests {
         let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
         let nonce_bytes = [7u8; NONCE_LEN];
         let ct = cipher
-            .encrypt(aes_gcm::Nonce::from_slice(&nonce_bytes), compressed.as_ref())
+            .encrypt(
+                aes_gcm::Nonce::from_slice(&nonce_bytes),
+                compressed.as_ref(),
+            )
             .unwrap();
         let mut legacy = Vec::new();
         legacy.extend_from_slice(&nonce_bytes);
@@ -186,6 +196,10 @@ mod tests {
         let mut data = encrypt_backup(&snap(), "s").unwrap();
         data[4] = 9;
         let err = decrypt_backup(&data, "s").unwrap_err();
-        assert!(err.contains("unsupported backup format version"), "got: {}", err);
+        assert!(
+            err.contains("unsupported backup format version"),
+            "got: {}",
+            err
+        );
     }
 }

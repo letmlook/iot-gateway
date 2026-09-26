@@ -25,7 +25,11 @@ impl fmt::Display for LicenseError {
             LicenseError::InvalidFormat(s) => write!(f, "授权格式无效: {}", s),
             LicenseError::SignatureInvalid => write!(f, "授权签名验证失败"),
             LicenseError::MachineMismatch { expected, actual } => {
-                write!(f, "机器码不匹配: 授权绑定 {}，当前设备 {}", expected, actual)
+                write!(
+                    f,
+                    "机器码不匹配: 授权绑定 {}，当前设备 {}",
+                    expected, actual
+                )
             }
             LicenseError::Expired { expiry_date } => write!(f, "授权已过期: {}", expiry_date),
             LicenseError::Internal(s) => write!(f, "授权校验内部错误: {}", s),

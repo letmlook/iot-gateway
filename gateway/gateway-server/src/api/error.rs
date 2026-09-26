@@ -50,11 +50,7 @@ impl ApiError {
     }
 
     pub fn unauthorized() -> Self {
-        Self::new(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "Unauthorized",
-        )
+        Self::new(StatusCode::UNAUTHORIZED, "unauthorized", "Unauthorized")
     }
 
     pub fn forbidden(msg: impl Into<String>) -> Self {

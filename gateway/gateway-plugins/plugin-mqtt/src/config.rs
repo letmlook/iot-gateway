@@ -1,6 +1,8 @@
 //! MQTT 插件配置常量、辅助函数与 config_schema。
 
-use gateway_sdk::schema::{ConfigSchema, ParamAttribute, ParamOption, ParamSchema, ParamType, ParamValid};
+use gateway_sdk::schema::{
+    ConfigSchema, ParamAttribute, ParamOption, ParamSchema, ParamType, ParamValid,
+};
 use gateway_sdk::PluginConfig;
 
 pub const DEFAULT_HOST: &str = "broker.emqx.io";
@@ -45,10 +47,7 @@ pub fn config_usize(config: &PluginConfig, key: &str, default: usize) -> usize {
 }
 
 pub fn config_bool(config: &PluginConfig, key: &str, default: bool) -> bool {
-    config
-        .get(key)
-        .and_then(|v| v.as_bool())
-        .unwrap_or(default)
+    config.get(key).and_then(|v| v.as_bool()).unwrap_or(default)
 }
 
 pub fn config_schema() -> ConfigSchema {

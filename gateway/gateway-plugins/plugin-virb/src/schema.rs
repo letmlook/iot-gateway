@@ -1,6 +1,8 @@
 //! 振动采集插件配置与标签 Schema。
 
-use gateway_sdk::schema::{ConfigSchema, ParamAttribute, ParamOption, ParamSchema, ParamType, ParamValid};
+use gateway_sdk::schema::{
+    ConfigSchema, ParamAttribute, ParamOption, ParamSchema, ParamType, ParamValid,
+};
 use gateway_sdk::{TagRegexEntry, TagSchema};
 
 pub fn config_schema() -> ConfigSchema {
@@ -212,8 +214,14 @@ pub fn config_schema() -> ConfigSchema {
 pub fn tag_schema() -> TagSchema {
     TagSchema {
         data_types: Some(vec!["float64".to_string()]),
-        address_format: Some("通道号 1..8 (YE6275D) 或 1..32 (YE6275D2)，对应时域最大值".to_string()),
-        address_format_zh: Some("通道号 1..8 (YE6275D) 或 1..32 (YE6275D2)，对应时域最大值".to_string()),
-        address_format_en: Some("Channel index 1..8 (YE6275D) or 1..32 (YE6275D2), time-domain max".to_string()),
+        address_format: Some(
+            "通道号 1..8 (YE6275D) 或 1..32 (YE6275D2)，对应时域最大值".to_string(),
+        ),
+        address_format_zh: Some(
+            "通道号 1..8 (YE6275D) 或 1..32 (YE6275D2)，对应时域最大值".to_string(),
+        ),
+        address_format_en: Some(
+            "Channel index 1..8 (YE6275D) or 1..32 (YE6275D2), time-domain max".to_string(),
+        ),
     }
 }

@@ -145,7 +145,11 @@ mod tests {
         // 400001/400002/400003（保持寄存器，uint16 各占 1 个寄存器）
         let reads = vec![read(0, "4x!1"), read(1, "4x!2"), read(2, "4x!3")];
         let (plans, singles) = plan_merges(&reads, DEFAULT_MERGE_GAP, DEFAULT_MAX_READ_REGS);
-        assert_eq!(plans.len(), 1, "three adjacent tags should collapse into one read");
+        assert_eq!(
+            plans.len(),
+            1,
+            "three adjacent tags should collapse into one read"
+        );
         assert!(singles.is_empty());
         let p = &plans[0];
         assert_eq!(p.start, 1);
@@ -177,7 +181,10 @@ mod tests {
         // 200 个寄存器跨度超过单次读上限，必须拆分
         let reads = vec![read(0, "4x!1"), read(1, "4x!200")];
         let (plans, _) = plan_merges(&reads, 500, 125);
-        assert!(plans.is_empty(), "span above the protocol limit must not be merged");
+        assert!(
+            plans.is_empty(),
+            "span above the protocol limit must not be merged"
+        );
     }
 
     #[test]
@@ -211,7 +218,10 @@ mod tests {
         for plan in &plans {
             for (_, off) in &plan.members {
                 assert!(plan.count > 0);
-                assert!(*off < plan.count.max(1), "offset must stay inside the read window");
+                assert!(
+                    *off < plan.count.max(1),
+                    "offset must stay inside the read window"
+                );
             }
         }
         // 完全重叠时退化为逐点读（不合并跨度为 1）

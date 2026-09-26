@@ -9,11 +9,11 @@ mod protocol;
 mod schema;
 mod state;
 
+use gateway_sdk::log;
+use gateway_sdk::types::{DataValue, PluginKind};
 use gateway_sdk::{
     ConfigSchema, Group, GroupId, NodeId, PluginMeta, SouthPlugin, Tag, TagId, TagSchema,
 };
-use gateway_sdk::log;
-use gateway_sdk::types::{DataValue, PluginKind};
 use gateway_sdk::{PluginConfig, PluginError, PluginResult};
 use protocol::{
     decode_upload_data, encode_set_channel_prop, encode_set_sample_rate, encode_start_grab,
@@ -23,8 +23,8 @@ use schema::{config_schema, tag_schema};
 use state::{default_groups, default_tags, parse_address, parse_channel_params, VirbState};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use tokio::sync::{oneshot, RwLock};
 use tokio::net::UdpSocket;
+use tokio::sync::{oneshot, RwLock};
 
 const MAX_PACKET_QUEUE: usize = 500;
 
@@ -79,7 +79,11 @@ impl SouthPlugin for VirbPlugin {
                 return Err(PluginError::tag_invalid("virb only supports float64"));
             }
         }
-        let ch: usize = tag.address.trim().parse().map_err(|_| PluginError::tag_invalid("address must be channel number 1..N"))?;
+        let ch: usize = tag
+            .address
+            .trim()
+            .parse()
+            .map_err(|_| PluginError::tag_invalid("address must be channel number 1..N"))?;
         if !(1..=32).contains(&ch) {
             return Err(PluginError::tag_invalid("address must be 1..32"));
         }
@@ -124,7 +128,10 @@ impl SouthPlugin for VirbPlugin {
             .and_then(|v| v.as_str())
             .map(String::from)
             .unwrap_or_else(|| "1,1,1,1,1,1,1,1".to_string());
-        let endianess_id = config.get("endianess").and_then(|v| v.as_i64()).unwrap_or(3);
+        let endianess_id = config
+            .get("endianess")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(3);
         let endianess = VirbEndianess::from_id(endianess_id);
         let max_kcount = config
             .get("max_kcount")
@@ -223,12 +230,17 @@ impl SouthPlugin for VirbPlugin {
     async fn start(&self, node_id: NodeId) -> PluginResult<()> {
         let (socket, host, port, cancel_tx, recv_handle) = {
             let state = self.state.read().await;
-            let s = state.get(&node_id).ok_or_else(|| PluginError::msg("node not open"))?;
+            let s = state
+                .get(&node_id)
+                .ok_or_else(|| PluginError::msg("node not open"))?;
             let socket = UdpSocket::bind("0.0.0.0:0")
                 .await
                 .map_err(|e| PluginError::msg(format!("udp bind: {}", e)))?;
             let device_addr = format!("{}:{}", s.host, s.port);
-            socket.connect(&device_addr).await.map_err(|e| PluginError::msg(format!("udp connect: {}", e)))?;
+            socket
+                .connect(&device_addr)
+                .await
+                .map_err(|e| PluginError::msg(format!("udp connect: {}", e)))?;
 
             let rate_hz = sample_rate_id_to_hz(s.sample_rate_id);
             let start_cmd = encode_start_grab();
@@ -288,13 +300,7 @@ impl SouthPlugin for VirbPlugin {
                 }
             });
 
-            (
-                socket,
-                host,
-                port,
-                tx,
-                recv_handle,
-            )
+            (socket, host, port, tx, recv_handle)
         };
 
         let mut state = self.state.write().await;
@@ -310,7 +316,9 @@ impl SouthPlugin for VirbPlugin {
     async fn stop(&self, node_id: NodeId) -> PluginResult<()> {
         let (send_stop, cancel_tx, recv_handle) = {
             let mut state = self.state.write().await;
-            let s = state.get_mut(&node_id).ok_or_else(|| PluginError::msg("node not open"))?;
+            let s = state
+                .get_mut(&node_id)
+                .ok_or_else(|| PluginError::msg("node not open"))?;
             let stop_cmd = encode_stop_grab();
             let socket = s.socket.as_ref().map(Arc::clone);
             let cancel_tx = s.cancel_tx.take();
@@ -362,8 +370,15 @@ impl SouthPlugin for VirbPlugin {
     ) -> PluginResult<Vec<(TagId, DataValue)>> {
         let (channels, packet_total, interval_ms, unit_factor, queue) = {
             let state = self.state.read().await;
-            let s = state.get(&node_id).ok_or_else(|| PluginError::msg("node not open"))?;
-            let interval_ms = s.groups.iter().find(|g| g.id == group_id).map(|g| g.interval_ms).unwrap_or(70);
+            let s = state
+                .get(&node_id)
+                .ok_or_else(|| PluginError::msg("node not open"))?;
+            let interval_ms = s
+                .groups
+                .iter()
+                .find(|g| g.id == group_id)
+                .map(|g| g.interval_ms)
+                .unwrap_or(70);
             (
                 s.channels,
                 s.packet_total,
@@ -401,13 +416,17 @@ impl SouthPlugin for VirbPlugin {
 
     async fn list_groups(&self, node_id: NodeId) -> PluginResult<Vec<Group>> {
         let state = self.state.read().await;
-        let s = state.get(&node_id).ok_or_else(|| PluginError::msg("node not open"))?;
+        let s = state
+            .get(&node_id)
+            .ok_or_else(|| PluginError::msg("node not open"))?;
         Ok(s.groups.clone())
     }
 
     async fn list_tags(&self, node_id: NodeId, group_id: GroupId) -> PluginResult<Vec<Tag>> {
         let state = self.state.read().await;
-        let s = state.get(&node_id).ok_or_else(|| PluginError::msg("node not open"))?;
+        let s = state
+            .get(&node_id)
+            .ok_or_else(|| PluginError::msg("node not open"))?;
         Ok(s.tags
             .iter()
             .filter(|t| t.group_id == group_id)

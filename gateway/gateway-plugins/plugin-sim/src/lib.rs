@@ -7,11 +7,11 @@ mod ffi;
 mod schema;
 mod state;
 
+use gateway_sdk::log;
+use gateway_sdk::types::{DataValue, PluginKind};
 use gateway_sdk::{
     ConfigSchema, Group, GroupId, NodeId, PluginMeta, SouthPlugin, Tag, TagId, TagSchema,
 };
-use gateway_sdk::log;
-use gateway_sdk::types::{DataValue, PluginKind};
 use gateway_sdk::{PluginConfig, PluginError, PluginResult};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -129,13 +129,17 @@ impl SouthPlugin for SimPlugin {
 
     async fn list_groups(&self, node_id: NodeId) -> PluginResult<Vec<Group>> {
         let state = self.state.read().await;
-        let s = state.get(&node_id).ok_or_else(|| PluginError::msg("node not open"))?;
+        let s = state
+            .get(&node_id)
+            .ok_or_else(|| PluginError::msg("node not open"))?;
         Ok(s.groups.clone())
     }
 
     async fn list_tags(&self, node_id: NodeId, group_id: GroupId) -> PluginResult<Vec<Tag>> {
         let state = self.state.read().await;
-        let s = state.get(&node_id).ok_or_else(|| PluginError::msg("node not open"))?;
+        let s = state
+            .get(&node_id)
+            .ok_or_else(|| PluginError::msg("node not open"))?;
         Ok(s.tags
             .iter()
             .filter(|t| t.group_id == group_id)

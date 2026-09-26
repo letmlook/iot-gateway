@@ -1,12 +1,12 @@
 //! 从 `plugins_dir` 扫描并加载 .so 插件。
 
 use gateway_sdk::ffi::*;
+use gateway_sdk::types::{DataValue, PluginKind};
 use gateway_sdk::{
-    ConfigSchema, Group, GroupData, GroupSubscription, NorthPlugin, SouthPlugin,
-    PluginConfig, PluginMeta, Tag, TagSchema,
+    ConfigSchema, Group, GroupData, GroupSubscription, NorthPlugin, PluginConfig, PluginMeta,
+    SouthPlugin, Tag, TagSchema,
 };
 use gateway_sdk::{GroupId, NodeId, TagId};
-use gateway_sdk::types::{DataValue, PluginKind};
 use libloading::Library;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_void};
@@ -18,10 +18,15 @@ type CreateFn = unsafe extern "C-unwind" fn() -> *mut c_void;
 type DestroyFn = unsafe extern "C-unwind" fn(*mut c_void);
 type MetaFn = unsafe extern "C-unwind" fn(*mut c_void) -> *mut c_char;
 type FreeStringFn = unsafe extern "C-unwind" fn(*mut c_char);
-type StrStrFn = unsafe extern "C-unwind" fn(*mut c_void, *const c_char, *const c_char) -> *mut c_char;
+type StrStrFn =
+    unsafe extern "C-unwind" fn(*mut c_void, *const c_char, *const c_char) -> *mut c_char;
 type StrFn = unsafe extern "C-unwind" fn(*mut c_void, *const c_char) -> *mut c_char;
-type StrStrStrFn =
-    unsafe extern "C-unwind" fn(*mut c_void, *const c_char, *const c_char, *const c_char) -> *mut c_char;
+type StrStrStrFn = unsafe extern "C-unwind" fn(
+    *mut c_void,
+    *const c_char,
+    *const c_char,
+    *const c_char,
+) -> *mut c_char;
 type VoidFn = unsafe extern "C-unwind" fn(*mut c_void) -> *mut c_char;
 /// set_log(handle, node_id_cstr, log_callback)
 type SetLogFn = unsafe extern "C-unwind" fn(*mut c_void, *const c_char, *const c_void);
@@ -45,7 +50,11 @@ fn cstr(s: &str) -> CString {
 
 /// 宿主提供给 .so 插件的节点日志回调：将插件发来的 level/node_id/message 转为 tracing 事件，由 NodeFileLayer 按节点写文件。
 #[allow(dead_code)]
-pub unsafe extern "C-unwind" fn gateway_host_log(level: u8, node_id: *const c_char, message: *const c_char) {
+pub unsafe extern "C-unwind" fn gateway_host_log(
+    level: u8,
+    node_id: *const c_char,
+    message: *const c_char,
+) {
     let node_id_str = match gateway_sdk::ptr_to_string(node_id) {
         Some(s) => s,
         None => return,
@@ -125,37 +134,43 @@ impl SouthSoAdapter {
 #[async_trait::async_trait]
 impl SouthPlugin for SouthSoAdapter {
     fn meta(&self) -> PluginMeta {
-        self.cached_meta.get_or_init(|| {
-            let s = self.meta_json().unwrap_or_else(|_| {
-                serde_json::json!({"name":"?","kind":"south","version":"0.0.0"}).to_string()
-            });
-            let f: FfiPluginMeta = serde_json::from_str(&s).unwrap_or_default();
-            PluginMeta {
-                name: Box::leak(f.name.into_boxed_str()),
-                kind: if f.kind == "north" { PluginKind::North } else { PluginKind::South },
-                description: f.description.map(|x| {
-                    let b = Box::leak(x.into_boxed_str());
-                    b as &str
-                }),
-                version: Box::leak(f.version.into_boxed_str()),
-                name_zh: f.name_zh.map(|x| {
-                    let b = Box::leak(x.into_boxed_str());
-                    b as &str
-                }),
-                name_en: f.name_en.map(|x| {
-                    let b = Box::leak(x.into_boxed_str());
-                    b as &str
-                }),
-                description_zh: f.description_zh.map(|x| {
-                    let b = Box::leak(x.into_boxed_str());
-                    b as &str
-                }),
-                description_en: f.description_en.map(|x| {
-                    let b = Box::leak(x.into_boxed_str());
-                    b as &str
-                }),
-            }
-        }).clone()
+        self.cached_meta
+            .get_or_init(|| {
+                let s = self.meta_json().unwrap_or_else(|_| {
+                    serde_json::json!({"name":"?","kind":"south","version":"0.0.0"}).to_string()
+                });
+                let f: FfiPluginMeta = serde_json::from_str(&s).unwrap_or_default();
+                PluginMeta {
+                    name: Box::leak(f.name.into_boxed_str()),
+                    kind: if f.kind == "north" {
+                        PluginKind::North
+                    } else {
+                        PluginKind::South
+                    },
+                    description: f.description.map(|x| {
+                        let b = Box::leak(x.into_boxed_str());
+                        b as &str
+                    }),
+                    version: Box::leak(f.version.into_boxed_str()),
+                    name_zh: f.name_zh.map(|x| {
+                        let b = Box::leak(x.into_boxed_str());
+                        b as &str
+                    }),
+                    name_en: f.name_en.map(|x| {
+                        let b = Box::leak(x.into_boxed_str());
+                        b as &str
+                    }),
+                    description_zh: f.description_zh.map(|x| {
+                        let b = Box::leak(x.into_boxed_str());
+                        b as &str
+                    }),
+                    description_en: f.description_en.map(|x| {
+                        let b = Box::leak(x.into_boxed_str());
+                        b as &str
+                    }),
+                }
+            })
+            .clone()
     }
 
     fn config_schema(&self) -> Option<ConfigSchema> {
@@ -177,8 +192,10 @@ impl SouthPlugin for SouthSoAdapter {
     }
 
     async fn open(&self, node_id: NodeId, config: PluginConfig) -> gateway_sdk::PluginResult<()> {
-        let n = serde_json::to_string(&node_id).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
-        let c = serde_json::to_string(&config).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let n = serde_json::to_string(&node_id)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let c = serde_json::to_string(&config)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
         let free = self.free_string;
         let open = self.open;
         let set_log = self.set_log;
@@ -198,7 +215,8 @@ impl SouthPlugin for SouthSoAdapter {
     }
 
     async fn close(&self, node_id: NodeId) -> gateway_sdk::PluginResult<()> {
-        let n = serde_json::to_string(&node_id).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let n = serde_json::to_string(&node_id)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
         let free = self.free_string;
         let close = self.close;
         self.run_sync(move |handle| {
@@ -210,7 +228,8 @@ impl SouthPlugin for SouthSoAdapter {
     }
 
     async fn init(&self, node_id: NodeId) -> gateway_sdk::PluginResult<()> {
-        let n = serde_json::to_string(&node_id).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let n = serde_json::to_string(&node_id)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
         let free = self.free_string;
         let init = self.init;
         self.run_sync(move |handle| {
@@ -222,7 +241,8 @@ impl SouthPlugin for SouthSoAdapter {
     }
 
     async fn uninit(&self, node_id: NodeId) -> gateway_sdk::PluginResult<()> {
-        let n = serde_json::to_string(&node_id).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let n = serde_json::to_string(&node_id)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
         let free = self.free_string;
         let uninit = self.uninit;
         self.run_sync(move |handle| {
@@ -234,7 +254,8 @@ impl SouthPlugin for SouthSoAdapter {
     }
 
     async fn start(&self, node_id: NodeId) -> gateway_sdk::PluginResult<()> {
-        let n = serde_json::to_string(&node_id).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let n = serde_json::to_string(&node_id)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
         let free = self.free_string;
         let start = self.start;
         self.run_sync(move |handle| {
@@ -246,7 +267,8 @@ impl SouthPlugin for SouthSoAdapter {
     }
 
     async fn stop(&self, node_id: NodeId) -> gateway_sdk::PluginResult<()> {
-        let n = serde_json::to_string(&node_id).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let n = serde_json::to_string(&node_id)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
         let free = self.free_string;
         let stop = self.stop;
         self.run_sync(move |handle| {
@@ -257,9 +279,15 @@ impl SouthPlugin for SouthSoAdapter {
         .map_err(gateway_sdk::PluginError::msg)
     }
 
-    async fn setting(&self, node_id: NodeId, config: PluginConfig) -> gateway_sdk::PluginResult<()> {
-        let n = serde_json::to_string(&node_id).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
-        let c = serde_json::to_string(&config).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+    async fn setting(
+        &self,
+        node_id: NodeId,
+        config: PluginConfig,
+    ) -> gateway_sdk::PluginResult<()> {
+        let n = serde_json::to_string(&node_id)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let c = serde_json::to_string(&config)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
         let free = self.free_string;
         let setting = self.setting;
         self.run_sync(move |handle| {
@@ -272,8 +300,10 @@ impl SouthPlugin for SouthSoAdapter {
     }
 
     async fn validate_tag(&self, node_id: NodeId, tag: &Tag) -> gateway_sdk::PluginResult<()> {
-        let n = serde_json::to_string(&node_id).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
-        let t = serde_json::to_string(tag).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let n = serde_json::to_string(&node_id)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let t =
+            serde_json::to_string(tag).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
         let free = self.free_string;
         let validate = self.validate_tag;
         self.run_sync(move |handle| {
@@ -291,9 +321,12 @@ impl SouthPlugin for SouthSoAdapter {
         group_id: GroupId,
         tags: &[Tag],
     ) -> gateway_sdk::PluginResult<Vec<(TagId, DataValue)>> {
-        let n = serde_json::to_string(&node_id).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
-        let g = serde_json::to_string(&group_id).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
-        let t = serde_json::to_string(tags).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let n = serde_json::to_string(&node_id)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let g = serde_json::to_string(&group_id)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let t = serde_json::to_string(tags)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
         let free = self.free_string;
         let poll = self.poll_group;
         self.run_sync(move |handle| {
@@ -316,8 +349,10 @@ impl SouthPlugin for SouthSoAdapter {
         node_id: NodeId,
         values: &[(Tag, DataValue)],
     ) -> gateway_sdk::PluginResult<()> {
-        let n = serde_json::to_string(&node_id).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
-        let v = serde_json::to_string(values).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let n = serde_json::to_string(&node_id)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let v = serde_json::to_string(values)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
         let free = self.free_string;
         let write = self.write_tags;
         self.run_sync(move |handle| {
@@ -330,7 +365,8 @@ impl SouthPlugin for SouthSoAdapter {
     }
 
     async fn list_groups(&self, node_id: NodeId) -> gateway_sdk::PluginResult<Vec<Group>> {
-        let n = serde_json::to_string(&node_id).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let n = serde_json::to_string(&node_id)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
         let free = self.free_string;
         let list = self.list_groups;
         self.run_sync(move |handle| {
@@ -346,9 +382,15 @@ impl SouthPlugin for SouthSoAdapter {
         .map_err(gateway_sdk::PluginError::msg)
     }
 
-    async fn list_tags(&self, node_id: NodeId, group_id: GroupId) -> gateway_sdk::PluginResult<Vec<Tag>> {
-        let n = serde_json::to_string(&node_id).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
-        let g = serde_json::to_string(&group_id).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+    async fn list_tags(
+        &self,
+        node_id: NodeId,
+        group_id: GroupId,
+    ) -> gateway_sdk::PluginResult<Vec<Tag>> {
+        let n = serde_json::to_string(&node_id)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let g = serde_json::to_string(&group_id)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
         let free = self.free_string;
         let list = self.list_tags;
         self.run_sync(move |handle| {
@@ -431,37 +473,39 @@ impl NorthSoAdapter {
 #[async_trait::async_trait]
 impl NorthPlugin for NorthSoAdapter {
     fn meta(&self) -> PluginMeta {
-        self.cached_meta.get_or_init(|| {
-            let s = self.meta_json().unwrap_or_else(|_| {
-                serde_json::json!({"name":"?","kind":"north","version":"0.0.0"}).to_string()
-            });
-            let f: FfiPluginMeta = serde_json::from_str(&s).unwrap_or_default();
-            PluginMeta {
-                name: Box::leak(f.name.into_boxed_str()),
-                kind: PluginKind::North,
-                description: f.description.map(|x| {
-                    let b = Box::leak(x.into_boxed_str());
-                    b as &str
-                }),
-                version: Box::leak(f.version.into_boxed_str()),
-                name_zh: f.name_zh.map(|x| {
-                    let b = Box::leak(x.into_boxed_str());
-                    b as &str
-                }),
-                name_en: f.name_en.map(|x| {
-                    let b = Box::leak(x.into_boxed_str());
-                    b as &str
-                }),
-                description_zh: f.description_zh.map(|x| {
-                    let b = Box::leak(x.into_boxed_str());
-                    b as &str
-                }),
-                description_en: f.description_en.map(|x| {
-                    let b = Box::leak(x.into_boxed_str());
-                    b as &str
-                }),
-            }
-        }).clone()
+        self.cached_meta
+            .get_or_init(|| {
+                let s = self.meta_json().unwrap_or_else(|_| {
+                    serde_json::json!({"name":"?","kind":"north","version":"0.0.0"}).to_string()
+                });
+                let f: FfiPluginMeta = serde_json::from_str(&s).unwrap_or_default();
+                PluginMeta {
+                    name: Box::leak(f.name.into_boxed_str()),
+                    kind: PluginKind::North,
+                    description: f.description.map(|x| {
+                        let b = Box::leak(x.into_boxed_str());
+                        b as &str
+                    }),
+                    version: Box::leak(f.version.into_boxed_str()),
+                    name_zh: f.name_zh.map(|x| {
+                        let b = Box::leak(x.into_boxed_str());
+                        b as &str
+                    }),
+                    name_en: f.name_en.map(|x| {
+                        let b = Box::leak(x.into_boxed_str());
+                        b as &str
+                    }),
+                    description_zh: f.description_zh.map(|x| {
+                        let b = Box::leak(x.into_boxed_str());
+                        b as &str
+                    }),
+                    description_en: f.description_en.map(|x| {
+                        let b = Box::leak(x.into_boxed_str());
+                        b as &str
+                    }),
+                }
+            })
+            .clone()
     }
 
     fn config_schema(&self) -> Option<ConfigSchema> {
@@ -474,8 +518,10 @@ impl NorthPlugin for NorthSoAdapter {
     }
 
     async fn open(&self, node_id: NodeId, config: PluginConfig) -> gateway_sdk::PluginResult<()> {
-        let n = serde_json::to_string(&node_id).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
-        let c = serde_json::to_string(&config).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let n = serde_json::to_string(&node_id)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let c = serde_json::to_string(&config)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
         let free = self.free_string;
         let open = self.open;
         let set_log = self.set_log;
@@ -495,7 +541,8 @@ impl NorthPlugin for NorthSoAdapter {
     }
 
     async fn close(&self, node_id: NodeId) -> gateway_sdk::PluginResult<()> {
-        let n = serde_json::to_string(&node_id).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let n = serde_json::to_string(&node_id)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
         let free = self.free_string;
         let close = self.close;
         self.run_sync(move |handle| {
@@ -507,7 +554,8 @@ impl NorthPlugin for NorthSoAdapter {
     }
 
     async fn init(&self, node_id: NodeId) -> gateway_sdk::PluginResult<()> {
-        let n = serde_json::to_string(&node_id).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let n = serde_json::to_string(&node_id)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
         let free = self.free_string;
         let init = self.init;
         self.run_sync(move |handle| {
@@ -519,7 +567,8 @@ impl NorthPlugin for NorthSoAdapter {
     }
 
     async fn uninit(&self, node_id: NodeId) -> gateway_sdk::PluginResult<()> {
-        let n = serde_json::to_string(&node_id).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let n = serde_json::to_string(&node_id)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
         let free = self.free_string;
         let uninit = self.uninit;
         self.run_sync(move |handle| {
@@ -531,7 +580,8 @@ impl NorthPlugin for NorthSoAdapter {
     }
 
     async fn start(&self, node_id: NodeId) -> gateway_sdk::PluginResult<()> {
-        let n = serde_json::to_string(&node_id).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let n = serde_json::to_string(&node_id)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
         let free = self.free_string;
         let start = self.start;
         self.run_sync(move |handle| {
@@ -543,7 +593,8 @@ impl NorthPlugin for NorthSoAdapter {
     }
 
     async fn stop(&self, node_id: NodeId) -> gateway_sdk::PluginResult<()> {
-        let n = serde_json::to_string(&node_id).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let n = serde_json::to_string(&node_id)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
         let free = self.free_string;
         let stop = self.stop;
         self.run_sync(move |handle| {
@@ -554,9 +605,15 @@ impl NorthPlugin for NorthSoAdapter {
         .map_err(gateway_sdk::PluginError::msg)
     }
 
-    async fn setting(&self, node_id: NodeId, config: PluginConfig) -> gateway_sdk::PluginResult<()> {
-        let n = serde_json::to_string(&node_id).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
-        let c = serde_json::to_string(&config).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+    async fn setting(
+        &self,
+        node_id: NodeId,
+        config: PluginConfig,
+    ) -> gateway_sdk::PluginResult<()> {
+        let n = serde_json::to_string(&node_id)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let c = serde_json::to_string(&config)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
         let free = self.free_string;
         let setting = self.setting;
         self.run_sync(move |handle| {
@@ -573,8 +630,10 @@ impl NorthPlugin for NorthSoAdapter {
         node_id: NodeId,
         subscriptions: &[GroupSubscription],
     ) -> gateway_sdk::PluginResult<()> {
-        let n = serde_json::to_string(&node_id).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
-        let s = serde_json::to_string(subscriptions).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let n = serde_json::to_string(&node_id)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let s = serde_json::to_string(subscriptions)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
         let free = self.free_string;
         let set = self.set_subscriptions;
         self.run_sync(move |handle| {
@@ -586,9 +645,15 @@ impl NorthPlugin for NorthSoAdapter {
         .map_err(gateway_sdk::PluginError::msg)
     }
 
-    async fn on_group_data(&self, node_id: NodeId, data: Arc<GroupData>) -> gateway_sdk::PluginResult<()> {
-        let n = serde_json::to_string(&node_id).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
-        let d = serde_json::to_string(data.as_ref()).map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+    async fn on_group_data(
+        &self,
+        node_id: NodeId,
+        data: Arc<GroupData>,
+    ) -> gateway_sdk::PluginResult<()> {
+        let n = serde_json::to_string(&node_id)
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
+        let d = serde_json::to_string(data.as_ref())
+            .map_err(|e| gateway_sdk::PluginError::msg(e.to_string()))?;
         let free = self.free_string;
         let on = self.on_group_data;
         self.run_sync(move |handle| {
@@ -604,15 +669,17 @@ impl NorthPlugin for NorthSoAdapter {
         let conn_fn = self.connection_status?;
         let n = serde_json::to_string(&node_id).ok()?;
         let free_fn = self.free_string;
-        let json_opt = self.run_sync(move |handle| {
-            let n_c = cstr(&n);
-            let ptr = unsafe { conn_fn(handle, n_c.as_ptr()) };
-            let s = unsafe { gateway_sdk::ptr_to_string(ptr) };
-            if !ptr.is_null() {
-                unsafe { free_fn(ptr) };
-            }
-            Ok(s)
-        }).ok()??;
+        let json_opt = self
+            .run_sync(move |handle| {
+                let n_c = cstr(&n);
+                let ptr = unsafe { conn_fn(handle, n_c.as_ptr()) };
+                let s = unsafe { gateway_sdk::ptr_to_string(ptr) };
+                if !ptr.is_null() {
+                    unsafe { free_fn(ptr) };
+                }
+                Ok(s)
+            })
+            .ok()??;
         serde_json::from_str(&json_opt).ok()
     }
 }
@@ -650,11 +717,15 @@ impl PluginLoader {
     pub fn load(plugins_dir: &Path, mgr: &mut crate::manager::Manager) -> Result<Self, String> {
         let ext = std::env::consts::DLL_EXTENSION; // "dll" on Windows, "so" on Unix
         let mut libraries = Vec::new();
-        let entries = std::fs::read_dir(plugins_dir).map_err(|e| format!("read_dir {}: {}", plugins_dir.display(), e))?;
+        let entries = std::fs::read_dir(plugins_dir)
+            .map_err(|e| format!("read_dir {}: {}", plugins_dir.display(), e))?;
         for e in entries {
             let e = e.map_err(|e| e.to_string())?;
             let p = e.path();
-            if p.extension().map(|x| x.to_string_lossy() == ext).unwrap_or(false) {
+            if p.extension()
+                .map(|x| x.to_string_lossy() == ext)
+                .unwrap_or(false)
+            {
                 if let Err(e) = Self::load_one(&p, mgr, &mut libraries) {
                     warn!(path = %p.display(), "load plugin: {}", e);
                 }
@@ -692,7 +763,10 @@ impl PluginLoader {
             );
         }
 
-        let free_fn: FreeStringFn = unsafe { *lib.get(SYM_FREE_STRING).map_err(|e| format!("get free_string: {}", e))? };
+        let free_fn: FreeStringFn = unsafe {
+            *lib.get(SYM_FREE_STRING)
+                .map_err(|e| format!("get free_string: {}", e))?
+        };
 
         if let Ok(adapter) = Self::try_south(&lib, free_fn) {
             let name = adapter.meta().name.to_string();
@@ -729,13 +803,22 @@ impl PluginLoader {
         let start: StrFn = *unsafe { lib.get(SYM_SOUTH_START).map_err(|e| e.to_string())? };
         let stop: StrFn = *unsafe { lib.get(SYM_SOUTH_STOP).map_err(|e| e.to_string())? };
         let setting: StrStrFn = *unsafe { lib.get(SYM_SOUTH_SETTING).map_err(|e| e.to_string())? };
-        let validate_tag: StrStrFn = *unsafe { lib.get(SYM_SOUTH_VALIDATE_TAG).map_err(|e| e.to_string())? };
-        let poll_group: StrStrStrFn = *unsafe { lib.get(SYM_SOUTH_POLL_GROUP).map_err(|e| e.to_string())? };
-        let write_tags: StrStrFn = *unsafe { lib.get(SYM_SOUTH_WRITE_TAGS).map_err(|e| e.to_string())? };
-        let list_groups: StrFn = *unsafe { lib.get(SYM_SOUTH_LIST_GROUPS).map_err(|e| e.to_string())? };
-        let list_tags: StrStrFn = *unsafe { lib.get(SYM_SOUTH_LIST_TAGS).map_err(|e| e.to_string())? };
-        let config_schema: VoidFn = *unsafe { lib.get(SYM_SOUTH_CONFIG_SCHEMA).map_err(|e| e.to_string())? };
-        let tag_schema: VoidFn = *unsafe { lib.get(SYM_SOUTH_TAG_SCHEMA).map_err(|e| e.to_string())? };
+        let validate_tag: StrStrFn =
+            *unsafe { lib.get(SYM_SOUTH_VALIDATE_TAG).map_err(|e| e.to_string())? };
+        let poll_group: StrStrStrFn =
+            *unsafe { lib.get(SYM_SOUTH_POLL_GROUP).map_err(|e| e.to_string())? };
+        let write_tags: StrStrFn =
+            *unsafe { lib.get(SYM_SOUTH_WRITE_TAGS).map_err(|e| e.to_string())? };
+        let list_groups: StrFn =
+            *unsafe { lib.get(SYM_SOUTH_LIST_GROUPS).map_err(|e| e.to_string())? };
+        let list_tags: StrStrFn =
+            *unsafe { lib.get(SYM_SOUTH_LIST_TAGS).map_err(|e| e.to_string())? };
+        let config_schema: VoidFn = *unsafe {
+            lib.get(SYM_SOUTH_CONFIG_SCHEMA)
+                .map_err(|e| e.to_string())?
+        };
+        let tag_schema: VoidFn =
+            *unsafe { lib.get(SYM_SOUTH_TAG_SCHEMA).map_err(|e| e.to_string())? };
         let set_log: Option<SetLogFn> = unsafe { lib.get(SYM_SOUTH_SET_LOG).ok().map(|s| *s) };
 
         Ok(SouthSoAdapter {
@@ -783,12 +866,20 @@ impl PluginLoader {
         let start: StrFn = *unsafe { lib.get(SYM_NORTH_START).map_err(|e| e.to_string())? };
         let stop: StrFn = *unsafe { lib.get(SYM_NORTH_STOP).map_err(|e| e.to_string())? };
         let setting: StrStrFn = *unsafe { lib.get(SYM_NORTH_SETTING).map_err(|e| e.to_string())? };
-        let set_subscriptions: StrStrFn =
-            *unsafe { lib.get(SYM_NORTH_SET_SUBSCRIPTIONS).map_err(|e| e.to_string())? };
-        let on_group_data: StrStrFn =
-            *unsafe { lib.get(SYM_NORTH_ON_GROUP_DATA).map_err(|e| e.to_string())? };
-        let config_schema: VoidFn = *unsafe { lib.get(SYM_NORTH_CONFIG_SCHEMA).map_err(|e| e.to_string())? };
-        let connection_status: Option<StrFn> = unsafe { lib.get(SYM_NORTH_CONNECTION_STATUS).ok().map(|s| *s) };
+        let set_subscriptions: StrStrFn = *unsafe {
+            lib.get(SYM_NORTH_SET_SUBSCRIPTIONS)
+                .map_err(|e| e.to_string())?
+        };
+        let on_group_data: StrStrFn = *unsafe {
+            lib.get(SYM_NORTH_ON_GROUP_DATA)
+                .map_err(|e| e.to_string())?
+        };
+        let config_schema: VoidFn = *unsafe {
+            lib.get(SYM_NORTH_CONFIG_SCHEMA)
+                .map_err(|e| e.to_string())?
+        };
+        let connection_status: Option<StrFn> =
+            unsafe { lib.get(SYM_NORTH_CONNECTION_STATUS).ok().map(|s| *s) };
         let set_log: Option<SetLogFn> = unsafe { lib.get(SYM_NORTH_SET_LOG).ok().map(|s| *s) };
 
         Ok(NorthSoAdapter {

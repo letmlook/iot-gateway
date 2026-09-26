@@ -1,13 +1,15 @@
 //! Modbus RTU 插件配置与 Schema。
 
 use gateway_sdk::schema::{ParamAttribute, ParamOption, ParamValid};
-use gateway_sdk::{
-    ConfigSchema, ParamSchema, ParamType, TagRegexEntry, TagSchema,
-};
 use gateway_sdk::PluginConfig;
+use gateway_sdk::{ConfigSchema, ParamSchema, ParamType, TagRegexEntry, TagSchema};
 
 pub fn config_str(config: &PluginConfig, key: &str, default: &str) -> String {
-    config.get(key).and_then(|v| v.as_str()).map(String::from).unwrap_or_else(|| default.to_string())
+    config
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| default.to_string())
 }
 
 pub fn config_schema() -> ConfigSchema {
@@ -22,7 +24,12 @@ pub fn config_schema() -> ConfigSchema {
             attribute: ParamAttribute::Required,
             ty: ParamType::String,
             default: Some(serde_json::json!("COM1")),
-            valid: Some(ParamValid { min: None, max: None, regex: None, length: Some(30) }),
+            valid: Some(ParamValid {
+                min: None,
+                max: None,
+                regex: None,
+                length: Some(30),
+            }),
             ..Default::default()
         })
         .param(ParamSchema {
@@ -35,20 +42,36 @@ pub fn config_schema() -> ConfigSchema {
             attribute: ParamAttribute::Optional,
             ty: ParamType::Int,
             default: Some(serde_json::json!(3000)),
-            valid: Some(ParamValid { min: Some(1000), max: Some(30000), regex: None, length: None }),
+            valid: Some(ParamValid {
+                min: Some(1000),
+                max: Some(30000),
+                regex: None,
+                length: None,
+            }),
             ..Default::default()
         })
         .param(ParamSchema {
             name: "max_retry_times".to_string(),
             name_zh: Some("最大重试次数".to_string()),
             name_en: Some("Maximum Retry Times".to_string()),
-            description: Some("The maximum number of retries after a failed attempt to send a read command".to_string()),
+            description: Some(
+                "The maximum number of retries after a failed attempt to send a read command"
+                    .to_string(),
+            ),
             description_zh: Some("发送读指令失败后最大重试次数".to_string()),
-            description_en: Some("The maximum number of retries after a failed attempt to send a read command".to_string()),
+            description_en: Some(
+                "The maximum number of retries after a failed attempt to send a read command"
+                    .to_string(),
+            ),
             attribute: ParamAttribute::Optional,
             ty: ParamType::Int,
             default: Some(serde_json::json!(0)),
-            valid: Some(ParamValid { min: Some(0), max: Some(3), regex: None, length: None }),
+            valid: Some(ParamValid {
+                min: Some(0),
+                max: Some(3),
+                regex: None,
+                length: None,
+            }),
             ..Default::default()
         })
         .param(ParamSchema {
@@ -61,7 +84,12 @@ pub fn config_schema() -> ConfigSchema {
             attribute: ParamAttribute::Optional,
             ty: ParamType::Int,
             default: Some(serde_json::json!(0)),
-            valid: Some(ParamValid { min: Some(0), max: Some(10000), regex: None, length: None }),
+            valid: Some(ParamValid {
+                min: Some(0),
+                max: Some(10000),
+                regex: None,
+                length: None,
+            }),
             ..Default::default()
         })
         .param(ParamSchema {
@@ -97,11 +125,18 @@ pub fn config_schema() -> ConfigSchema {
             name_en: Some("Send Interval (ms)".to_string()),
             description: Some("Interval between read/write commands in milliseconds".to_string()),
             description_zh: Some("相邻读/写命令之间的间隔，单位毫秒".to_string()),
-            description_en: Some("Interval between read/write commands in milliseconds".to_string()),
+            description_en: Some(
+                "Interval between read/write commands in milliseconds".to_string(),
+            ),
             attribute: ParamAttribute::Optional,
             ty: ParamType::Int,
             default: Some(serde_json::json!(20)),
-            valid: Some(ParamValid { min: Some(0), max: Some(3000), regex: None, length: None }),
+            valid: Some(ParamValid {
+                min: Some(0),
+                max: Some(3000),
+                regex: None,
+                length: None,
+            }),
             ..Default::default()
         })
         .param(ParamSchema {
@@ -129,8 +164,18 @@ pub fn config_schema() -> ConfigSchema {
             default: Some(serde_json::json!(1)),
             valid: None,
             options: Some(vec![
-                ParamOption { value: serde_json::json!(1), label: Some("1".to_string()), label_zh: Some("1".to_string()), label_en: Some("1".to_string()) },
-                ParamOption { value: serde_json::json!(2), label: Some("2".to_string()), label_zh: Some("2".to_string()), label_en: Some("2".to_string()) },
+                ParamOption {
+                    value: serde_json::json!(1),
+                    label: Some("1".to_string()),
+                    label_zh: Some("1".to_string()),
+                    label_en: Some("1".to_string()),
+                },
+                ParamOption {
+                    value: serde_json::json!(2),
+                    label: Some("2".to_string()),
+                    label_zh: Some("2".to_string()),
+                    label_en: Some("2".to_string()),
+                },
             ]),
             ..Default::default()
         })
@@ -146,11 +191,36 @@ pub fn config_schema() -> ConfigSchema {
             default: Some(serde_json::json!("none")),
             valid: None,
             options: Some(vec![
-                ParamOption { value: serde_json::json!("none"), label: Some("none".to_string()), label_zh: Some("none".to_string()), label_en: Some("none".to_string()) },
-                ParamOption { value: serde_json::json!("odd"), label: Some("odd".to_string()), label_zh: Some("odd".to_string()), label_en: Some("odd".to_string()) },
-                ParamOption { value: serde_json::json!("even"), label: Some("even".to_string()), label_zh: Some("even".to_string()), label_en: Some("even".to_string()) },
-                ParamOption { value: serde_json::json!("mark"), label: Some("mark".to_string()), label_zh: Some("mark".to_string()), label_en: Some("mark".to_string()) },
-                ParamOption { value: serde_json::json!("space"), label: Some("space".to_string()), label_zh: Some("space".to_string()), label_en: Some("space".to_string()) },
+                ParamOption {
+                    value: serde_json::json!("none"),
+                    label: Some("none".to_string()),
+                    label_zh: Some("none".to_string()),
+                    label_en: Some("none".to_string()),
+                },
+                ParamOption {
+                    value: serde_json::json!("odd"),
+                    label: Some("odd".to_string()),
+                    label_zh: Some("odd".to_string()),
+                    label_en: Some("odd".to_string()),
+                },
+                ParamOption {
+                    value: serde_json::json!("even"),
+                    label: Some("even".to_string()),
+                    label_zh: Some("even".to_string()),
+                    label_en: Some("even".to_string()),
+                },
+                ParamOption {
+                    value: serde_json::json!("mark"),
+                    label: Some("mark".to_string()),
+                    label_zh: Some("mark".to_string()),
+                    label_en: Some("mark".to_string()),
+                },
+                ParamOption {
+                    value: serde_json::json!("space"),
+                    label: Some("space".to_string()),
+                    label_zh: Some("space".to_string()),
+                    label_en: Some("space".to_string()),
+                },
             ]),
             ..Default::default()
         })
@@ -166,19 +236,84 @@ pub fn config_schema() -> ConfigSchema {
             default: Some(serde_json::json!(9600)),
             valid: None,
             options: Some(vec![
-                ParamOption { value: serde_json::json!(150), label: Some("150".to_string()), label_zh: Some("150".to_string()), label_en: Some("150".to_string()) },
-                ParamOption { value: serde_json::json!(200), label: Some("200".to_string()), label_zh: Some("200".to_string()), label_en: Some("200".to_string()) },
-                ParamOption { value: serde_json::json!(300), label: Some("300".to_string()), label_zh: Some("300".to_string()), label_en: Some("300".to_string()) },
-                ParamOption { value: serde_json::json!(600), label: Some("600".to_string()), label_zh: Some("600".to_string()), label_en: Some("600".to_string()) },
-                ParamOption { value: serde_json::json!(1200), label: Some("1200".to_string()), label_zh: Some("1200".to_string()), label_en: Some("1200".to_string()) },
-                ParamOption { value: serde_json::json!(1800), label: Some("1800".to_string()), label_zh: Some("1800".to_string()), label_en: Some("1800".to_string()) },
-                ParamOption { value: serde_json::json!(2400), label: Some("2400".to_string()), label_zh: Some("2400".to_string()), label_en: Some("2400".to_string()) },
-                ParamOption { value: serde_json::json!(4800), label: Some("4800".to_string()), label_zh: Some("4800".to_string()), label_en: Some("4800".to_string()) },
-                ParamOption { value: serde_json::json!(9600), label: Some("9600".to_string()), label_zh: Some("9600".to_string()), label_en: Some("9600".to_string()) },
-                ParamOption { value: serde_json::json!(19200), label: Some("19200".to_string()), label_zh: Some("19200".to_string()), label_en: Some("19200".to_string()) },
-                ParamOption { value: serde_json::json!(38400), label: Some("38400".to_string()), label_zh: Some("38400".to_string()), label_en: Some("38400".to_string()) },
-                ParamOption { value: serde_json::json!(57600), label: Some("57600".to_string()), label_zh: Some("57600".to_string()), label_en: Some("57600".to_string()) },
-                ParamOption { value: serde_json::json!(115200), label: Some("115200".to_string()), label_zh: Some("115200".to_string()), label_en: Some("115200".to_string()) },
+                ParamOption {
+                    value: serde_json::json!(150),
+                    label: Some("150".to_string()),
+                    label_zh: Some("150".to_string()),
+                    label_en: Some("150".to_string()),
+                },
+                ParamOption {
+                    value: serde_json::json!(200),
+                    label: Some("200".to_string()),
+                    label_zh: Some("200".to_string()),
+                    label_en: Some("200".to_string()),
+                },
+                ParamOption {
+                    value: serde_json::json!(300),
+                    label: Some("300".to_string()),
+                    label_zh: Some("300".to_string()),
+                    label_en: Some("300".to_string()),
+                },
+                ParamOption {
+                    value: serde_json::json!(600),
+                    label: Some("600".to_string()),
+                    label_zh: Some("600".to_string()),
+                    label_en: Some("600".to_string()),
+                },
+                ParamOption {
+                    value: serde_json::json!(1200),
+                    label: Some("1200".to_string()),
+                    label_zh: Some("1200".to_string()),
+                    label_en: Some("1200".to_string()),
+                },
+                ParamOption {
+                    value: serde_json::json!(1800),
+                    label: Some("1800".to_string()),
+                    label_zh: Some("1800".to_string()),
+                    label_en: Some("1800".to_string()),
+                },
+                ParamOption {
+                    value: serde_json::json!(2400),
+                    label: Some("2400".to_string()),
+                    label_zh: Some("2400".to_string()),
+                    label_en: Some("2400".to_string()),
+                },
+                ParamOption {
+                    value: serde_json::json!(4800),
+                    label: Some("4800".to_string()),
+                    label_zh: Some("4800".to_string()),
+                    label_en: Some("4800".to_string()),
+                },
+                ParamOption {
+                    value: serde_json::json!(9600),
+                    label: Some("9600".to_string()),
+                    label_zh: Some("9600".to_string()),
+                    label_en: Some("9600".to_string()),
+                },
+                ParamOption {
+                    value: serde_json::json!(19200),
+                    label: Some("19200".to_string()),
+                    label_zh: Some("19200".to_string()),
+                    label_en: Some("19200".to_string()),
+                },
+                ParamOption {
+                    value: serde_json::json!(38400),
+                    label: Some("38400".to_string()),
+                    label_zh: Some("38400".to_string()),
+                    label_en: Some("38400".to_string()),
+                },
+                ParamOption {
+                    value: serde_json::json!(57600),
+                    label: Some("57600".to_string()),
+                    label_zh: Some("57600".to_string()),
+                    label_en: Some("57600".to_string()),
+                },
+                ParamOption {
+                    value: serde_json::json!(115200),
+                    label: Some("115200".to_string()),
+                    label_zh: Some("115200".to_string()),
+                    label_en: Some("115200".to_string()),
+                },
             ]),
             ..Default::default()
         })
@@ -194,19 +329,54 @@ pub fn config_schema() -> ConfigSchema {
             default: Some(serde_json::json!(8)),
             valid: None,
             options: Some(vec![
-                ParamOption { value: serde_json::json!(5), label: Some("5".to_string()), label_zh: Some("5".to_string()), label_en: Some("5".to_string()) },
-                ParamOption { value: serde_json::json!(6), label: Some("6".to_string()), label_zh: Some("6".to_string()), label_en: Some("6".to_string()) },
-                ParamOption { value: serde_json::json!(7), label: Some("7".to_string()), label_zh: Some("7".to_string()), label_en: Some("7".to_string()) },
-                ParamOption { value: serde_json::json!(8), label: Some("8".to_string()), label_zh: Some("8".to_string()), label_en: Some("8".to_string()) },
+                ParamOption {
+                    value: serde_json::json!(5),
+                    label: Some("5".to_string()),
+                    label_zh: Some("5".to_string()),
+                    label_en: Some("5".to_string()),
+                },
+                ParamOption {
+                    value: serde_json::json!(6),
+                    label: Some("6".to_string()),
+                    label_zh: Some("6".to_string()),
+                    label_en: Some("6".to_string()),
+                },
+                ParamOption {
+                    value: serde_json::json!(7),
+                    label: Some("7".to_string()),
+                    label_zh: Some("7".to_string()),
+                    label_en: Some("7".to_string()),
+                },
+                ParamOption {
+                    value: serde_json::json!(8),
+                    label: Some("8".to_string()),
+                    label_zh: Some("8".to_string()),
+                    label_en: Some("8".to_string()),
+                },
             ]),
             ..Default::default()
         })
         .tag_regex(vec![
-            TagRegexEntry { data_type: "bool".to_string(), regex: r"^[01]x![0-9]+(![0-9]+)?$".to_string() },
-            TagRegexEntry { data_type: "int16".to_string(), regex: r"^[34]x![0-9]+(![0-9]+)?$".to_string() },
-            TagRegexEntry { data_type: "uint16".to_string(), regex: r"^[34]x![0-9]+(![0-9]+)?$".to_string() },
-            TagRegexEntry { data_type: "float32".to_string(), regex: r"^[34]x![0-9]+(!2)?$".to_string() },
-            TagRegexEntry { data_type: "float64".to_string(), regex: r"^[34]x![0-9]+(!4)?$".to_string() },
+            TagRegexEntry {
+                data_type: "bool".to_string(),
+                regex: r"^[01]x![0-9]+(![0-9]+)?$".to_string(),
+            },
+            TagRegexEntry {
+                data_type: "int16".to_string(),
+                regex: r"^[34]x![0-9]+(![0-9]+)?$".to_string(),
+            },
+            TagRegexEntry {
+                data_type: "uint16".to_string(),
+                regex: r"^[34]x![0-9]+(![0-9]+)?$".to_string(),
+            },
+            TagRegexEntry {
+                data_type: "float32".to_string(),
+                regex: r"^[34]x![0-9]+(!2)?$".to_string(),
+            },
+            TagRegexEntry {
+                data_type: "float64".to_string(),
+                regex: r"^[34]x![0-9]+(!4)?$".to_string(),
+            },
         ])
 }
 
@@ -225,8 +395,17 @@ pub fn tag_schema() -> TagSchema {
             "string".to_string(),
             "bytes".to_string(),
         ]),
-        address_format: Some("0x!addr/1x!addr/3x!addr/4x!addr 或 1!400001[.BIT][#ENDIAN]，.LEN 用于 STRING".to_string()),
-        address_format_zh: Some("0x!addr/1x!addr/3x!addr/4x!addr 或 1!400001[.BIT][#ENDIAN]，.LEN 用于 STRING".to_string()),
-        address_format_en: Some("0x!addr/1x!addr/3x!addr/4x!addr or 1!400001[.BIT][#ENDIAN], .LEN for STRING".to_string()),
+        address_format: Some(
+            "0x!addr/1x!addr/3x!addr/4x!addr 或 1!400001[.BIT][#ENDIAN]，.LEN 用于 STRING"
+                .to_string(),
+        ),
+        address_format_zh: Some(
+            "0x!addr/1x!addr/3x!addr/4x!addr 或 1!400001[.BIT][#ENDIAN]，.LEN 用于 STRING"
+                .to_string(),
+        ),
+        address_format_en: Some(
+            "0x!addr/1x!addr/3x!addr/4x!addr or 1!400001[.BIT][#ENDIAN], .LEN for STRING"
+                .to_string(),
+        ),
     }
 }

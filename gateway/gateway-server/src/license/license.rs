@@ -1,8 +1,8 @@
 //! License 文件读取与 RSA 验签校验。
 //! 授权文件为加密的二进制格式，先用 AES-256-GCM 解密，再验签。
 
-use crate::license::hardware;
 use crate::license::error::LicenseError;
+use crate::license::hardware;
 use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
@@ -57,14 +57,16 @@ struct LicenseFile {
 /// 文件格式：nonce(12字节) + ciphertext
 fn decrypt_license_file(encrypted: &[u8]) -> Result<Vec<u8>, LicenseError> {
     if encrypted.len() < 12 {
-        return Err(LicenseError::InvalidFormat("license file too short".to_string()));
+        return Err(LicenseError::InvalidFormat(
+            "license file too short".to_string(),
+        ));
     }
-    
+
     let (nonce_bytes, ciphertext) = encrypted.split_at(12);
     let cipher = Aes256Gcm::new_from_slice(LICENSE_AES_KEY)
         .map_err(|e| LicenseError::Internal(format!("AES key error: {}", e)))?;
     let nonce = Nonce::from_slice(nonce_bytes);
-    
+
     cipher
         .decrypt(nonce, ciphertext)
         .map_err(|_| LicenseError::InvalidFormat("license decryption failed".to_string()))
@@ -74,7 +76,7 @@ fn decrypt_license_file(encrypted: &[u8]) -> Result<Vec<u8>, LicenseError> {
 /// 完全离线，不发起任何网络请求。
 pub fn load_and_verify_license(license_path: &Path) -> Result<LicensePayload, LicenseError> {
     let encrypted = std::fs::read(license_path).map_err(LicenseError::FileNotFound)?;
-    
+
     // 先解密
     let decrypted = decrypt_license_file(&encrypted)?;
     let s = String::from_utf8(decrypted).map_err(|e| LicenseError::InvalidFormat(e.to_string()))?;
@@ -91,8 +93,8 @@ pub fn load_and_verify_license(license_path: &Path) -> Result<LicensePayload, Li
     let public_key = parse_public_key()?;
     verify_signature(&public_key, &payload_bytes, &signature_bytes)?;
 
-    let payload: LicensePayload =
-        serde_json::from_slice(&payload_bytes).map_err(|e| LicenseError::InvalidFormat(e.to_string()))?;
+    let payload: LicensePayload = serde_json::from_slice(&payload_bytes)
+        .map_err(|e| LicenseError::InvalidFormat(e.to_string()))?;
 
     let current_machine_id = hardware::machine_id().map_err(LicenseError::Internal)?;
     if payload.machine_id != current_machine_id {
@@ -136,8 +138,8 @@ fn verify_signature(
     signature_bytes: &[u8],
 ) -> Result<(), LicenseError> {
     use rsa::pkcs1v15::Signature;
-    let signature = Signature::try_from(signature_bytes)
-        .map_err(|_| LicenseError::SignatureInvalid)?;
+    let signature =
+        Signature::try_from(signature_bytes).map_err(|_| LicenseError::SignatureInvalid)?;
     let verifying_key = rsa::pkcs1v15::VerifyingKey::<Sha256>::new(public_key.clone());
     verifying_key
         .verify(payload_bytes, &signature)

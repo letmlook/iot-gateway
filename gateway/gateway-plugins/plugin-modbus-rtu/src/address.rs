@@ -56,8 +56,15 @@ pub fn parse_address_full(addr: &str, start_address: u8) -> Option<ParsedAddress
         let (base, rest) = addr_no_endian.split_at(dot);
         let rest = rest.trim_start_matches('.');
         let rest_upper = rest.to_uppercase();
-        let is_string_len = rest_upper.ends_with('H') || rest_upper.ends_with('L') || rest_upper.ends_with('D') || rest_upper.ends_with('E');
-        let len_str: &str = if is_string_len { rest_upper.trim_end_matches(['H', 'L', 'D', 'E']) } else { &rest_upper };
+        let is_string_len = rest_upper.ends_with('H')
+            || rest_upper.ends_with('L')
+            || rest_upper.ends_with('D')
+            || rest_upper.ends_with('E');
+        let len_str: &str = if is_string_len {
+            rest_upper.trim_end_matches(['H', 'L', 'D', 'E'])
+        } else {
+            &rest_upper
+        };
         if !is_string_len && rest.len() == 1 {
             if let Ok(b) = rest.parse::<u8>() {
                 if b <= 15 {
@@ -68,14 +75,26 @@ pub fn parse_address_full(addr: &str, start_address: u8) -> Option<ParsedAddress
         } else if let Ok(len) = len_str.parse::<usize>() {
             let (a, s, _) = parse_address_core(base, start_address)?;
             let regs = len.div_ceil(2);
-            return Some(ParsedAddress { area: a, start: s, count: regs as u16, bit_index: None, endian });
+            return Some(ParsedAddress {
+                area: a,
+                start: s,
+                count: regs as u16,
+                bit_index: None,
+                endian,
+            });
         } else {
             parse_address_core(base, start_address)?
         }
     } else {
         parse_address_core(addr_no_endian, start_address)?
     };
-    Some(ParsedAddress { area, start, count, bit_index, endian })
+    Some(ParsedAddress {
+        area,
+        start,
+        count,
+        bit_index,
+        endian,
+    })
 }
 
 fn parse_address_core(addr: &str, start_address: u8) -> Option<(ModbusArea, u16, u16)> {
@@ -84,7 +103,15 @@ fn parse_address_core(addr: &str, start_address: u8) -> Option<(ModbusArea, u16,
         return None;
     }
     let first = parts[0].to_lowercase();
-    if first == "0x" || first == "0" || first == "1x" || first == "1" || first == "3x" || first == "3" || first == "4x" || first == "4" {
+    if first == "0x"
+        || first == "0"
+        || first == "1x"
+        || first == "1"
+        || first == "3x"
+        || first == "3"
+        || first == "4x"
+        || first == "4"
+    {
         let area = match first.as_str() {
             "0x" | "0" => ModbusArea::Coil,
             "1x" | "1" => ModbusArea::DiscreteInput,
@@ -108,6 +135,8 @@ fn parse_address_core(addr: &str, start_address: u8) -> Option<(ModbusArea, u16,
     } else {
         return None;
     };
-    let start = (addr_num.saturating_sub(base).saturating_sub(start_address as u32)) as u16;
+    let start = (addr_num
+        .saturating_sub(base)
+        .saturating_sub(start_address as u32)) as u16;
     Some((area, start, 1u16))
 }

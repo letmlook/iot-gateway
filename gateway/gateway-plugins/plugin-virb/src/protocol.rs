@@ -1,7 +1,6 @@
 //! 联能振动采集器协议：与 dataacq-plugin-virb (YE6235D/YE6235D2) 一致。
 //! UDP 通信：上位机发控制命令，采集器主动推送波形数据 (0x40)。
 
-
 /// 动作类型：上位机->采集器
 const STOP_GRAB: u8 = 0x00;
 const START_GRAB: u8 = 0x01;
@@ -85,7 +84,7 @@ fn parse_i16(data: &[u8], e: VirbEndianess) -> i32 {
     if data.len() < 2 {
         return 0;
     }
-    
+
     match e {
         VirbEndianess::AB => i16::from_be_bytes([data[0], data[1]]) as i32,
         VirbEndianess::BA => i16::from_le_bytes([data[0], data[1]]) as i32,

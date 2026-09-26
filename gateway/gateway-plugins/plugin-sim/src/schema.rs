@@ -1,9 +1,7 @@
 //! 模拟插件配置与标签 Schema。
 
-use gateway_sdk::{
-    ConfigSchema, ParamSchema, ParamType, TagRegexEntry, TagSchema,
-};
 use gateway_sdk::ParamAttribute;
+use gateway_sdk::{ConfigSchema, ParamSchema, ParamType, TagRegexEntry, TagSchema};
 
 pub fn config_schema() -> ConfigSchema {
     ConfigSchema::new()
@@ -20,12 +18,10 @@ pub fn config_schema() -> ConfigSchema {
             valid: None,
             ..Default::default()
         })
-        .tag_regex(vec![
-            TagRegexEntry {
-                data_type: "float64".to_string(),
-                regex: r"^[0-9]+$".to_string(),
-            },
-        ])
+        .tag_regex(vec![TagRegexEntry {
+            data_type: "float64".to_string(),
+            regex: r"^[0-9]+$".to_string(),
+        }])
 }
 
 pub fn tag_schema() -> TagSchema {

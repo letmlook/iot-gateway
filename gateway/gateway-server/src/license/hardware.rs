@@ -1,7 +1,7 @@
 //! 硬件特征采集：CPU/系统标识 + MAC，经 SHA-256 生成唯一机器码。
 //! 完全离线，不进行任何网络请求。
 
-use machineid_rs::{Encryption, IdBuilder, HWIDComponent};
+use machineid_rs::{Encryption, HWIDComponent, IdBuilder};
 use sha2::{Digest, Sha256};
 
 /// 生成当前设备的唯一机器码（SHA-256 十六进制字符串）。

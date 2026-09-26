@@ -187,7 +187,11 @@ impl Config {
             backup_secret_ephemeral: cf.backup_secret.is_empty(),
             backup_secret: cf.backup_secret,
             allowed_origins: cf.allowed_origins,
-            bind: if cf.bind.is_empty() { default_bind_str() } else { cf.bind },
+            bind: if cf.bind.is_empty() {
+                default_bind_str()
+            } else {
+                cf.bind
+            },
             master_secret: None,
             enforce_roles: true,
             persist_debounce_ms: default_persist_debounce_ms(),

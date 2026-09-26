@@ -1,18 +1,17 @@
 //! OPC UA 插件配置与 Schema 定义。
 
-use gateway_sdk::{
-    ConfigSchema, ParamAttribute, ParamOption, ParamSchema, ParamType, ParamValid,
-    TagRegexEntry, TagSchema,
-};
 use gateway_sdk::PluginConfig;
+use gateway_sdk::{
+    ConfigSchema, ParamAttribute, ParamOption, ParamSchema, ParamType, ParamValid, TagRegexEntry,
+    TagSchema,
+};
 
 pub const DEFAULT_ENDPOINT: &str = "opc.tcp://127.0.0.1:4840/";
 
 /// 支持的 tag data_type 白名单（校验时大小写不敏感）
 pub const TAG_DATA_TYPES: &[&str] = &[
-    "int8", "int16", "int32", "int64",
-    "uint8", "uint16", "uint32", "uint64",
-    "float32", "float64", "bool", "string", "bytes",
+    "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float32", "float64",
+    "bool", "string", "bytes",
 ];
 
 pub fn config_str(config: &PluginConfig, key: &str, default: &str) -> String {
@@ -38,7 +37,9 @@ pub fn config_schema() -> ConfigSchema {
             valid: Some(ParamValid {
                 min: None,
                 max: None,
-                regex: Some(r"^opc\.tcp:\/\/\S+:\d+(\/[\w\-._~:/?#\[\]@!$&'()*+,;=]*)?$".to_string()),
+                regex: Some(
+                    r"^opc\.tcp:\/\/\S+:\d+(\/[\w\-._~:/?#\[\]@!$&'()*+,;=]*)?$".to_string(),
+                ),
                 length: Some(256),
             }),
             ..Default::default()
@@ -50,7 +51,12 @@ pub fn config_schema() -> ConfigSchema {
             attribute: ParamAttribute::Optional,
             ty: ParamType::String,
             default: Some(serde_json::json!("")),
-            valid: Some(ParamValid { min: None, max: None, regex: None, length: Some(30) }),
+            valid: Some(ParamValid {
+                min: None,
+                max: None,
+                regex: None,
+                length: Some(30),
+            }),
             ..Default::default()
         })
         .param(ParamSchema {
@@ -60,7 +66,12 @@ pub fn config_schema() -> ConfigSchema {
             attribute: ParamAttribute::Optional,
             ty: ParamType::String,
             default: Some(serde_json::json!("")),
-            valid: Some(ParamValid { min: None, max: None, regex: None, length: Some(30) }),
+            valid: Some(ParamValid {
+                min: None,
+                max: None,
+                regex: None,
+                length: Some(30),
+            }),
             ..Default::default()
         })
         .param(ParamSchema {
@@ -70,7 +81,12 @@ pub fn config_schema() -> ConfigSchema {
             attribute: ParamAttribute::Optional,
             ty: ParamType::File,
             default: None,
-            valid: Some(ParamValid { min: None, max: None, regex: None, length: Some(81960) }),
+            valid: Some(ParamValid {
+                min: None,
+                max: None,
+                regex: None,
+                length: Some(81960),
+            }),
             ..Default::default()
         })
         .param(ParamSchema {
@@ -80,7 +96,12 @@ pub fn config_schema() -> ConfigSchema {
             attribute: ParamAttribute::Optional,
             ty: ParamType::File,
             default: None,
-            valid: Some(ParamValid { min: None, max: None, regex: None, length: Some(81960) }),
+            valid: Some(ParamValid {
+                min: None,
+                max: None,
+                regex: None,
+                length: Some(81960),
+            }),
             ..Default::default()
         })
         .param(ParamSchema {
@@ -92,9 +113,24 @@ pub fn config_schema() -> ConfigSchema {
             default: Some(serde_json::json!(1)),
             valid: None,
             options: Some(vec![
-                ParamOption { value: serde_json::json!(1), label: Some("None".to_string()), label_zh: Some("无".to_string()), label_en: Some("None".to_string()) },
-                ParamOption { value: serde_json::json!(2), label: Some("Sign".to_string()), label_zh: Some("签名".to_string()), label_en: Some("Sign".to_string()) },
-                ParamOption { value: serde_json::json!(3), label: Some("Sign & Encrypt".to_string()), label_zh: Some("签名与加密".to_string()), label_en: Some("Sign & Encrypt".to_string()) },
+                ParamOption {
+                    value: serde_json::json!(1),
+                    label: Some("None".to_string()),
+                    label_zh: Some("无".to_string()),
+                    label_en: Some("None".to_string()),
+                },
+                ParamOption {
+                    value: serde_json::json!(2),
+                    label: Some("Sign".to_string()),
+                    label_zh: Some("签名".to_string()),
+                    label_en: Some("Sign".to_string()),
+                },
+                ParamOption {
+                    value: serde_json::json!(3),
+                    label: Some("Sign & Encrypt".to_string()),
+                    label_zh: Some("签名与加密".to_string()),
+                    label_en: Some("Sign & Encrypt".to_string()),
+                },
             ]),
             ..Default::default()
         })
@@ -107,9 +143,24 @@ pub fn config_schema() -> ConfigSchema {
             default: Some(serde_json::json!(1)),
             valid: None,
             options: Some(vec![
-                ParamOption { value: serde_json::json!(1), label: Some("Read".to_string()), label_zh: Some("读取".to_string()), label_en: Some("Read".to_string()) },
-                ParamOption { value: serde_json::json!(2), label: Some("Subscribe".to_string()), label_zh: Some("订阅".to_string()), label_en: Some("Subscribe".to_string()) },
-                ParamOption { value: serde_json::json!(3), label: Some("Read & Subscribe".to_string()), label_zh: Some("读取与订阅".to_string()), label_en: Some("Read & Subscribe".to_string()) },
+                ParamOption {
+                    value: serde_json::json!(1),
+                    label: Some("Read".to_string()),
+                    label_zh: Some("读取".to_string()),
+                    label_en: Some("Read".to_string()),
+                },
+                ParamOption {
+                    value: serde_json::json!(2),
+                    label: Some("Subscribe".to_string()),
+                    label_zh: Some("订阅".to_string()),
+                    label_en: Some("Subscribe".to_string()),
+                },
+                ParamOption {
+                    value: serde_json::json!(3),
+                    label: Some("Read & Subscribe".to_string()),
+                    label_zh: Some("读取与订阅".to_string()),
+                    label_en: Some("Read & Subscribe".to_string()),
+                },
             ]),
             ..Default::default()
         })
@@ -120,7 +171,12 @@ pub fn config_schema() -> ConfigSchema {
             attribute: ParamAttribute::Optional,
             ty: ParamType::Int,
             default: Some(serde_json::json!(500)),
-            valid: Some(ParamValid { min: Some(100), max: Some(65535), regex: None, length: None }),
+            valid: Some(ParamValid {
+                min: Some(100),
+                max: Some(65535),
+                regex: None,
+                length: None,
+            }),
             ..Default::default()
         })
         .tag_regex(tag_regex_entries())
@@ -129,19 +185,58 @@ pub fn config_schema() -> ConfigSchema {
 fn tag_regex_entries() -> Vec<TagRegexEntry> {
     let regex = r"^[0-9]+![0-9]+$|^[0-9]+![A-Za-z0-9_.]+$".to_string();
     vec![
-        TagRegexEntry { data_type: "int8".to_string(), regex: regex.clone() },
-        TagRegexEntry { data_type: "int16".to_string(), regex: regex.clone() },
-        TagRegexEntry { data_type: "int32".to_string(), regex: regex.clone() },
-        TagRegexEntry { data_type: "int64".to_string(), regex: regex.clone() },
-        TagRegexEntry { data_type: "uint8".to_string(), regex: regex.clone() },
-        TagRegexEntry { data_type: "uint16".to_string(), regex: regex.clone() },
-        TagRegexEntry { data_type: "uint32".to_string(), regex: regex.clone() },
-        TagRegexEntry { data_type: "uint64".to_string(), regex: regex.clone() },
-        TagRegexEntry { data_type: "float32".to_string(), regex: regex.clone() },
-        TagRegexEntry { data_type: "float64".to_string(), regex: regex.clone() },
-        TagRegexEntry { data_type: "bool".to_string(), regex: regex.clone() },
-        TagRegexEntry { data_type: "string".to_string(), regex: regex.clone() },
-        TagRegexEntry { data_type: "bytes".to_string(), regex: regex.clone() },
+        TagRegexEntry {
+            data_type: "int8".to_string(),
+            regex: regex.clone(),
+        },
+        TagRegexEntry {
+            data_type: "int16".to_string(),
+            regex: regex.clone(),
+        },
+        TagRegexEntry {
+            data_type: "int32".to_string(),
+            regex: regex.clone(),
+        },
+        TagRegexEntry {
+            data_type: "int64".to_string(),
+            regex: regex.clone(),
+        },
+        TagRegexEntry {
+            data_type: "uint8".to_string(),
+            regex: regex.clone(),
+        },
+        TagRegexEntry {
+            data_type: "uint16".to_string(),
+            regex: regex.clone(),
+        },
+        TagRegexEntry {
+            data_type: "uint32".to_string(),
+            regex: regex.clone(),
+        },
+        TagRegexEntry {
+            data_type: "uint64".to_string(),
+            regex: regex.clone(),
+        },
+        TagRegexEntry {
+            data_type: "float32".to_string(),
+            regex: regex.clone(),
+        },
+        TagRegexEntry {
+            data_type: "float64".to_string(),
+            regex: regex.clone(),
+        },
+        TagRegexEntry {
+            data_type: "bool".to_string(),
+            regex: regex.clone(),
+        },
+        TagRegexEntry {
+            data_type: "string".to_string(),
+            regex: regex.clone(),
+        },
+        TagRegexEntry {
+            data_type: "bytes".to_string(),
+            regex: regex.clone(),
+        },
     ]
 }
 

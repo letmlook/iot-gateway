@@ -19,7 +19,8 @@ pub extern "C-unwind" fn gateway_plugin_abi_version() -> u32 {
 }
 
 /// 宿主提供给 .so 插件的节点日志回调：level (0=Error,1=Warn,2=Info,3=Debug,4=Trace)，node_id 与 message 均为 UTF-8 C 字符串。
-pub type PluginLogCallback = unsafe extern "C-unwind" fn(level: u8, node_id: *const c_char, message: *const c_char);
+pub type PluginLogCallback =
+    unsafe extern "C-unwind" fn(level: u8, node_id: *const c_char, message: *const c_char);
 
 /// 结果 JSON：`{"ok":true}` 或 `{"ok":false,"err":"..."}`。插件分配，宿主复制后调用 `gateway_plugin_free_string` 释放。
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -31,7 +32,10 @@ pub struct FfiResult {
 
 impl FfiResult {
     pub fn success() -> Self {
-        Self { ok: true, err: None }
+        Self {
+            ok: true,
+            err: None,
+        }
     }
     pub fn failure(msg: impl Into<String>) -> Self {
         Self {

@@ -24,7 +24,12 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn new(name: impl Into<String>, kind: NodeKind, plugin_name: impl Into<String>, config: PluginConfig) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        kind: NodeKind,
+        plugin_name: impl Into<String>,
+        config: PluginConfig,
+    ) -> Self {
         Self {
             config: NodeConfig {
                 id: NodeId::new(),

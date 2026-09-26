@@ -1,8 +1,8 @@
 //! .so/.dll 插件 C ABI 导出，供网关 libloading 动态加载。
 
 use gateway_sdk::ffi::{alloc_c_string, meta_to_ffi, FfiResult};
-use gateway_sdk::{GroupId, NodeId, PluginConfig, SouthPlugin, Tag, TagId};
 use gateway_sdk::types::DataValue;
+use gateway_sdk::{GroupId, NodeId, PluginConfig, SouthPlugin, Tag, TagId};
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_void};
 
@@ -17,7 +17,9 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
 fn result_json(r: gateway_sdk::PluginResult<()>) -> *mut c_char {
     match r {
         Ok(()) => alloc_c_string(&serde_json::to_string(&FfiResult::success()).unwrap_or_default()),
-        Err(e) => alloc_c_string(&serde_json::to_string(&FfiResult::failure(e.to_string())).unwrap_or_default()),
+        Err(e) => alloc_c_string(
+            &serde_json::to_string(&FfiResult::failure(e.to_string())).unwrap_or_default(),
+        ),
     }
 }
 
@@ -149,7 +151,11 @@ pub unsafe extern "C-unwind" fn gateway_south_plugin_validate_tag(
     let node_id: NodeId = serde_json::from_str(&n).unwrap_or_default();
     let tag: Tag = match serde_json::from_str(&t) {
         Ok(x) => x,
-        Err(_) => return alloc_c_string(&serde_json::to_string(&FfiResult::failure("invalid tag json")).unwrap_or_default()),
+        Err(_) => {
+            return alloc_c_string(
+                &serde_json::to_string(&FfiResult::failure("invalid tag json")).unwrap_or_default(),
+            )
+        }
     };
     let p = south(handle);
     result_json(block_on(p.validate_tag(node_id, &tag)))
@@ -171,7 +177,9 @@ pub unsafe extern "C-unwind" fn gateway_south_plugin_poll_group(
     let p = south(handle);
     match block_on(p.poll_group(node_id, group_id, &tags)) {
         Ok(v) => alloc_c_string(&serde_json::to_string(&v).unwrap_or_default()),
-        Err(e) => alloc_c_string(&serde_json::to_string(&FfiResult::failure(e.to_string())).unwrap_or_default()),
+        Err(e) => alloc_c_string(
+            &serde_json::to_string(&FfiResult::failure(e.to_string())).unwrap_or_default(),
+        ),
     }
 }
 
@@ -199,7 +207,9 @@ pub unsafe extern "C-unwind" fn gateway_south_plugin_list_groups(
     let p = south(handle);
     match block_on(p.list_groups(node_id)) {
         Ok(v) => alloc_c_string(&serde_json::to_string(&v).unwrap_or_default()),
-        Err(e) => alloc_c_string(&serde_json::to_string(&FfiResult::failure(e.to_string())).unwrap_or_default()),
+        Err(e) => alloc_c_string(
+            &serde_json::to_string(&FfiResult::failure(e.to_string())).unwrap_or_default(),
+        ),
     }
 }
 
@@ -216,12 +226,16 @@ pub unsafe extern "C-unwind" fn gateway_south_plugin_list_tags(
     let p = south(handle);
     match block_on(p.list_tags(node_id, group_id)) {
         Ok(v) => alloc_c_string(&serde_json::to_string(&v).unwrap_or_default()),
-        Err(e) => alloc_c_string(&serde_json::to_string(&FfiResult::failure(e.to_string())).unwrap_or_default()),
+        Err(e) => alloc_c_string(
+            &serde_json::to_string(&FfiResult::failure(e.to_string())).unwrap_or_default(),
+        ),
     }
 }
 
 #[no_mangle]
-pub unsafe extern "C-unwind" fn gateway_south_plugin_config_schema(handle: *mut c_void) -> *mut c_char {
+pub unsafe extern "C-unwind" fn gateway_south_plugin_config_schema(
+    handle: *mut c_void,
+) -> *mut c_char {
     if handle.is_null() {
         return std::ptr::null_mut();
     }
@@ -233,7 +247,9 @@ pub unsafe extern "C-unwind" fn gateway_south_plugin_config_schema(handle: *mut 
 }
 
 #[no_mangle]
-pub unsafe extern "C-unwind" fn gateway_south_plugin_tag_schema(handle: *mut c_void) -> *mut c_char {
+pub unsafe extern "C-unwind" fn gateway_south_plugin_tag_schema(
+    handle: *mut c_void,
+) -> *mut c_char {
     if handle.is_null() {
         return std::ptr::null_mut();
     }

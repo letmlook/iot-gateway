@@ -4,7 +4,7 @@ use crate::config::Config;
 use crate::license::FeatureManager;
 use crate::logging::NodeLogNameMap;
 use crate::users::UserStore;
-use gateway_core::{persist_save_secret, PluginLoader, Manager};
+use gateway_core::{persist_save_secret, Manager, PluginLoader};
 use std::sync::Arc;
 use tracing::warn;
 
@@ -70,7 +70,8 @@ impl AppState {
 
     /// 是否仍有未落盘的变更
     pub fn persist_pending(&self) -> bool {
-        self.persist_dirty.load(std::sync::atomic::Ordering::Relaxed)
+        self.persist_dirty
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// 立即把当前快照落盘（合并此前累积的所有变更）。

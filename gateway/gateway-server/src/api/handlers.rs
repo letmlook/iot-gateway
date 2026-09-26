@@ -15,7 +15,9 @@ use crate::logging;
 use crate::state::AppState;
 
 fn parse_node_id(s: &str) -> Result<NodeId, ApiError> {
-    Uuid::parse_str(s).map(NodeId).map_err(|_| ApiError::bad_request("invalid node id"))
+    Uuid::parse_str(s)
+        .map(NodeId)
+        .map_err(|_| ApiError::bad_request("invalid node id"))
 }
 
 fn parse_group_id(s: &str) -> Result<gateway_sdk::GroupId, ApiError> {
@@ -162,10 +164,14 @@ pub struct ChangePasswordRequest {
 }
 
 fn parse_user_id(s: &str) -> Result<String, ApiError> {
-    Uuid::parse_str(s).map(|_| s.to_string()).or(Ok(s.to_string()))
+    Uuid::parse_str(s)
+        .map(|_| s.to_string())
+        .or(Ok(s.to_string()))
 }
 
-pub async fn list_users(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+pub async fn list_users(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let list = state.user_store.list().await.map_err(ApiError::internal)?;
     let arr: Vec<serde_json::Value> = list
         .into_iter()
@@ -188,10 +194,7 @@ pub async fn create_user(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let username = body.username.as_deref().unwrap_or("").trim();
     let password = body.password.as_deref().unwrap_or("");
-    let role = body
-        .role
-        .as_deref()
-        .unwrap_or("operator");
+    let role = body.role.as_deref().unwrap_or("operator");
     let role_enum = match role {
         "admin" => crate::users::UserRole::Admin,
         "viewer" => crate::users::UserRole::Viewer,
@@ -237,7 +240,11 @@ pub async fn update_user(
     Json(body): Json<UpdateUserRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let id = parse_user_id(&id)?;
-    let username = body.username.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty());
+    let username = body
+        .username
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
     let role = body.role.as_deref().map(|r| match r {
         "admin" => crate::users::UserRole::Admin,
         "viewer" => crate::users::UserRole::Viewer,
@@ -306,26 +313,25 @@ pub async fn license_machine_id() -> Result<Json<serde_json::Value>, ApiError> {
 pub async fn license_status(State(state): State<AppState>) -> Json<serde_json::Value> {
     let has_license = state.feature_manager.has_license();
     let raw_features = state.feature_manager.granted_features();
-    
+
     // 如果 features 中包含 all_plugins，则展开为所有已加载的插件名称
     let features: Vec<String> = if raw_features.iter().any(|f| f == "all_plugins") {
         // 获取所有已加载的插件名称
-        let mut all_plugins: Vec<String> = state.manager.south_plugins()
+        let mut all_plugins: Vec<String> = state
+            .manager
+            .south_plugins()
             .into_iter()
             .map(|p| p.name)
             .collect();
-        all_plugins.extend(
-            state.manager.north_plugins()
-                .into_iter()
-                .map(|p| p.name)
-        );
+        all_plugins.extend(state.manager.north_plugins().into_iter().map(|p| p.name));
         // 去重
         all_plugins.sort();
         all_plugins.dedup();
         all_plugins
     } else {
         // 将 plugin:xxx 格式转换为纯插件名
-        raw_features.iter()
+        raw_features
+            .iter()
             .filter_map(|f| {
                 if let Some(name) = f.strip_prefix("plugin:") {
                     Some(name.to_string())
@@ -337,7 +343,7 @@ pub async fn license_status(State(state): State<AppState>) -> Json<serde_json::V
             })
             .collect()
     };
-    
+
     let licensed_plugins = state.feature_manager.licensed_plugins();
     let free_plugins: Vec<&str> = crate::license::FeatureManager::free_plugins().to_vec();
     let max_tags = state.feature_manager.max_tags();
@@ -353,14 +359,18 @@ pub async fn license_status(State(state): State<AppState>) -> Json<serde_json::V
 }
 
 /// 演示：收费功能 pro_tool。仅当授权中包含 "pro_tool" 时可访问，否则 403。
-pub async fn license_pro_tool(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+pub async fn license_pro_tool(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     if state.feature_manager.can_access("pro_tool") {
         Ok(Json(serde_json::json!({
             "allowed": true,
             "message": "Pro tool access granted.",
         })))
     } else {
-        Err(ApiError::forbidden("此功能需要授权，请在授权文件中包含 pro_tool"))
+        Err(ApiError::forbidden(
+            "此功能需要授权，请在授权文件中包含 pro_tool",
+        ))
     }
 }
 
@@ -370,10 +380,17 @@ pub async fn upload_license(
     mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let mut file_data: Option<Bytes> = None;
-    while let Some(field) = multipart.next_field().await.map_err(|e| ApiError::bad_request(e.to_string()))? {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError::bad_request(e.to_string()))?
+    {
         let name = field.name().unwrap_or("").to_string();
         if name == "file" {
-            let bytes = field.bytes().await.map_err(|e| ApiError::bad_request(e.to_string()))?;
+            let bytes = field
+                .bytes()
+                .await
+                .map_err(|e| ApiError::bad_request(e.to_string()))?;
             if !bytes.is_empty() {
                 file_data = Some(bytes);
             }
@@ -384,9 +401,11 @@ pub async fn upload_license(
     // 保存到数据目录
     let license_path = state.config.license_path();
     if let Some(parent) = license_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| ApiError::internal(format!("create dir failed: {}", e)))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| ApiError::internal(format!("create dir failed: {}", e)))?;
     }
-    std::fs::write(&license_path, &data).map_err(|e| ApiError::internal(format!("write license failed: {}", e)))?;
+    std::fs::write(&license_path, &data)
+        .map_err(|e| ApiError::internal(format!("write license failed: {}", e)))?;
 
     // 验证授权文件
     match crate::license::load_and_verify_license(&license_path) {
@@ -404,7 +423,10 @@ pub async fn upload_license(
             // 验证失败，删除上传的文件
             let _ = std::fs::remove_file(&license_path);
             tracing::warn!("license upload failed: {}", e);
-            Err(ApiError::bad_request(format!("license validation failed: {}", e)))
+            Err(ApiError::bad_request(format!(
+                "license validation failed: {}",
+                e
+            )))
         }
     }
 }
@@ -416,11 +438,18 @@ pub async fn upload_config_file(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let mut file_data: Option<Bytes> = None;
     let mut original_name: Option<String> = None;
-    while let Some(field) = multipart.next_field().await.map_err(|e| ApiError::bad_request(e.to_string()))? {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError::bad_request(e.to_string()))?
+    {
         let name = field.name().unwrap_or("").to_string();
         if name == "file" {
             original_name = field.file_name().map(|s| s.to_string());
-            let bytes = field.bytes().await.map_err(|e| ApiError::bad_request(e.to_string()))?;
+            let bytes = field
+                .bytes()
+                .await
+                .map_err(|e| ApiError::bad_request(e.to_string()))?;
             if !bytes.is_empty() {
                 file_data = Some(bytes);
             }
@@ -429,7 +458,8 @@ pub async fn upload_config_file(
     let data = file_data.ok_or_else(|| ApiError::bad_request("missing file"))?;
 
     let uploads_dir = state.config.data_dir.join("uploads");
-    std::fs::create_dir_all(&uploads_dir).map_err(|e| ApiError::internal(format!("create uploads dir failed: {}", e)))?;
+    std::fs::create_dir_all(&uploads_dir)
+        .map_err(|e| ApiError::internal(format!("create uploads dir failed: {}", e)))?;
 
     let ext = original_name
         .as_deref()
@@ -438,7 +468,8 @@ pub async fn upload_config_file(
         .unwrap_or("bin");
     let save_name = format!("{}.{}", uuid::Uuid::new_v4(), ext);
     let save_path = uploads_dir.join(&save_name);
-    std::fs::write(&save_path, &data).map_err(|e| ApiError::internal(format!("write file failed: {}", e)))?;
+    std::fs::write(&save_path, &data)
+        .map_err(|e| ApiError::internal(format!("write file failed: {}", e)))?;
 
     let path_str = save_path
         .canonicalize()
@@ -453,16 +484,16 @@ pub async fn reset_license(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let license_path = state.config.license_path();
-    
+
     // 删除授权文件（如果存在）
     if license_path.exists() {
         std::fs::remove_file(&license_path)
             .map_err(|e| ApiError::internal(format!("delete license file failed: {}", e)))?;
     }
-    
+
     // 清除内存中的授权状态
     state.feature_manager.clear_license();
-    
+
     tracing::info!("license reset: file deleted and memory cleared");
     Ok(Json(serde_json::json!({
         "ok": true,
@@ -541,15 +572,25 @@ pub async fn restore(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let mut file_data: Option<Bytes> = None;
     let mut password: Option<String> = None;
-    while let Some(field) = multipart.next_field().await.map_err(|e| ApiError::bad_request(e.to_string()))? {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError::bad_request(e.to_string()))?
+    {
         let name = field.name().unwrap_or("").to_string();
         if name == "file" {
-            let bytes = field.bytes().await.map_err(|e| ApiError::bad_request(e.to_string()))?;
+            let bytes = field
+                .bytes()
+                .await
+                .map_err(|e| ApiError::bad_request(e.to_string()))?;
             if !bytes.is_empty() {
                 file_data = Some(bytes);
             }
         } else if name == "password" {
-            let s = field.text().await.map_err(|e| ApiError::bad_request(e.to_string()))?;
+            let s = field
+                .text()
+                .await
+                .map_err(|e| ApiError::bad_request(e.to_string()))?;
             password = Some(s);
         }
     }
@@ -591,7 +632,9 @@ pub async fn restore(
     state.manager.apply_snapshot(&snap).await;
     state.sync_node_log_names();
     state.persist().await;
-    Ok(Json(serde_json::json!({ "ok": true, "message": "restored" })))
+    Ok(Json(
+        serde_json::json!({ "ok": true, "message": "restored" }),
+    ))
 }
 
 /// Prometheus 格式指标（节点数、运行数、插件数、数据流链路等）
@@ -651,10 +694,20 @@ pub async fn metrics(State(state): State<AppState>) -> (axum::http::StatusCode, 
          # HELP gateway_south_poll_err Total south poll_group errors.\n\
          # TYPE gateway_south_poll_err counter\n\
          gateway_south_poll_err {}\n",
-        nodes_total, nodes_running, plugins_south, plugins_north,
-        df.south_published, df.bus_no_subscribers, df.north_received, df.north_filtered,
-        df.north_forwarded, df.north_on_group_data_ok, df.north_on_group_data_err, df.north_lagged,
-        df.south_poll_timeout, df.south_poll_err,
+        nodes_total,
+        nodes_running,
+        plugins_south,
+        plugins_north,
+        df.south_published,
+        df.bus_no_subscribers,
+        df.north_received,
+        df.north_filtered,
+        df.north_forwarded,
+        df.north_on_group_data_ok,
+        df.north_on_group_data_err,
+        df.north_lagged,
+        df.south_poll_timeout,
+        df.south_poll_err,
     );
     // 维度化指标：定位「是哪个北向节点在丢数据」
     let mut body = body;
@@ -689,37 +742,45 @@ pub async fn metrics(State(state): State<AppState>) -> (axum::http::StatusCode, 
 /// 数据流链路监控：返回各环节计数与点位级统计，用于排查「数据未正常发出」问题
 pub async fn data_flow(State(state): State<AppState>) -> Json<serde_json::Value> {
     let m = state.manager.data_flow_snapshot();
-    let published_per_tag: Vec<serde_json::Value> = m.published_per_tag.iter().map(|s| {
-        let tag = state.manager.store.tag_get(s.tag_id);
-        let south_node = state.manager.node_get(s.south_node_id);
-        let group = state.manager.store.group_get(s.south_node_id, s.group_id);
-        serde_json::json!({
-            "south_node_id": s.south_node_id,
-            "south_node_name": south_node.as_ref().map(|n| &n.config.name),
-            "group_id": s.group_id,
-            "group_name": group.as_ref().map(|g| &g.name),
-            "tag_id": s.tag_id,
-            "tag_name": tag.as_ref().map(|t| &t.name),
-            "count": s.count,
+    let published_per_tag: Vec<serde_json::Value> = m
+        .published_per_tag
+        .iter()
+        .map(|s| {
+            let tag = state.manager.store.tag_get(s.tag_id);
+            let south_node = state.manager.node_get(s.south_node_id);
+            let group = state.manager.store.group_get(s.south_node_id, s.group_id);
+            serde_json::json!({
+                "south_node_id": s.south_node_id,
+                "south_node_name": south_node.as_ref().map(|n| &n.config.name),
+                "group_id": s.group_id,
+                "group_name": group.as_ref().map(|g| &g.name),
+                "tag_id": s.tag_id,
+                "tag_name": tag.as_ref().map(|t| &t.name),
+                "count": s.count,
+            })
         })
-    }).collect();
-    let forwarded_per_tag: Vec<serde_json::Value> = m.forwarded_per_tag.iter().map(|s| {
-        let tag = state.manager.store.tag_get(s.tag_id);
-        let north_node = state.manager.node_get(s.north_node_id);
-        let south_node = state.manager.node_get(s.south_node_id);
-        let group = state.manager.store.group_get(s.south_node_id, s.group_id);
-        serde_json::json!({
-            "north_node_id": s.north_node_id,
-            "north_node_name": north_node.as_ref().map(|n| &n.config.name),
-            "south_node_id": s.south_node_id,
-            "south_node_name": south_node.as_ref().map(|n| &n.config.name),
-            "group_id": s.group_id,
-            "group_name": group.as_ref().map(|g| &g.name),
-            "tag_id": s.tag_id,
-            "tag_name": tag.as_ref().map(|t| &t.name),
-            "count": s.count,
+        .collect();
+    let forwarded_per_tag: Vec<serde_json::Value> = m
+        .forwarded_per_tag
+        .iter()
+        .map(|s| {
+            let tag = state.manager.store.tag_get(s.tag_id);
+            let north_node = state.manager.node_get(s.north_node_id);
+            let south_node = state.manager.node_get(s.south_node_id);
+            let group = state.manager.store.group_get(s.south_node_id, s.group_id);
+            serde_json::json!({
+                "north_node_id": s.north_node_id,
+                "north_node_name": north_node.as_ref().map(|n| &n.config.name),
+                "south_node_id": s.south_node_id,
+                "south_node_name": south_node.as_ref().map(|n| &n.config.name),
+                "group_id": s.group_id,
+                "group_name": group.as_ref().map(|g| &g.name),
+                "tag_id": s.tag_id,
+                "tag_name": tag.as_ref().map(|t| &t.name),
+                "count": s.count,
+            })
         })
-    }).collect();
+        .collect();
     Json(serde_json::json!({
         "metrics": {
             "south_published": m.south_published,
@@ -810,7 +871,9 @@ pub async fn north_plugin_config_schema(
         .manager
         .north_plugin(&name)
         .ok_or_else(|| ApiError::not_found("plugin not found"))?;
-    let s = p.config_schema().ok_or_else(|| ApiError::not_found("no config_schema"))?;
+    let s = p
+        .config_schema()
+        .ok_or_else(|| ApiError::not_found("no config_schema"))?;
     Ok(Json(s))
 }
 
@@ -822,7 +885,9 @@ pub async fn south_plugin_config_schema(
         .manager
         .south_plugin(&name)
         .ok_or_else(|| ApiError::not_found("plugin not found"))?;
-    let s = p.config_schema().ok_or_else(|| ApiError::not_found("no config_schema"))?;
+    let s = p
+        .config_schema()
+        .ok_or_else(|| ApiError::not_found("no config_schema"))?;
     Ok(Json(s))
 }
 
@@ -834,7 +899,9 @@ pub async fn south_plugin_tag_schema(
         .manager
         .south_plugin(&name)
         .ok_or_else(|| ApiError::not_found("plugin not found"))?;
-    let s = p.tag_schema().ok_or_else(|| ApiError::not_found("no tag_schema"))?;
+    let s = p
+        .tag_schema()
+        .ok_or_else(|| ApiError::not_found("no tag_schema"))?;
     Ok(Json(s))
 }
 
@@ -855,8 +922,7 @@ fn mask_plugin_config(
     north: bool,
     cfg: &serde_json::Value,
 ) -> serde_json::Value {
-    let map: gateway_sdk::PluginConfig =
-        serde_json::from_value(cfg.clone()).unwrap_or_default();
+    let map: gateway_sdk::PluginConfig = serde_json::from_value(cfg.clone()).unwrap_or_default();
     let schema = if north {
         state
             .manager
@@ -947,7 +1013,10 @@ pub async fn get_node(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let nid = parse_node_id(&id)?;
-    let node = state.manager.node_get(nid).ok_or_else(|| ApiError::not_found("node not found"))?;
+    let node = state
+        .manager
+        .node_get(nid)
+        .ok_or_else(|| ApiError::not_found("node not found"))?;
     let mut j = serde_json::to_value(&node).map_err(|e| ApiError::internal(e.to_string()))?;
     if let Some(obj) = j.as_object_mut() {
         if node.kind() == NodeKind::North {
@@ -988,7 +1057,10 @@ pub async fn update_node(
     Json(req): Json<UpdateNodeReq>,
 ) -> Result<StatusCode, ApiError> {
     let nid = parse_node_id(&id)?;
-    state.manager.node_update(nid, req.name).map_err(ApiError::bad_request)?;
+    state
+        .manager
+        .node_update(nid, req.name)
+        .map_err(ApiError::bad_request)?;
     state.sync_node_log_names();
     state.persist().await;
     Ok(StatusCode::NO_CONTENT)
@@ -1000,7 +1072,10 @@ pub async fn get_node_setting(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let nid = parse_node_id(&id)?;
-    let node = state.manager.node_get(nid).ok_or_else(|| ApiError::not_found("node not found"))?;
+    let node = state
+        .manager
+        .node_get(nid)
+        .ok_or_else(|| ApiError::not_found("node not found"))?;
     // 脱敏后返回：前端表单仍可展示 "***"，未修改不会覆盖真实值
     let masked = mask_plugin_config(
         &state,
@@ -1030,7 +1105,11 @@ pub async fn start_node(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let nid = parse_node_id(&id)?;
-    state.manager.node_start(nid).await.map_err(ApiError::bad_request)?;
+    state
+        .manager
+        .node_start(nid)
+        .await
+        .map_err(ApiError::bad_request)?;
     state.persist().await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1040,7 +1119,11 @@ pub async fn stop_node(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let nid = parse_node_id(&id)?;
-    state.manager.node_stop(nid).await.map_err(ApiError::bad_request)?;
+    state
+        .manager
+        .node_stop(nid)
+        .await
+        .map_err(ApiError::bad_request)?;
     state.persist().await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1051,11 +1134,18 @@ pub async fn get_node_connection_status(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let nid = parse_node_id(&id)?;
-    let node = state.manager.node_get(nid).ok_or_else(|| ApiError::not_found("node not found"))?;
+    let node = state
+        .manager
+        .node_get(nid)
+        .ok_or_else(|| ApiError::not_found("node not found"))?;
     if node.kind() == NodeKind::South {
         let conn = state.manager.south_connection_status(nid).await;
         let v = conn
-            .map(|c| serde_json::to_value(&c).unwrap_or(serde_json::json!({ "connected": c.connected, "last_error": c.last_error })))
+            .map(|c| {
+                serde_json::to_value(&c).unwrap_or(
+                    serde_json::json!({ "connected": c.connected, "last_error": c.last_error }),
+                )
+            })
             .unwrap_or_else(|| serde_json::json!({ "connected": false, "last_error": null }));
         return Ok(Json(v));
     }
@@ -1065,7 +1155,9 @@ pub async fn get_node_connection_status(
         .ok_or_else(|| ApiError::not_found("plugin not found"))?;
     match plugin.connection_status(nid).await {
         Some(v) => Ok(Json(v)),
-        None => Ok(Json(serde_json::json!({ "connected": null, "last_error": null }))),
+        None => Ok(Json(
+            serde_json::json!({ "connected": null, "last_error": null }),
+        )),
     }
 }
 
@@ -1086,7 +1178,10 @@ pub async fn get_group(
     let nid = parse_node_id(&id)?;
     ensure_node_south(&state, nid)?;
     let g = parse_group_id(&gid)?;
-    let group = state.manager.group_get(nid, g).ok_or_else(|| ApiError::not_found("group not found"))?;
+    let group = state
+        .manager
+        .group_get(nid, g)
+        .ok_or_else(|| ApiError::not_found("group not found"))?;
     Ok(Json(group))
 }
 
@@ -1119,7 +1214,10 @@ pub async fn add_group(
     let interval_ms = validate_interval_ms(req.interval_ms)?;
     let mut g = Group::new(req.name, interval_ms);
     g.description = req.description;
-    state.manager.group_add(nid, g.clone()).map_err(ApiError::bad_request)?;
+    state
+        .manager
+        .group_add(nid, g.clone())
+        .map_err(ApiError::bad_request)?;
     state.persist().await;
     Ok(Json(g))
 }
@@ -1141,7 +1239,13 @@ pub async fn update_group(
     let g = parse_group_id(&gid)?;
     state
         .manager
-        .group_update(nid, g, req.name, req.interval_ms.map(validate_interval_ms).transpose()?, req.description)
+        .group_update(
+            nid,
+            g,
+            req.name,
+            req.interval_ms.map(validate_interval_ms).transpose()?,
+            req.description,
+        )
         .map_err(ApiError::bad_request)?;
     state.persist().await;
     Ok(StatusCode::NO_CONTENT)
@@ -1154,7 +1258,11 @@ pub async fn remove_group(
     let nid = parse_node_id(&id)?;
     ensure_node_south(&state, nid)?;
     let g = parse_group_id(&gid)?;
-    state.manager.group_remove(nid, g).await.ok_or_else(|| ApiError::not_found("group not found"))?;
+    state
+        .manager
+        .group_remove(nid, g)
+        .await
+        .ok_or_else(|| ApiError::not_found("group not found"))?;
     state.persist().await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1166,7 +1274,9 @@ pub async fn list_tags(
 ) -> Result<Json<Vec<Tag>>, ApiError> {
     let nid = parse_node_id(&id)?;
     ensure_node_south(&state, nid)?;
-    let tags = state.manager.groups_by_node(nid)
+    let tags = state
+        .manager
+        .groups_by_node(nid)
         .into_iter()
         .flat_map(|g| state.manager.tags_by_group(nid, g.id))
         .collect::<Vec<_>>();
@@ -1190,7 +1300,9 @@ pub async fn add_tag(
 ) -> Result<Json<Tag>, ApiError> {
     // 检查点位数限制
     let current_count = state.manager.store.tags_total_count();
-    state.feature_manager.check_tag_limit(current_count, 1)
+    state
+        .feature_manager
+        .check_tag_limit(current_count, 1)
         .map_err(ApiError::forbidden)?;
 
     let nid = parse_node_id(&id)?;
@@ -1221,7 +1333,9 @@ pub async fn batch_add_tags(
     // 检查点位数限制
     let current_count = state.manager.store.tags_total_count();
     let add_count = req.tags.len() as u64;
-    state.feature_manager.check_tag_limit(current_count, add_count)
+    state
+        .feature_manager
+        .check_tag_limit(current_count, add_count)
         .map_err(ApiError::forbidden)?;
 
     let nid = parse_node_id(&id)?;
@@ -1298,7 +1412,10 @@ pub async fn remove_tag(
     let nid = parse_node_id(&id)?;
     ensure_node_south(&state, nid)?;
     let tag_id = parse_tag_id(&tid)?;
-    state.manager.tag_remove(tag_id).ok_or_else(|| ApiError::not_found("tag not found"))?;
+    state
+        .manager
+        .tag_remove(tag_id)
+        .ok_or_else(|| ApiError::not_found("tag not found"))?;
     state.persist().await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1326,7 +1443,10 @@ pub async fn set_subscriptions(
 ) -> Result<StatusCode, ApiError> {
     let nid = parse_node_id(&id)?;
     ensure_node_north(&state, nid)?;
-    state.manager.set_north_subscriptions(nid, req.subscriptions).await;
+    state
+        .manager
+        .set_north_subscriptions(nid, req.subscriptions)
+        .await;
     state.persist().await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1464,7 +1584,8 @@ pub struct LogConfigReq {
 }
 
 /// 进程内日志上传开关（功能占位：当前版本不主动上传日志）
-static LOG_UPLOAD_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LOG_UPLOAD_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 fn valid_log_level(s: &str) -> bool {
     matches!(s, "trace" | "debug" | "info" | "warn" | "error")
@@ -1617,7 +1738,9 @@ pub async fn download_log(
                 if let Some(content) = read_log_tail(&f).await {
                     buf.push_str(&format!(
                         "\n===== {} =====\n",
-                        f.file_name().and_then(|n| n.to_str()).unwrap_or("gateway.log")
+                        f.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("gateway.log")
                     ));
                     buf.push_str(&content);
                 }
@@ -1632,7 +1755,11 @@ pub async fn download_log(
                 .unwrap_or_else(|| std::path::PathBuf::from("logs/nodes"));
             let files: Vec<std::path::PathBuf> = match (kind, q.get("node_id")) {
                 ("node", Some(nid)) => {
-                    let p = crate::logging::node_log_file_path(&dir, nid, state.node_log_names.as_ref());
+                    let p = crate::logging::node_log_file_path(
+                        &dir,
+                        nid,
+                        state.node_log_names.as_ref(),
+                    );
                     if !p.exists() {
                         return Err(ApiError::not_found("node log file not found"));
                     }
@@ -1666,7 +1793,9 @@ pub async fn download_log(
                 if let Some(content) = read_log_tail(&f).await {
                     buf.push_str(&format!(
                         "\n===== system/{} =====\n",
-                        f.file_name().and_then(|n| n.to_str()).unwrap_or("gateway.log")
+                        f.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("gateway.log")
                     ));
                     buf.push_str(&content);
                 }
@@ -1707,7 +1836,9 @@ pub async fn download_log(
         )
         .header(header::CACHE_CONTROL, "no-store")
         .body(axum::body::Body::from(buf))
-        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "build response failed").into_response())
+        .unwrap_or_else(|_| {
+            (StatusCode::INTERNAL_SERVER_ERROR, "build response failed").into_response()
+        })
         .into_response())
 }
 
@@ -1743,8 +1874,9 @@ pub async fn put_system_config(
     State(state): State<AppState>,
     Json(req): Json<SystemConfigReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let mut v: serde_json::Value = serde_json::to_value(get_system_config(State(state.clone())).await.0)
-        .unwrap_or_else(|_| serde_json::json!({}));
+    let mut v: serde_json::Value =
+        serde_json::to_value(get_system_config(State(state.clone())).await.0)
+            .unwrap_or_else(|_| serde_json::json!({}));
     let path = config_file_path();
     let mut persisted = false;
     if tokio::fs::metadata(&path).await.is_ok() {

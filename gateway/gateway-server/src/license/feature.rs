@@ -199,8 +199,12 @@ mod tests {
     #[test]
     fn expiry_days_counts_down_and_goes_negative() {
         let today = chrono::Utc::now().date_naive();
-        let future = (today + chrono::Duration::days(30)).format("%Y-%m-%d").to_string();
-        let past = (today - chrono::Duration::days(3)).format("%Y-%m-%d").to_string();
+        let future = (today + chrono::Duration::days(30))
+            .format("%Y-%m-%d")
+            .to_string();
+        let past = (today - chrono::Duration::days(3))
+            .format("%Y-%m-%d")
+            .to_string();
 
         let fm = FeatureManager::with_license(payload_with_expiry(&future));
         assert_eq!(fm.expiry_days_left(), Some(30));

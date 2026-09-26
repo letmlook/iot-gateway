@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use tracing::Event;
 use tracing_subscriber::field::Visit;
 use tracing_subscriber::layer::Context;
-use tracing_subscriber::Layer;
 use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::Layer;
 
 /// 从 Event 中提取 node_id 与 message 的 Visitor
 #[derive(Default)]
@@ -31,9 +31,8 @@ impl Visit for NodeIdVisitor {
             if !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
                 self.node_id = Some(id.to_string());
             } else {
-                self.node_id = Some(
-                    s.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "_"),
-                );
+                self.node_id =
+                    Some(s.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "_"));
             }
         } else if name == "message" {
             self.message = Some(format!("{:?}", value));
@@ -200,10 +199,7 @@ where
         };
         let level = event.metadata().level();
         let target = event.metadata().target();
-        let msg = visitor
-            .message
-            .as_deref()
-            .unwrap_or("<no message>");
+        let msg = visitor.message.as_deref().unwrap_or("<no message>");
         let line = format!(
             "{} {} {} {}\n",
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
@@ -221,9 +217,9 @@ where
 /// 初始化全局日志：控制台 + 可选主日志文件 + 可选按节点分文件（文件名按 node_log_names 中的节点名）
 /// 若传入 node_log_names，调用方需在加载/变更节点后调用 sync 以更新映射。
 pub fn init_logging(config: &crate::config::Config, node_log_names: Option<NodeLogNameMap>) {
+    use tracing_appender::rolling::{RollingFileAppender, Rotation};
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
-    use tracing_appender::rolling::{RollingFileAppender, Rotation};
 
     let effective_filter = if config.log_level.trim().is_empty() {
         config.log_filter.clone()
@@ -275,7 +271,9 @@ pub fn init_logging(config: &crate::config::Config, node_log_names: Option<NodeL
     }
 
     match (file_path.as_ref(), nodes_dir.as_ref()) {
-        (Some(path), Some(dir)) => add_node_layer!(add_file_layer!(reg, path), dir, node_log_names.clone()).init(),
+        (Some(path), Some(dir)) => {
+            add_node_layer!(add_file_layer!(reg, path), dir, node_log_names.clone()).init()
+        }
         (Some(path), None) => add_file_layer!(reg, path).init(),
         (None, Some(dir)) => add_node_layer!(reg, dir, node_log_names).init(),
         (None, None) => reg.init(),
