@@ -1,7 +1,7 @@
 //! MQTT 插件状态：MqttState、NodeMqttState、连接状态、PublishQos。
 
 use gateway_sdk::{GroupSubscription, NodeId};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -26,9 +26,9 @@ pub struct MqttConnectionStatus {
 #[cfg(feature = "mqtt-client")]
 pub struct NodeMqttState {
     pub client: rumqttc::AsyncClient,
-    pub cache: Arc<RwLock<VecDeque<(String, Vec<u8>)>>>,
+    /// 离线队列（可持久化到磁盘），断网期间暂存待发消息
+    pub queue: Arc<tokio::sync::Mutex<crate::queue::OfflineQueue>>,
     pub connection_status: Arc<RwLock<MqttConnectionStatus>>,
-    pub cache_max: usize,
     pub topic_template: String,
     pub qos: PublishQos,
     pub retain: bool,
@@ -41,9 +41,8 @@ pub struct NodeMqttState {
 
 #[cfg(not(feature = "mqtt-client"))]
 pub struct NodeMqttState {
-    pub cache: Arc<RwLock<VecDeque<(String, Vec<u8>)>>>,
+    pub queue: Arc<tokio::sync::Mutex<crate::queue::OfflineQueue>>,
     pub connection_status: Arc<RwLock<MqttConnectionStatus>>,
-    pub cache_max: usize,
     pub topic_template: String,
     pub qos: PublishQos,
     pub retain: bool,

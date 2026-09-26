@@ -9,6 +9,9 @@ pub const DEFAULT_HOST: &str = "broker.emqx.io";
 pub const DEFAULT_PORT: u16 = 1883;
 pub const DEFAULT_TOPIC_TEMPLATE: &str = "gateway/data/${node_id}/${group_id}";
 pub const DEFAULT_CACHE_MEMORY_SIZE: usize = 1000;
+/// 离线队列落盘目录（相对进程工作目录）。生产建议放在数据目录下，
+/// 例如 `GATEWAY_DATA_DIR` 指向的目录，便于随数据一起备份/清理。
+pub const DEFAULT_CACHE_DIR: &str = "data/mqtt-queue";
 pub const DEFAULT_KEEP_ALIVE_SECS: u64 = 30;
 pub const DEFAULT_CACHE_SYNC_INTERVAL_MS: u64 = 100;
 pub const DEFAULT_QOS: u8 = 1;
@@ -239,11 +242,37 @@ pub fn config_schema() -> ConfigSchema {
             name_zh: Some("缓存内存大小".to_string()),
             name_en: Some("Cache Memory Size".to_string()),
             description: Some("Max in-memory cache size (message count) when MQTT connection exception occurs.".to_string()),
-            description_zh: Some("当 MQTT 连接异常时，最大的内存缓存条数。".to_string()),
+            description_zh: Some("MQTT 断开时暂存的最大条数；写满后丢弃最旧的并计入 queue_dropped_overflow。".to_string()),
             description_en: Some("Max in-memory cache size (message count) when MQTT connection exception occurs.".to_string()),
             attribute: ParamAttribute::Optional,
             ty: ParamType::Int,
             default: Some(serde_json::json!(DEFAULT_CACHE_MEMORY_SIZE)),
+            valid: None,
+            ..Default::default()
+        })
+        .param(ParamSchema {
+            name: "cache_persist".to_string(),
+            name_zh: Some("离线队列落盘".to_string()),
+            name_en: Some("Persist Offline Queue".to_string()),
+            description: Some("Persist the offline queue to disk so buffered messages survive a restart.".to_string()),
+            description_zh: Some("断开期间的待发消息是否写入磁盘；开启后网关重启不会丢失。".to_string()),
+            description_en: Some("Persist the offline queue to disk so buffered messages survive a restart.".to_string()),
+            attribute: ParamAttribute::Optional,
+            ty: ParamType::Bool,
+            default: Some(serde_json::json!(true)),
+            valid: None,
+            ..Default::default()
+        })
+        .param(ParamSchema {
+            name: "cache_dir".to_string(),
+            name_zh: Some("离线队列目录".to_string()),
+            name_en: Some("Offline Queue Directory".to_string()),
+            description: Some("Directory for per-node offline queue files.".to_string()),
+            description_zh: Some(format!("每个节点一个 <节点ID>.queue 文件，默认 {}", DEFAULT_CACHE_DIR).to_string()),
+            description_en: Some("Directory for per-node offline queue files.".to_string()),
+            attribute: ParamAttribute::Optional,
+            ty: ParamType::String,
+            default: Some(serde_json::json!(DEFAULT_CACHE_DIR)),
             valid: None,
             ..Default::default()
         })

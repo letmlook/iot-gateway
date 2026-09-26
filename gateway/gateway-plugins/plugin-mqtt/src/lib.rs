@@ -1,6 +1,6 @@
 //! 北向 MQTT 插件：接收 GroupData，发布到 MQTT Broker。
 //!
-//! 功能：QoS 0/1/2、主题模板（变量替换）、TLS/SSL、离线内存缓存与恢复补发、
+//! 功能：QoS 0/1/2、主题模板（变量替换）、TLS/SSL、离线队列（可落盘、重启不丢、溢出可观测）、
 //! 上传格式（group_data / tags_format）、retain、keep_alive、cache_sync_interval。
 //! 事件循环在独立 OS 线程中运行，保证以 .so/.dll 加载时 open() 返回后仍能建连；以 .so 部署时修改代码后需重新构建插件并重启网关。
 
@@ -9,12 +9,14 @@ mod ffi;
 
 mod config;
 mod format;
+mod queue;
 mod state;
 
 use config::{
-    config_bool, config_schema, config_str, config_u16, config_usize, DEFAULT_CACHE_MEMORY_SIZE,
-    DEFAULT_CACHE_SYNC_INTERVAL_MS, DEFAULT_HOST, DEFAULT_KEEP_ALIVE_SECS, DEFAULT_PORT,
-    DEFAULT_QOS, DEFAULT_TOPIC_TEMPLATE, UPLOAD_FORMAT_VALUES_FORMAT,
+    config_bool, config_schema, config_str, config_u16, config_usize, DEFAULT_CACHE_DIR,
+    DEFAULT_CACHE_MEMORY_SIZE, DEFAULT_CACHE_SYNC_INTERVAL_MS, DEFAULT_HOST,
+    DEFAULT_KEEP_ALIVE_SECS, DEFAULT_PORT, DEFAULT_QOS, DEFAULT_TOPIC_TEMPLATE,
+    UPLOAD_FORMAT_VALUES_FORMAT,
 };
 use format::{payload_for_format, topic_from_template};
 use gateway_sdk::log;
@@ -110,6 +112,14 @@ impl NorthPlugin for MqttPlugin {
             .get("cache_sync_interval_ms")
             .and_then(|v| v.as_u64())
             .unwrap_or(DEFAULT_CACHE_SYNC_INTERVAL_MS);
+        // 离线队列：默认落盘（重启不丢），可用 cache_persist=false 退回纯内存
+        let cache_persist = config_bool(&config, "cache_persist", true);
+        let cache_dir = config_str(&config, "cache_dir", DEFAULT_CACHE_DIR);
+        let queue_path = if cache_persist {
+            Some(std::path::PathBuf::from(&cache_dir).join(format!("{}.queue", node_id.0)))
+        } else {
+            None
+        };
         let ssl = config_bool(&config, "ssl", false);
 
         let mut state = self.state.write().await;
@@ -152,10 +162,28 @@ impl NorthPlugin for MqttPlugin {
             }
             let cap = (cache_memory_size + 32).min(65535);
             let (client, eventloop) = AsyncClient::new(mqttoptions, cap);
-            let cache = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+            let queue = Arc::new(tokio::sync::Mutex::new(if cache_persist {
+                crate::queue::OfflineQueue::open(queue_path.clone(), cache_memory_size)
+            } else {
+                // 显式关闭落盘：纯内存队列（重启即失，行为与原实现一致）
+                crate::queue::OfflineQueue::memory_only(cache_memory_size)
+            }));
+            {
+                let q = queue.lock().await;
+                let s = q.stats();
+                if s.recovered > 0 || s.dropped_corrupt > 0 {
+                    log::info(
+                        node_id,
+                        format!(
+                            "offline queue restored: {} record(s), {} corrupted dropped",
+                            s.recovered, s.dropped_corrupt
+                        ),
+                    );
+                }
+            }
             let connection_status = Arc::new(RwLock::new(MqttConnectionStatus::default()));
             let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
-            let cache_clone = cache.clone();
+            let queue_clone = queue.clone();
             let conn_status_clone = connection_status.clone();
             let client_clone = client.clone();
             let sync_interval = cache_sync_interval_ms;
@@ -173,9 +201,8 @@ impl NorthPlugin for MqttPlugin {
                     port_loop,
                     client_clone,
                     eventloop,
-                    cache_clone,
+                    queue_clone,
                     conn_status_clone,
-                    cache_memory_size,
                     qos,
                     retain,
                     sync_interval,
@@ -186,9 +213,8 @@ impl NorthPlugin for MqttPlugin {
                 node_id,
                 NodeMqttState {
                     client,
-                    cache,
+                    queue,
                     connection_status,
-                    cache_max: cache_memory_size,
                     topic_template,
                     qos,
                     retain,
@@ -205,9 +231,12 @@ impl NorthPlugin for MqttPlugin {
             state.nodes.insert(
                 node_id,
                 NodeMqttState {
-                    cache: Arc::new(RwLock::new(std::collections::VecDeque::new())),
+                    queue: Arc::new(tokio::sync::Mutex::new(if cache_persist {
+                        crate::queue::OfflineQueue::open(queue_path, cache_memory_size)
+                    } else {
+                        crate::queue::OfflineQueue::memory_only(cache_memory_size)
+                    })),
                     connection_status: Arc::new(RwLock::new(MqttConnectionStatus::default())),
-                    cache_max: cache_memory_size,
                     topic_template,
                     qos,
                     retain,
@@ -223,17 +252,28 @@ impl NorthPlugin for MqttPlugin {
         log::info(node_id, "close mqtt, disconnecting");
         #[cfg(feature = "mqtt-client")]
         {
-            let (client_opt, cancel_tx, handle_opt) = {
+            let (client_opt, cancel_tx, handle_opt, queue_opt) = {
                 let mut state = self.state.write().await;
                 state.open_nodes.remove(&node_id);
                 state.subscriptions.remove(&node_id);
                 let node_state = state.nodes.remove(&node_id);
                 node_state
-                    .map(|ns| (Some(ns.client), ns.cancel_tx, ns.event_loop_handle))
-                    .unwrap_or((None, None, None))
+                    .map(|ns| {
+                        (
+                            Some(ns.client),
+                            ns.cancel_tx,
+                            ns.event_loop_handle,
+                            Some(ns.queue),
+                        )
+                    })
+                    .unwrap_or((None, None, None, None))
             };
             if let Some(client) = client_opt {
                 let _ = client.disconnect().await;
+            }
+            // 关节点时压缩一次离线队列：把已消费部分从文件里去掉，避免残留文件持续变大
+            if let Some(q) = queue_opt {
+                q.lock().await.compact_now();
             }
             if let Some(tx) = cancel_tx {
                 let _ = tx.send(());
@@ -292,9 +332,16 @@ impl NorthPlugin for MqttPlugin {
         let state = self.state.read().await;
         let node_state = state.nodes.get(&node_id)?;
         let st = node_state.connection_status.read().await;
+        // 离线队列统计一并透出（前端「节点状态」与排障都用得上）
+        let q = node_state.queue.lock().await.stats();
         Some(serde_json::json!({
             "connected": st.connected,
             "last_error": st.last_error,
+            "queue_len": q.queued,
+            "queue_dropped_overflow": q.dropped_overflow,
+            "queue_recovered": q.recovered,
+            "queue_dropped_corrupt": q.dropped_corrupt,
+            "queue_persisted": q.persisted,
         }))
     }
 
@@ -319,6 +366,13 @@ impl NorthPlugin for MqttPlugin {
 
         #[cfg(feature = "mqtt-client")]
         {
+            let connected = node_state.connection_status.read().await.connected;
+            if !connected {
+                // 未连接时不交给 rumqttc 的内部缓冲（它有界且不可观测），
+                // 直接进离线队列：可落盘、可统计、断线期间不会静默丢数据
+                enqueue(node_id, node_state, topic, payload).await;
+                return Ok(());
+            }
             let qos = node_state.qos.to_rumqttc();
             match node_state
                 .client
@@ -330,14 +384,11 @@ impl NorthPlugin for MqttPlugin {
                     log::warn(
                         node_id,
                         format!(
-                            "mqtt publish failed, enqueue cache: {} (topic={})",
+                            "mqtt publish failed, enqueue offline queue: {} (topic={})",
                             e, topic
                         ),
                     );
-                    let mut cache = node_state.cache.write().await;
-                    if cache.len() < node_state.cache_max {
-                        cache.push_back((topic, payload));
-                    }
+                    enqueue(node_id, node_state, topic, payload).await;
                 }
             }
         }
@@ -345,10 +396,36 @@ impl NorthPlugin for MqttPlugin {
         #[cfg(not(feature = "mqtt-client"))]
         {
             let _ = (topic, payload);
+            // 未编译 mqtt-client：只记录，不建连（离线队列逻辑由单测覆盖）
             tracing::info!(node_id = ?node_id, "mqtt (no client): would publish");
         }
 
         Ok(())
+    }
+}
+
+/// 入队并记录溢出（溢出会丢弃最旧的一条，必须让它可见）
+#[cfg(feature = "mqtt-client")]
+async fn enqueue(node_id: NodeId, node_state: &NodeMqttState, topic: String, payload: Vec<u8>) {
+    let mut q = node_state.queue.lock().await;
+    let before = q.stats().dropped_overflow;
+    q.push(crate::queue::Record { topic, payload });
+    let queued = q.len();
+    let after = q.stats();
+    if after.dropped_overflow > before {
+        // 溢出会丢弃最旧的一条：这条日志是运维判断「断网多久会开始丢数据」的依据
+        log::warn(
+            node_id,
+            format!(
+                "offline queue full ({} queued), dropped {} oldest record(s) in total",
+                queued, after.dropped_overflow
+            ),
+        );
+    } else {
+        log::debug(
+            node_id,
+            format!("message buffered to offline queue ({} queued)", queued),
+        );
     }
 }
 
@@ -359,9 +436,8 @@ async fn run_event_loop(
     port: u16,
     client: rumqttc::AsyncClient,
     mut eventloop: rumqttc::EventLoop,
-    cache: Arc<RwLock<std::collections::VecDeque<(String, Vec<u8>)>>>,
+    queue: Arc<tokio::sync::Mutex<crate::queue::OfflineQueue>>,
     connection_status: Arc<RwLock<MqttConnectionStatus>>,
-    _cache_max: usize,
     qos: PublishQos,
     retain: bool,
     cache_sync_interval_ms: u64,
@@ -376,6 +452,10 @@ async fn run_event_loop(
     );
     let qos_r = qos.to_rumqttc();
     let interval = Duration::from_millis(cache_sync_interval_ms.max(10));
+    // 重连退避：从 1s 起翻倍，上限 30s；连上即复位。
+    // 固定 5s 重连在 Broker 长时间不可用时会形成稳定冲击波，也会拖慢恢复速度。
+    let mut backoff = Duration::from_secs(1);
+    let max_backoff = Duration::from_secs(30);
     loop {
         tokio::select! {
             _ = &mut cancel_rx => {
@@ -387,9 +467,12 @@ async fn run_event_loop(
                     Ok(Event::Incoming(Packet::ConnAck(ack))) => {
                         if ack.code == ConnectReturnCode::Success {
                             log::info(node_id, format!("mqtt 连接成功: broker={}", addr));
-                            let mut st = connection_status.write().await;
-                            st.connected = true;
-                            st.last_error = None;
+                            {
+                                let mut st = connection_status.write().await;
+                                st.connected = true;
+                                st.last_error = None;
+                            }
+                            backoff = Duration::from_secs(1);
                         } else {
                             let err_msg = format!("mqtt 连接失败: broker={}, 拒绝原因: {:?}", addr, ack.code);
                             log::warn(node_id, err_msg.as_str());
@@ -397,31 +480,59 @@ async fn run_event_loop(
                             st.connected = false;
                             st.last_error = Some(err_msg.clone());
                         }
+                        // 连接成功后补发离线队列（按原始顺序）
+                        let mut restored = 0u64;
                         loop {
-                            let (topic, payload) = {
-                                let mut c = cache.write().await;
-                                match c.pop_front() {
-                                    Some(t) => t,
-                                    None => break,
-                                }
+                            let record = {
+                                let mut q = queue.lock().await;
+                                q.pop_front()
                             };
-                            let p = payload.clone();
-                            if let Err(e) = client.publish(&topic, qos_r, retain, p).await {
-                                log::warn(node_id, format!("cache drain publish failed: {} (topic={})", e, topic));
-                                let mut c = cache.write().await;
-                                c.push_front((topic, payload));
+                            let Some(record) = record else { break };
+                            let p = record.payload.clone();
+                            if let Err(e) = client
+                                .publish(&record.topic, qos_r, retain, p)
+                                .await
+                            {
+                                log::warn(
+                                    node_id,
+                                    format!(
+                                        "offline flush publish failed: {} (topic={})",
+                                        e, record.topic
+                                    ),
+                                );
+                                // 放回队首，等下次连接成功再补发
+                                let mut q = queue.lock().await;
+                                q.push_front(record);
                                 break;
                             }
+                            restored += 1;
                             tokio::time::sleep(interval).await;
+                        }
+                        if restored > 0 {
+                            log::info(
+                                node_id,
+                                format!("offline queue flushed {} record(s)", restored),
+                            );
                         }
                     }
                     Err(e) => {
                         let err_msg = e.to_string();
-                        log::warn(node_id, format!("mqtt 连接断开: broker={}, 错误: {}, 5s 后重连", addr, err_msg));
-                        let mut st = connection_status.write().await;
-                        st.connected = false;
-                        st.last_error = Some(err_msg);
-                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        log::warn(
+                            node_id,
+                            format!(
+                                "mqtt 连接断开: broker={}, 错误: {}, {}s 后重连",
+                                addr,
+                                err_msg,
+                                backoff.as_secs()
+                            ),
+                        );
+                        {
+                            let mut st = connection_status.write().await;
+                            st.connected = false;
+                            st.last_error = Some(err_msg);
+                        }
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(max_backoff);
                     }
                     _ => {}
                 }
