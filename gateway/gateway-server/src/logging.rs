@@ -109,6 +109,10 @@ pub fn remove_node_log_file(
     }
 }
 
+/// 单个节点日志文件的上限（字节）。超过后轮转为 `<name>.log.1`（仅保留一代），
+/// 避免长期运行的现场把磁盘写满。
+const NODE_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
 /// 缓存条目：(当前使用的文件名 base, 文件句柄)
 type WriterCache = HashMap<String, (String, std::fs::File)>;
 
@@ -139,6 +143,22 @@ impl NodeFileLayer {
         filename_base_for_node(node_id, name.as_deref())
     }
 
+    /// 超过上限则把当前文件轮转为 `.1`，并丢弃缓存的文件句柄以便下次重建。
+    fn rotate_if_needed(&self, node_id: &str, path: &std::path::Path) {
+        let too_big = std::fs::metadata(path)
+            .map(|m| m.len() >= NODE_LOG_MAX_BYTES)
+            .unwrap_or(false);
+        if !too_big {
+            return;
+        }
+        let rotated = path.with_extension("log.1");
+        let _ = std::fs::remove_file(&rotated);
+        let _ = std::fs::rename(path, &rotated);
+        if let Ok(mut map) = self.writers.lock() {
+            map.remove(node_id);
+        }
+    }
+
     fn writer_for(&self, node_id: &str) -> std::io::Result<std::fs::File> {
         let base = self.filename_base_for(node_id);
         let mut map = self.writers.lock().unwrap();
@@ -150,6 +170,14 @@ impl NodeFileLayer {
             map.remove(node_id);
         }
         let path = self.dir.join(format!("{}.log", base));
+        drop(map);
+        self.rotate_if_needed(node_id, &path);
+        let mut map = self.writers.lock().unwrap();
+        if let Some((cached_base, f)) = map.get_mut(node_id) {
+            if *cached_base == base {
+                return f.try_clone();
+            }
+        }
         let f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -224,6 +252,8 @@ pub fn init_logging(config: &crate::config::Config, node_log_names: Option<NodeL
             }
             let file_appender = RollingFileAppender::builder()
                 .rotation(Rotation::DAILY)
+                // 只保留最近 14 天，避免日志目录无限增长
+                .max_log_files(14)
                 .build($path)
                 .expect("create log file");
             let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
@@ -249,5 +279,47 @@ pub fn init_logging(config: &crate::config::Config, node_log_names: Option<NodeL
         (Some(path), None) => add_file_layer!(reg, path).init(),
         (None, Some(dir)) => add_node_layer!(reg, dir, node_log_names).init(),
         (None, None) => reg.init(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_log_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("gw-log-{}-{}", tag, uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn oversized_node_log_is_rotated() {
+        let dir = temp_log_dir("big");
+        let layer = NodeFileLayer::new(dir.clone(), None);
+        let path = dir.join("node1.log");
+        // 造一个刚好超过上限的文件（避免真写 10MB 数据）
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(NODE_LOG_MAX_BYTES + 1).unwrap();
+        drop(f);
+
+        layer.rotate_if_needed("node-1", &path);
+
+        assert!(!path.exists(), "oversized log should be moved away");
+        assert!(dir.join("node1.log.1").exists(), "rotated log kept as .1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn small_node_log_is_not_rotated() {
+        let dir = temp_log_dir("small");
+        let layer = NodeFileLayer::new(dir.clone(), None);
+        let path = dir.join("node2.log");
+        std::fs::write(&path, "small content").unwrap();
+
+        layer.rotate_if_needed("node-2", &path);
+
+        assert!(path.exists(), "small log should stay in place");
+        assert!(!dir.join("node2.log.1").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
