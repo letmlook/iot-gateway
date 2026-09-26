@@ -138,6 +138,39 @@ impl Manager {
             .collect()
     }
 
+    /// 按名称取点位（同一节点同一组内名称唯一）；规则 API 用它校验引用
+    pub fn tag_get_by_name(
+        &self,
+        node_id: NodeId,
+        group_id: gateway_sdk::GroupId,
+        name: &str,
+    ) -> Option<Tag> {
+        self.store.tag_get_by_name(node_id, group_id, name)
+    }
+
+    // ---------- Rules ----------
+    /// 规则列表（配置，不含运行期状态）
+    pub fn rules_list(&self) -> Vec<crate::rules::Rule> {
+        self.store.rules_list()
+    }
+
+    pub fn rule_get(&self, id: &str) -> Option<crate::rules::Rule> {
+        self.store.rule_get(id)
+    }
+
+    pub fn rule_insert(&self, rule: crate::rules::Rule) {
+        self.store.rule_insert(rule);
+    }
+
+    /// 删除规则，同时清掉它的运行期状态
+    pub fn rule_remove(&self, id: &str) -> Option<crate::rules::Rule> {
+        let removed = self.store.rule_remove(id);
+        if removed.is_some() {
+            crate::rules::engine().forget(id);
+        }
+        removed
+    }
+
     // ---------- Nodes ----------
     /// 创建节点并调用插件 open、init。失败则回滚。按 config_schema 校验 config。
     #[instrument(skip(self))]
@@ -527,7 +560,8 @@ impl Manager {
                 subscriptions.push((*nid, subs.clone()));
             }
         }
-        crate::persist::build_snapshot(nodes, groups, tags, subscriptions)
+        let rules = self.store.rules_list();
+        crate::persist::build_snapshot(nodes, groups, tags, subscriptions, rules)
     }
 
     /// 应用持久化快照（清空后填入），并对每个节点调用插件 open、init。
@@ -1041,6 +1075,18 @@ async fn poll_group_once(
             );
         }
         Ok(Ok(values)) => {
+            // 规则求值：无启用规则时零开销（store 查询后立即返回）
+            let (fired, failed) =
+                crate::rules::evaluate_and_fire(store, plugin, id, gid, &values).await;
+            if fired > 0 {
+                metrics.rules_fired.fetch_add(fired, Ordering::Relaxed);
+            }
+            if failed > 0 {
+                metrics
+                    .rules_action_err
+                    .fetch_add(failed, Ordering::Relaxed);
+            }
+
             let node_name = store.node_get(id).map(|n| n.config.name);
             let group_name = store.group_get(id, gid).map(|g| g.name);
             let tag_names: HashMap<_, _> = values

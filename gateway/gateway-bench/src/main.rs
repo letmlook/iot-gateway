@@ -199,6 +199,8 @@ fn snapshot(nodes: usize, tags_per_node: usize) -> Snapshot {
         groups: Vec::with_capacity(nodes),
         tags: Vec::with_capacity(nodes * tags_per_node),
         subscriptions: Vec::new(),
+        // 规则不参与本压测的持久化路径（保存耗时主要由节点/组/点位决定）
+        rules: Vec::new(),
     };
     for n in 0..nodes {
         let node = Node::new(

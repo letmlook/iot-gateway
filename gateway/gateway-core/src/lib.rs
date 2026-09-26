@@ -10,6 +10,7 @@ mod manager;
 mod node;
 mod persist;
 pub mod proc_plugin;
+mod rules;
 mod store;
 
 pub use bus::{subscription_set, Bus, SubscriptionTable};
@@ -24,5 +25,9 @@ pub use persist::{
     load as persist_load, load_json as persist_load_json, load_secret as persist_load_secret,
     save as persist_save, save_secret as persist_save_secret,
     save_with_backup as persist_save_with_backup, PersistError, Snapshot, SNAPSHOT_VERSION,
+};
+pub use rules::{
+    engine as rule_engine, CompareOp, Firing, Rule, RuleAction, RuleCondition, RuleEngine,
+    RuleRuntime, RuleSource, RuleView,
 };
 pub use store::Store;

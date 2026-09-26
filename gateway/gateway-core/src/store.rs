@@ -14,6 +14,8 @@ pub struct Store {
     group_tags: Arc<DashMap<(NodeId, GroupId), Vec<TagId>>>,
     /// tag_id -> (node_id, group_id)，便于 tag_remove 时清理 group_tags
     tag_location: Arc<DashMap<TagId, (NodeId, GroupId)>>,
+    /// 规则（key = rule id）。规则随配置持久化，运行期状态由 RuleEngine 维护
+    rules: Arc<DashMap<String, crate::rules::Rule>>,
 }
 
 impl Store {
@@ -67,6 +69,8 @@ impl Store {
         self.tags.clear();
         self.group_tags.clear();
         self.tag_location.clear();
+        // 规则也来自快照（apply_snapshot 会重新灌入），因此一并清空
+        self.rules.clear();
     }
 
     // ---------- Groups ----------
@@ -223,6 +227,36 @@ impl Store {
     }
 
     /// 获取所有点位总数
+    // ---------- Rules ----------
+    pub fn rule_insert(&self, rule: crate::rules::Rule) {
+        self.rules.insert(rule.id.clone(), rule);
+    }
+
+    pub fn rule_get(&self, id: &str) -> Option<crate::rules::Rule> {
+        self.rules.get(id).map(|r| r.clone())
+    }
+
+    pub fn rule_remove(&self, id: &str) -> Option<crate::rules::Rule> {
+        self.rules.remove(id).map(|(_, v)| v)
+    }
+
+    pub fn rules_list(&self) -> Vec<crate::rules::Rule> {
+        let mut v: Vec<_> = self.rules.iter().map(|r| r.value().clone()).collect();
+        v.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+        v
+    }
+
+    /// 命中某个南向组的启用规则（采集热路径用：无规则时返回空并提前返回）
+    pub fn rules_by_group(&self, node_id: NodeId, group_id: GroupId) -> Vec<crate::rules::Rule> {
+        self.rules
+            .iter()
+            .filter(|r| {
+                r.enabled && r.source.south_node_id == node_id && r.source.group_id == group_id
+            })
+            .map(|r| r.value().clone())
+            .collect()
+    }
+
     pub fn tags_total_count(&self) -> u64 {
         self.tags.len() as u64
     }

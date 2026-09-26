@@ -71,6 +71,11 @@ fn required_role(method: &axum::http::Method, path: &str) -> crate::users::UserR
     {
         return Admin;
     }
+    // 规则会直接驱动对现场设备的写动作，属于系统级配置：读 Viewer+、写 Admin
+    if p == "rules" || p.starts_with("rules/") {
+        let is_read = method == axum::http::Method::GET || method == axum::http::Method::HEAD;
+        return if is_read { Viewer } else { Admin };
+    }
     // 写值（对现场设备反控）：Operator 及以上
     if p.ends_with("/write_tags") {
         return Operator;
@@ -202,6 +207,15 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/health", get(handlers::health))
         .route("/metrics", get(handlers::metrics))
         .route("/data-flow", get(handlers::data_flow))
+        .route(
+            "/rules",
+            get(handlers::list_rules).post(handlers::create_rule),
+        )
+        .route(
+            "/rules/:id",
+            put(handlers::update_rule).delete(handlers::delete_rule),
+        )
+        .route("/rules/:id/enable", post(handlers::enable_rule))
         .route("/hardware", get(handlers::hardware))
         .route(
             "/logs/config",
@@ -599,6 +613,27 @@ mod tests {
             required_role(&axum::http::Method::POST, "/api/auth/logout"),
             Viewer
         );
+        // 规则：读给 Viewer，写（会驱动对设备的写动作）必须是 Admin
+        assert_eq!(
+            required_role(&axum::http::Method::GET, "/api/rules"),
+            Viewer
+        );
+        assert_eq!(
+            required_role(&axum::http::Method::POST, "/api/rules"),
+            Admin
+        );
+        assert_eq!(
+            required_role(&axum::http::Method::PUT, "/api/rules/abc"),
+            Admin
+        );
+        assert_eq!(
+            required_role(&axum::http::Method::DELETE, "/api/rules/abc"),
+            Admin
+        );
+        assert_eq!(
+            required_role(&axum::http::Method::POST, "/api/rules/abc/enable"),
+            Admin
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -650,6 +685,36 @@ mod tests {
         // 仍不能管用户 / 恢复备份
         assert_eq!(status_of(&env, "GET", "/users", Some(&token)).await, 403);
         assert_eq!(status_of(&env, "POST", "/restore", Some(&token)).await, 403);
+
+        let _ = std::fs::remove_dir_all(&env.dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rules_are_readable_by_viewer_but_writable_only_by_admin() {
+        let env = rbac_env().await;
+        let viewer = login_as(&env, "viewer-rules", crate::users::UserRole::Viewer).await;
+
+        // 读：Viewer 可以看规则列表
+        assert_eq!(status_of(&env, "GET", "/rules", Some(&viewer)).await, 200);
+        // 写：规则会驱动对现场设备的写动作，Viewer 必须被拒
+        assert_eq!(status_of(&env, "POST", "/rules", Some(&viewer)).await, 403);
+        assert_eq!(
+            status_of(&env, "PUT", "/rules/some-id", Some(&viewer)).await,
+            403
+        );
+        assert_eq!(
+            status_of(&env, "DELETE", "/rules/some-id", Some(&viewer)).await,
+            403
+        );
+        assert_eq!(
+            status_of(&env, "POST", "/rules/some-id/enable", Some(&viewer)).await,
+            403
+        );
+
+        // Admin 通过授权层（空 body 会在解析阶段被拒，但不应是 403）
+        let admin = login_as(&env, "admin-rules", crate::users::UserRole::Admin).await;
+        let code = status_of(&env, "POST", "/rules", Some(&admin)).await;
+        assert_ne!(code, 403, "admin 应通过授权层，实际 {}", code);
 
         let _ = std::fs::remove_dir_all(&env.dir);
     }

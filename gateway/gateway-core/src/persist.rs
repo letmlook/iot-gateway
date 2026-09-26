@@ -54,6 +54,19 @@ CREATE TABLE IF NOT EXISTS subscriptions (
   group_id TEXT NOT NULL,
   PRIMARY KEY (north_node_id, south_node_id, group_id)
 );
+CREATE TABLE IF NOT EXISTS rules (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  enabled INTEGER NOT NULL,
+  south_node_id TEXT NOT NULL,
+  group_id TEXT NOT NULL,
+  tag_name TEXT NOT NULL,
+  op TEXT NOT NULL,
+  threshold REAL NOT NULL,
+  for_ms INTEGER NOT NULL,
+  clear_ms INTEGER NOT NULL,
+  action TEXT NOT NULL
+);
 "#;
 
 /// 持久化错误
@@ -80,6 +93,9 @@ pub struct Snapshot {
     pub groups: Vec<(NodeId, Group)>,
     pub tags: Vec<(NodeId, Tag)>,
     pub subscriptions: Vec<(NodeId, Vec<GroupSubscription>)>,
+    /// 规则。带 `#[serde(default)]`：旧版本库/快照没有该字段也能正常加载
+    #[serde(default)]
+    pub rules: Vec<crate::rules::Rule>,
 }
 
 impl Default for Snapshot {
@@ -90,6 +106,7 @@ impl Default for Snapshot {
             groups: Vec::new(),
             tags: Vec::new(),
             subscriptions: Vec::new(),
+            rules: Vec::new(),
         }
     }
 }
@@ -112,6 +129,15 @@ impl Snapshot {
                 )));
             }
         }
+        let mut rule_ids = std::collections::HashSet::new();
+        for r in &self.rules {
+            if !rule_ids.insert(r.id.as_str()) {
+                return Err(PersistError::Validation(format!(
+                    "duplicate rule id: {}",
+                    r.id
+                )));
+            }
+        }
         Ok(())
     }
 }
@@ -122,6 +148,7 @@ pub fn build_snapshot(
     groups: Vec<(NodeId, Group)>,
     tags: Vec<(NodeId, Tag)>,
     subscriptions: Vec<(NodeId, Vec<GroupSubscription>)>,
+    rules: Vec<crate::rules::Rule>,
 ) -> Snapshot {
     Snapshot {
         version: SNAPSHOT_VERSION,
@@ -129,6 +156,7 @@ pub fn build_snapshot(
         groups,
         tags,
         subscriptions,
+        rules,
     }
 }
 
@@ -389,12 +417,56 @@ fn load_from_db(conn: &Connection) -> Result<Snapshot, PersistError> {
     }
     let subscriptions = sub_map.into_iter().collect();
 
+    // 规则：action 以 JSON 存储，其余字段分列（便于人工查库）
+    let mut rules = Vec::new();
+    let mut stmt = conn.prepare(
+        "SELECT id, name, enabled, south_node_id, group_id, tag_name, op, threshold, for_ms, clear_ms, action FROM rules",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, f64>(7)?,
+            row.get::<_, i64>(8)?,
+            row.get::<_, i64>(9)?,
+            row.get::<_, String>(10)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, name, enabled, south, gid, tag_name, op, threshold, for_ms, clear_ms, action) =
+            row?;
+        let op = serde_json::from_str::<crate::rules::CompareOp>(&format!("\"{}\"", op))
+            .map_err(|e| PersistError::Validation(format!("rule {}: bad op: {}", id, e)))?;
+        let action: crate::rules::RuleAction = serde_json::from_str(&action)
+            .map_err(|e| PersistError::Validation(format!("rule {}: bad action: {}", id, e)))?;
+        rules.push(crate::rules::Rule {
+            id,
+            name,
+            enabled: enabled != 0,
+            source: crate::rules::RuleSource {
+                south_node_id: parse_node_id(&south)?,
+                group_id: parse_group_id(&gid)?,
+                tag_name,
+            },
+            condition: crate::rules::RuleCondition { op, threshold },
+            for_ms: for_ms.max(0) as u64,
+            clear_ms: clear_ms.max(0) as u64,
+            action,
+        });
+    }
+
     Ok(Snapshot {
         version,
         nodes,
         groups,
         tags,
         subscriptions,
+        rules,
     })
 }
 
@@ -610,6 +682,41 @@ fn save_to_db(conn: &Connection, s: &Snapshot) -> Result<(), PersistError> {
         &sub_keys,
     )?;
 
+    {
+        let mut stmt = tx.prepare_cached(
+            "INSERT INTO rules (id, name, enabled, south_node_id, group_id, tag_name, op, threshold, for_ms, clear_ms, action)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                enabled = excluded.enabled,
+                south_node_id = excluded.south_node_id,
+                group_id = excluded.group_id,
+                tag_name = excluded.tag_name,
+                op = excluded.op,
+                threshold = excluded.threshold,
+                for_ms = excluded.for_ms,
+                clear_ms = excluded.clear_ms,
+                action = excluded.action",
+        )?;
+        for r in &s.rules {
+            stmt.execute(params![
+                r.id,
+                r.name,
+                if r.enabled { 1i64 } else { 0i64 },
+                r.source.south_node_id.0.to_string(),
+                r.source.group_id.0.to_string(),
+                r.source.tag_name,
+                r.condition.op.as_str(),
+                r.condition.threshold,
+                r.for_ms as i64,
+                r.clear_ms as i64,
+                serde_json::to_string(&r.action)?,
+            ])?;
+        }
+    }
+    let rule_keys: Vec<String> = s.rules.iter().map(|r| r.id.clone()).collect();
+    delete_missing(&tx, "rules", "id", &rule_keys)?;
+
     tx.commit()?;
     Ok(())
 }
@@ -777,6 +884,9 @@ pub fn apply_to_store(store: &Store, s: &Snapshot) {
     }
     for (nid, t) in &s.tags {
         store.tag_insert(*nid, t.clone());
+    }
+    for r in &s.rules {
+        store.rule_insert(r.clone());
     }
 }
 

@@ -696,7 +696,13 @@ pub async fn metrics(State(state): State<AppState>) -> (axum::http::StatusCode, 
          gateway_south_poll_err {}\n\
          # HELP gateway_south_poll_overrun Poll batches that took longer than the smallest interval.\n\
          # TYPE gateway_south_poll_overrun counter\n\
-         gateway_south_poll_overrun {}\n",
+         gateway_south_poll_overrun {}\n\
+         # HELP gateway_rules_fired Total rule firings.\n\
+         # TYPE gateway_rules_fired counter\n\
+         gateway_rules_fired {}\n\
+         # HELP gateway_rules_action_err Total rule actions that failed.\n\
+         # TYPE gateway_rules_action_err counter\n\
+         gateway_rules_action_err {}\n",
         nodes_total,
         nodes_running,
         plugins_south,
@@ -712,6 +718,8 @@ pub async fn metrics(State(state): State<AppState>) -> (axum::http::StatusCode, 
         df.south_poll_timeout,
         df.south_poll_err,
         df.south_poll_overrun,
+        df.rules_fired,
+        df.rules_action_err,
     );
     // 维度化指标：定位「是哪个北向节点在丢数据」
     let mut body = body;
@@ -798,6 +806,8 @@ pub async fn data_flow(State(state): State<AppState>) -> Json<serde_json::Value>
             "south_poll_timeout": m.south_poll_timeout,
             "south_poll_err": m.south_poll_err,
             "south_poll_overrun": m.south_poll_overrun,
+            "rules_fired": m.rules_fired,
+            "rules_action_err": m.rules_action_err,
         },
         "lagged_by_node": m.lagged_by_node.iter().map(|(nid, n)| {
             serde_json::json!({
@@ -1925,4 +1935,167 @@ pub async fn put_system_config(
         obj.insert("restart_required".into(), serde_json::json!(true));
     }
     Ok(Json(v))
+}
+
+// ---------- Rules ----------
+
+#[derive(Deserialize)]
+pub struct CreateRuleReq {
+    /// 为空时由服务端生成
+    #[serde(default)]
+    pub id: String,
+    pub name: String,
+    #[serde(default = "default_rule_enabled")]
+    pub enabled: bool,
+    pub source: gateway_core::RuleSource,
+    pub condition: gateway_core::RuleCondition,
+    #[serde(default)]
+    pub for_ms: u64,
+    #[serde(default)]
+    pub clear_ms: u64,
+    pub action: gateway_core::RuleAction,
+}
+
+fn default_rule_enabled() -> bool {
+    true
+}
+
+#[derive(Deserialize)]
+pub struct EnableRuleReq {
+    pub enabled: bool,
+}
+
+impl CreateRuleReq {
+    fn into_rule(self, id: String) -> gateway_core::Rule {
+        gateway_core::Rule {
+            id,
+            name: self.name,
+            enabled: self.enabled,
+            source: self.source,
+            condition: self.condition,
+            for_ms: self.for_ms,
+            clear_ms: self.clear_ms,
+            action: self.action,
+        }
+    }
+}
+
+/// 规则列表：配置 + 运行期状态（触发次数、最近触发时间、最近值）
+pub async fn list_rules(State(state): State<AppState>) -> Json<Vec<gateway_core::RuleView>> {
+    let engine = gateway_core::rule_engine();
+    let out = state
+        .manager
+        .rules_list()
+        .into_iter()
+        .map(|rule| gateway_core::RuleView {
+            runtime: engine.runtime(&rule.id),
+            rule,
+        })
+        .collect();
+    Json(out)
+}
+
+/// 新建规则
+pub async fn create_rule(
+    State(state): State<AppState>,
+    Json(req): Json<CreateRuleReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    let id = if req.id.trim().is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        req.id.trim().to_string()
+    };
+    if state.manager.rule_get(&id).is_some() {
+        return Err(ApiError::bad_request(format!(
+            "rule id already exists: {}",
+            id
+        )));
+    }
+    let rule = req.into_rule(id);
+    rule.validate().map_err(ApiError::bad_request)?;
+    validate_rule_refs(&state, &rule)?;
+    state.manager.rule_insert(rule.clone());
+    state.persist().await;
+    Ok((StatusCode::CREATED, Json(rule)))
+}
+
+/// 更新规则（id 取自路径，body 里的 id 会被忽略）
+pub async fn update_rule(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<CreateRuleReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    let existing = state
+        .manager
+        .rule_get(&id)
+        .ok_or_else(|| ApiError::not_found("rule not found"))?;
+    let mut rule = req.into_rule(id.clone());
+    // 更新不改变启用状态，除非请求显式给出（这里保持与 body 一致，由前端决定）
+    rule.id = existing.id;
+    rule.validate().map_err(ApiError::bad_request)?;
+    validate_rule_refs(&state, &rule)?;
+    state.manager.rule_insert(rule.clone());
+    state.persist().await;
+    Ok(Json(rule))
+}
+
+/// 删除规则
+pub async fn delete_rule(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    if state.manager.rule_remove(&id).is_none() {
+        return Err(ApiError::not_found("rule not found"));
+    }
+    state.persist().await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// 启用 / 停用规则
+pub async fn enable_rule(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<EnableRuleReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    let mut rule = state
+        .manager
+        .rule_get(&id)
+        .ok_or_else(|| ApiError::not_found("rule not found"))?;
+    rule.enabled = req.enabled;
+    state.manager.rule_insert(rule.clone());
+    state.persist().await;
+    Ok(Json(rule))
+}
+
+/// 规则引用的点位必须真实存在，否则规则永远不会触发（典型的静默失效）
+fn validate_rule_refs(state: &AppState, rule: &gateway_core::Rule) -> Result<(), ApiError> {
+    let node = state
+        .manager
+        .node_get(rule.source.south_node_id)
+        .ok_or_else(|| ApiError::bad_request("source node not found"))?;
+    if node.kind() != gateway_sdk::NodeKind::South {
+        return Err(ApiError::bad_request("source node must be a south node"));
+    }
+    let group = state
+        .manager
+        .group_get(rule.source.south_node_id, rule.source.group_id)
+        .ok_or_else(|| ApiError::bad_request("source group not found"))?;
+    state
+        .manager
+        .tag_get_by_name(rule.source.south_node_id, group.id, &rule.source.tag_name)
+        .ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "source tag not found in group: {}",
+                rule.source.tag_name
+            ))
+        })?;
+    if let gateway_core::RuleAction::WriteTag { tag_name, .. } = &rule.action {
+        state
+            .manager
+            .tag_get_by_name(rule.source.south_node_id, rule.source.group_id, tag_name)
+            .ok_or_else(|| {
+                ApiError::bad_request(format!("action target tag not found: {}", tag_name))
+            })?;
+    }
+    Ok(())
 }
