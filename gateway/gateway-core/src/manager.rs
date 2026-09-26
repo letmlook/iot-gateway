@@ -148,6 +148,11 @@ impl Manager {
         self.store.tag_get_by_name(node_id, group_id, name)
     }
 
+    /// 取总线句柄（旁路订阅用：历史落库、旁路审计等）
+    pub fn bus(&self) -> Bus {
+        self.bus.clone()
+    }
+
     // ---------- Rules ----------
     /// 规则列表（配置，不含运行期状态）
     pub fn rules_list(&self) -> Vec<crate::rules::Rule> {

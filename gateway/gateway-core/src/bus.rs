@@ -33,6 +33,10 @@ pub type GroupKey = (NodeId, GroupId);
 pub struct Bus {
     capacity: usize,
     groups: Arc<dashmap::DashMap<GroupKey, broadcast::Sender<Arc<GroupData>>>>,
+    /// 旁路订阅（tap）：不区分分组地观察所有发布，用于历史落库、抓包式排障等旁路消费者。
+    /// 空表时发布路径只多一次 `is_empty` 判断，不产生额外开销。
+    taps: Arc<dashmap::DashMap<u64, broadcast::Sender<Arc<GroupData>>>>,
+    next_tap_id: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Bus {
@@ -46,6 +50,8 @@ impl Bus {
         Self {
             capacity,
             groups: Arc::new(dashmap::DashMap::new()),
+            taps: Arc::new(dashmap::DashMap::new()),
+            next_tap_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         }
     }
 
@@ -55,10 +61,41 @@ impl Bus {
     #[instrument(skip(self, data))]
     pub fn publish(&self, data: Arc<GroupData>) -> Result<usize, Arc<GroupData>> {
         let key = (data.node_id, data.group_id);
+        // 旁路订阅者（如果有）先拿到一份拷贝：它们不参与「有无订阅者」的判定
+        if !self.taps.is_empty() {
+            for t in self.taps.iter() {
+                // 旁路消费者跟不上时按其自身容量丢弃（Lagged），不影响主链路
+                let _ = t.value().send(data.clone());
+            }
+        }
         match self.groups.get(&key) {
             Some(tx) => tx.send(data).map_err(|e| e.0),
             None => Err(data),
         }
+    }
+
+    /// 旁路订阅：接收**所有**分组的发布（不依赖订阅表）。
+    ///
+    /// 返回 `(tap_id, Receiver)`；用 [`Bus::unsubscribe_all`] 注销。
+    /// 用途：历史数据落库、旁路审计。注意它拿到的是每条消息的一份 Arc 拷贝，
+    /// 因此消费者必须足够快，否则按容量丢弃（通过 `Lagged` 可观测）。
+    pub fn subscribe_all(&self) -> (u64, broadcast::Receiver<Arc<GroupData>>) {
+        let id = self
+            .next_tap_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (tx, rx) = broadcast::channel(self.capacity);
+        self.taps.insert(id, tx);
+        (id, rx)
+    }
+
+    /// 注销旁路订阅
+    pub fn unsubscribe_all(&self, tap_id: u64) {
+        self.taps.remove(&tap_id);
+    }
+
+    /// 当前旁路订阅者数量（测试与排障用）
+    pub fn tap_count(&self) -> usize {
+        self.taps.len()
     }
 
     /// 为订阅集合取接收端；尚不存在的分区通道会按需创建。
@@ -129,6 +166,35 @@ mod tests {
             group_name: None,
             tag_names: None,
         })
+    }
+
+    #[tokio::test]
+    async fn tap_receives_every_group_without_subscribing() {
+        let bus = Bus::with_capacity(64);
+        let (tap_id, mut rx) = bus.subscribe_all();
+        assert_eq!(bus.tap_count(), 1);
+
+        // 两个互不相关的分组：旁路订阅者都应收到
+        let (s1, g1) = (NodeId::new(), GroupId::new());
+        let (s2, g2) = (NodeId::new(), GroupId::new());
+        let _ = bus.publish(data(s1, g1, 1));
+        let _ = bus.publish(data(s2, g2, 2));
+
+        let a = rx.recv().await.expect("first message");
+        let b = rx.recv().await.expect("second message");
+        assert_eq!(a.group_id, g1);
+        assert_eq!(b.group_id, g2);
+
+        // 旁路订阅者不计入「有无订阅者」的判定：没有正常订阅者时 publish 仍返回 Err
+        assert!(
+            bus.publish(data(s1, g1, 3)).is_err(),
+            "tap 不应让无人订阅的分组变成「已投递」"
+        );
+        let _ = rx.recv().await;
+
+        bus.unsubscribe_all(tap_id);
+        assert_eq!(bus.tap_count(), 0);
+        assert!(bus.publish(data(s1, g1, 4)).is_err());
     }
 
     #[tokio::test]

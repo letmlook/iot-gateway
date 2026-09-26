@@ -54,6 +54,12 @@ pub struct DataFlowMetrics {
     pub rules_fired: AtomicU64,
     /// 规则动作失败次数（写值失败 / 目标点位不存在）
     pub rules_action_err: AtomicU64,
+    /// 历史数据写入行数
+    pub history_rows_written: AtomicU64,
+    /// 历史数据清理行数
+    pub history_rows_pruned: AtomicU64,
+    /// 历史数据写入失败次数
+    pub history_write_err: AtomicU64,
     /// 按北向节点的 Lagged 条数（用于定位「是哪个北向节点在丢数据」）
     pub lagged_by_node: Arc<dashmap::DashMap<NodeId, AtomicU64>>,
     /// 点位级：南向 (south_node_id, group_id, tag_id) -> 发布次数
@@ -78,6 +84,9 @@ impl DataFlowMetrics {
             south_poll_overrun: AtomicU64::new(0),
             rules_fired: AtomicU64::new(0),
             rules_action_err: AtomicU64::new(0),
+            history_rows_written: AtomicU64::new(0),
+            history_rows_pruned: AtomicU64::new(0),
+            history_write_err: AtomicU64::new(0),
             lagged_by_node: Arc::new(dashmap::DashMap::new()),
             published_per_tag: Arc::new(dashmap::DashMap::new()),
             forwarded_per_tag: Arc::new(dashmap::DashMap::new()),
@@ -162,6 +171,9 @@ impl DataFlowMetrics {
             south_poll_overrun: self.south_poll_overrun.load(Ordering::Relaxed),
             rules_fired: self.rules_fired.load(Ordering::Relaxed),
             rules_action_err: self.rules_action_err.load(Ordering::Relaxed),
+            history_rows_written: self.history_rows_written.load(Ordering::Relaxed),
+            history_rows_pruned: self.history_rows_pruned.load(Ordering::Relaxed),
+            history_write_err: self.history_write_err.load(Ordering::Relaxed),
             lagged_by_node: self
                 .lagged_by_node
                 .iter()
@@ -225,6 +237,12 @@ pub struct DataFlowMetricsSnapshot {
     pub rules_fired: u64,
     /// 规则动作失败次数
     pub rules_action_err: u64,
+    /// 历史数据写入行数
+    pub history_rows_written: u64,
+    /// 历史数据清理行数
+    pub history_rows_pruned: u64,
+    /// 历史数据写入失败次数
+    pub history_write_err: u64,
     /// (北向节点, 跳过的消息条数)：定位是哪个北向节点在丢数据
     pub lagged_by_node: Vec<(NodeId, u64)>,
     pub published_per_tag: Vec<TagPublishedStat>,

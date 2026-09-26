@@ -3,6 +3,7 @@
 mod api;
 mod backup;
 mod config;
+mod history;
 mod license;
 mod logging;
 mod state;
@@ -104,6 +105,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     let mgr = Arc::new(mgr);
+
+    // 历史存储（默认关闭）：通过总线旁路订阅落库，不依赖北向订阅关系
+    let history_stats = std::sync::Arc::new(history::HistoryStats::default());
+    let _history_recorder = if config.history_enabled {
+        match history::HistoryRecorder::start(
+            config.history_cfg(),
+            Some(mgr.bus()),
+            mgr.data_flow_metrics.clone(),
+            history_stats.clone(),
+        ) {
+            Ok(r) => {
+                tracing::info!("history storage enabled: {}", config.history_db().display());
+                Some(r)
+            }
+            Err(e) => {
+                tracing::warn!("history storage disabled (init failed): {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     if let Some(parent) = config.data_db().parent() {
         tokio::fs::create_dir_all(parent).await?;

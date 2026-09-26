@@ -216,6 +216,10 @@ pub fn router(state: AppState) -> Router<AppState> {
             put(handlers::update_rule).delete(handlers::delete_rule),
         )
         .route("/rules/:id/enable", post(handlers::enable_rule))
+        // 历史数据：只读接口，GET 默认 Viewer+（见 required_role）
+        .route("/history/series", get(handlers::history_series))
+        .route("/history/series/list", get(handlers::history_series_list))
+        .route("/history/stats", get(handlers::history_stats))
         .route("/hardware", get(handlers::hardware))
         .route(
             "/logs/config",

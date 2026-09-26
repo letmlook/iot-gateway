@@ -1,7 +1,7 @@
 //! REST API handlers。
 
 use axum::body::Bytes;
-use axum::extract::{Multipart, Path, State};
+use axum::extract::{Multipart, Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
@@ -702,7 +702,16 @@ pub async fn metrics(State(state): State<AppState>) -> (axum::http::StatusCode, 
          gateway_rules_fired {}\n\
          # HELP gateway_rules_action_err Total rule actions that failed.\n\
          # TYPE gateway_rules_action_err counter\n\
-         gateway_rules_action_err {}\n",
+         gateway_rules_action_err {}\n\
+         # HELP gateway_history_rows_written Total history samples written.\n\
+         # TYPE gateway_history_rows_written counter\n\
+         gateway_history_rows_written {}\n\
+         # HELP gateway_history_rows_pruned Total history samples deleted by retention.\n\
+         # TYPE gateway_history_rows_pruned counter\n\
+         gateway_history_rows_pruned {}\n\
+         # HELP gateway_history_write_err Total history write failures.\n\
+         # TYPE gateway_history_write_err counter\n\
+         gateway_history_write_err {}\n",
         nodes_total,
         nodes_running,
         plugins_south,
@@ -720,6 +729,9 @@ pub async fn metrics(State(state): State<AppState>) -> (axum::http::StatusCode, 
         df.south_poll_overrun,
         df.rules_fired,
         df.rules_action_err,
+        df.history_rows_written,
+        df.history_rows_pruned,
+        df.history_write_err,
     );
     // 维度化指标：定位「是哪个北向节点在丢数据」
     let mut body = body;
@@ -808,6 +820,9 @@ pub async fn data_flow(State(state): State<AppState>) -> Json<serde_json::Value>
             "south_poll_overrun": m.south_poll_overrun,
             "rules_fired": m.rules_fired,
             "rules_action_err": m.rules_action_err,
+            "history_rows_written": m.history_rows_written,
+            "history_rows_pruned": m.history_rows_pruned,
+            "history_write_err": m.history_write_err,
         },
         "lagged_by_node": m.lagged_by_node.iter().map(|(nid, n)| {
             serde_json::json!({
@@ -2098,4 +2113,105 @@ fn validate_rule_refs(state: &AppState, rule: &gateway_core::Rule) -> Result<(),
             })?;
     }
     Ok(())
+}
+
+// ---------- History ----------
+
+#[derive(Deserialize)]
+pub struct SeriesQueryParams {
+    pub node_id: String,
+    pub group_id: String,
+    pub tag: String,
+    /// 起始时间（毫秒，可选；默认 1 小时前）
+    pub from: Option<i64>,
+    /// 结束时间（毫秒，可选；默认当前）
+    pub to: Option<i64>,
+    /// 期望最大点数（默认 500，上限 5000）
+    pub max_points: Option<u32>,
+}
+
+#[derive(Deserialize)]
+pub struct SeriesListParams {
+    pub limit: Option<u32>,
+}
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+/// 历史序列查询：SQL 侧分桶降采样，点数不超过 `max_points`
+pub async fn history_series(
+    State(state): State<AppState>,
+    Query(p): Query<SeriesQueryParams>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !state.config.history_enabled {
+        return Err(ApiError::bad_request(
+            "history storage is disabled; set GATEWAY_HISTORY_ENABLED=1 to enable it",
+        ));
+    }
+    let to = p.to.unwrap_or_else(now_ms);
+    let from = p.from.unwrap_or(to - 3_600_000);
+    if from >= to {
+        return Err(ApiError::bad_request("from must be earlier than to"));
+    }
+    let max_points = p.max_points.unwrap_or(500).clamp(1, 5000);
+    let q = crate::history::SeriesQuery {
+        node_id: p.node_id,
+        group_id: p.group_id,
+        tag: p.tag,
+        from_ms: from,
+        to_ms: to,
+        max_points,
+    };
+    let db = state.config.history_db();
+    // SQLite 是阻塞 API：放到阻塞线程池，别占住 async worker
+    let q2 = q.clone();
+    let points = tokio::task::spawn_blocking(move || crate::history::query_series(&db, &q2))
+        .await
+        .map_err(|e| ApiError::bad_request(e.to_string()))?
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(serde_json::json!({
+        "node_id": q.node_id,
+        "group_id": q.group_id,
+        "tag": q.tag,
+        "from": from,
+        "to": to,
+        "bucket_ms": crate::history::bucket_ms(from, to, max_points),
+        "points": points,
+    })))
+}
+
+/// 库中有哪些序列（供前端选择）
+pub async fn history_series_list(
+    State(state): State<AppState>,
+    Query(p): Query<SeriesListParams>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let db = state.config.history_db();
+    let limit = p.limit.unwrap_or(200).clamp(1, 2000);
+    let list = tokio::task::spawn_blocking(move || crate::history::list_series(&db, limit))
+        .await
+        .map_err(|e| ApiError::bad_request(e.to_string()))?
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(serde_json::json!({ "series": list })))
+}
+
+/// 历史存储统计：行数、磁盘占用、时间范围与配置
+pub async fn history_stats(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let db = state.config.history_db();
+    let cfg = state.config.history_cfg();
+    let mut v = tokio::task::spawn_blocking(move || crate::history::db_stats(&db, &cfg))
+        .await
+        .unwrap_or_else(|e| Ok(serde_json::json!({ "error": e.to_string() })))
+        .unwrap_or_else(|e| serde_json::json!({ "error": e }));
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert(
+            "runtime".to_string(),
+            serde_json::json!({
+                "rows_written": state.manager.data_flow_snapshot().history_rows_written,
+                "rows_pruned": state.manager.data_flow_snapshot().history_rows_pruned,
+                "write_errors": state.manager.data_flow_snapshot().history_write_err,
+            }),
+        );
+    }
+    Json(v)
 }

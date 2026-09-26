@@ -50,6 +50,14 @@ pub struct Config {
     pub plugin_isolation: String,
     /// 进程隔离模式下 `gateway-plugin-host` 的路径；为空时按可执行文件同级目录查找
     pub plugin_host_bin: Option<String>,
+    /// 是否启用本地历史存储（默认关闭：开启后会在数据目录写 history.db）
+    pub history_enabled: bool,
+    /// 历史保留时长（小时）
+    pub history_retention_hours: u64,
+    /// 历史落盘批间隔（毫秒）
+    pub history_flush_ms: u64,
+    /// 历史行数上限（超过后从最旧开始删除）
+    pub history_max_rows: u64,
 }
 
 fn default_bind_str() -> String {
@@ -186,6 +194,10 @@ impl Default for Config {
             max_concurrent_polls: default_max_concurrent_polls(),
             plugin_isolation: default_plugin_isolation(),
             plugin_host_bin: None,
+            history_enabled: false,
+            history_retention_hours: 72,
+            history_flush_ms: 1000,
+            history_max_rows: 5_000_000,
         }
     }
 }
@@ -221,6 +233,10 @@ impl Config {
             max_concurrent_polls: default_max_concurrent_polls(),
             plugin_isolation: default_plugin_isolation(),
             plugin_host_bin: None,
+            history_enabled: false,
+            history_retention_hours: 72,
+            history_flush_ms: 1000,
+            history_max_rows: 5_000_000,
         })
     }
 
@@ -348,6 +364,24 @@ impl Config {
                 c.plugin_host_bin = Some(s);
             }
         }
+        if let Ok(s) = std::env::var("GATEWAY_HISTORY_ENABLED") {
+            c.history_enabled = s == "1" || s.eq_ignore_ascii_case("true");
+        }
+        if let Ok(s) = std::env::var("GATEWAY_HISTORY_RETENTION_HOURS") {
+            if let Ok(n) = s.parse::<u64>() {
+                c.history_retention_hours = n;
+            }
+        }
+        if let Ok(s) = std::env::var("GATEWAY_HISTORY_FLUSH_MS") {
+            if let Ok(n) = s.parse::<u64>() {
+                c.history_flush_ms = n;
+            }
+        }
+        if let Ok(s) = std::env::var("GATEWAY_HISTORY_MAX_ROWS") {
+            if let Ok(n) = s.parse::<u64>() {
+                c.history_max_rows = n;
+            }
+        }
         if let Ok(s) = std::env::var("GATEWAY_PERSIST_DEBOUNCE_MS") {
             if let Ok(ms) = s.parse::<u64>() {
                 c.persist_debounce_ms = ms;
@@ -384,6 +418,24 @@ impl Config {
     /// 兼容：原 JSON 路径，可用于迁移或导出
     pub fn data_file(&self) -> PathBuf {
         self.data_dir.join("data.json")
+    }
+
+    /// 历史数据库文件路径（与配置库分开，便于单独备份/清理）
+    pub fn history_db(&self) -> PathBuf {
+        self.data_dir.join("history.db")
+    }
+
+    /// 组装历史存储配置
+    pub fn history_cfg(&self) -> crate::history::HistoryConfig {
+        crate::history::HistoryConfig {
+            enabled: self.history_enabled,
+            db_path: self.history_db(),
+            retention_hours: self.history_retention_hours,
+            flush_ms: self.history_flush_ms,
+            batch_size: 500,
+            max_rows: self.history_max_rows,
+            channel_capacity: 8192,
+        }
     }
 
     /// 离线授权文件路径（license.dat，置于数据目录）
