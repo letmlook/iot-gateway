@@ -1,0 +1,19 @@
+[package]
+name = "gateway-plugin-host"
+version = "0.1.0"
+edition = "2021"
+description = "插件宿主进程：加载单个插件动态库并通过 stdio 提供 RPC，用于进程级插件隔离"
+publish = false
+
+[[bin]]
+name = "gateway-plugin-host"
+path = "src/main.rs"
+
+[dependencies]
+gateway-core = { path = "../gateway-core" }
+gateway-sdk = { path = "../gateway-sdk" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std", "sync", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

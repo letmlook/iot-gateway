@@ -9,6 +9,7 @@ mod state;
 mod users;
 
 use axum::Router;
+use gateway_core::proc_plugin::ProcessPluginLoader;
 use gateway_core::{
     persist_load_json, persist_load_secret, persist_save_secret, Manager, PluginLoader,
 };
@@ -20,7 +21,24 @@ use config::Config;
 use state::AppState;
 use users::UserStore;
 
+/// 定位进程隔离所需的 `gateway-plugin-host`：优先环境变量，其次与网关可执行文件同级目录。
+fn plugin_host_bin(config: &crate::config::Config) -> std::path::PathBuf {
+    if let Some(p) = &config.plugin_host_bin {
+        return std::path::PathBuf::from(p);
+    }
+    let name = if cfg!(windows) {
+        "gateway-plugin-host.exe"
+    } else {
+        "gateway-plugin-host"
+    };
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join(name)))
+        .unwrap_or_else(|| std::path::PathBuf::from(name))
+}
+
 #[tokio::main]
+
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = Config::from_env();
     let node_log_names = config
@@ -45,7 +63,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     if config.plugins_dir.exists() {
-        if let Ok(loader) = PluginLoader::load(&config.plugins_dir, &mut mgr) {
+        if config.plugin_isolation.eq_ignore_ascii_case("process") {
+            // 进程级隔离：每个插件一个子进程，插件 abort/段错误不会带走网关
+            let bin = plugin_host_bin(&config);
+            tracing::info!("plugin isolation: process (host={})", bin.display());
+            let mut pl = ProcessPluginLoader::new(bin);
+            match pl.load(&config.plugins_dir, &mut mgr).await {
+                Ok(()) => {
+                    tracing::info!("{} plugin process(es) started", pl.process_count());
+                }
+                Err(e) => tracing::warn!("isolated plugin load failed: {}", e),
+            }
+            if mgr.south_plugins().is_empty() && mgr.north_plugins().is_empty() {
+                tracing::warn!(
+                    "no plugins loaded from {} (isolated), using built-in",
+                    config.plugins_dir.display()
+                );
+                register_builtin_plugins(&mut mgr);
+            }
+        } else if let Ok(loader) = PluginLoader::load(&config.plugins_dir, &mut mgr) {
             loader_opt = Some(loader);
             // 若目录下未加载到任何插件（如空目录或仅有非插件库），则补充内置插件供管理页展示与使用
             if mgr.south_plugins().is_empty() && mgr.north_plugins().is_empty() {

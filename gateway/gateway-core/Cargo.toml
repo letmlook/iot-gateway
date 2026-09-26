@@ -7,7 +7,7 @@ description = "核心：消息总线、路由、节点/组/标签管理"
 [dependencies]
 gateway-sdk = { path = "../gateway-sdk" }
 libloading = "0.8"
-tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time", "fs"] }
+tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time", "fs", "process", "io-util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-trait = "0.1"

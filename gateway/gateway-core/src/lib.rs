@@ -9,11 +9,12 @@ mod loader;
 mod manager;
 mod node;
 mod persist;
+pub mod proc_plugin;
 mod store;
 
 pub use bus::{subscription_set, Bus, SubscriptionTable};
 pub use data_flow::{DataFlowMetrics, DataFlowMetricsSnapshot, TagForwardedStat, TagPublishedStat};
-pub use loader::PluginLoader;
+pub use loader::{LoadedPlugin, PluginLoader};
 pub use manager::{
     Manager, SouthConnectionState, DEFAULT_MAX_CONCURRENT_POLLS, MIN_POLL_INTERVAL_MS,
 };

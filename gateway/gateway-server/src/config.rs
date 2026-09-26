@@ -46,6 +46,10 @@ pub struct Config {
     pub bus_capacity: usize,
     /// 全局采集并发上限：同时进行的 poll_group 次数，避免同一时刻同时打向设备
     pub max_concurrent_polls: usize,
+    /// 插件加载模式：`inproc`（默认，进程内 FFI）| `process`（每个插件一个子进程，崩溃隔离）
+    pub plugin_isolation: String,
+    /// 进程隔离模式下 `gateway-plugin-host` 的路径；为空时按可执行文件同级目录查找
+    pub plugin_host_bin: Option<String>,
 }
 
 fn default_bind_str() -> String {
@@ -67,6 +71,14 @@ fn default_bus_capacity() -> usize {
 /// 采集并发上限默认值（与 gateway-core 的 DEFAULT_MAX_CONCURRENT_POLLS 一致）
 fn default_max_concurrent_polls() -> usize {
     32
+}
+
+/// 插件加载模式默认值：`inproc`
+///
+/// 默认保持进程内加载：延迟最低、部署最简单。需要跑**不可信或未充分验证**的插件、
+/// 或插件里有段错误/abort 风险时，用 `GATEWAY_PLUGIN_ISOLATION=process` 打开进程隔离。
+fn default_plugin_isolation() -> String {
+    "inproc".to_string()
 }
 
 /// 持久化写合并窗口默认 300ms：足够合并一次页面上的连续操作，又不会让数据长时间只在内存里
@@ -172,6 +184,8 @@ impl Default for Config {
             persist_debounce_ms: default_persist_debounce_ms(),
             bus_capacity: default_bus_capacity(),
             max_concurrent_polls: default_max_concurrent_polls(),
+            plugin_isolation: default_plugin_isolation(),
+            plugin_host_bin: None,
         }
     }
 }
@@ -205,6 +219,8 @@ impl Config {
             persist_debounce_ms: default_persist_debounce_ms(),
             bus_capacity: default_bus_capacity(),
             max_concurrent_polls: default_max_concurrent_polls(),
+            plugin_isolation: default_plugin_isolation(),
+            plugin_host_bin: None,
         })
     }
 
@@ -320,6 +336,16 @@ impl Config {
         if let Ok(s) = std::env::var("GATEWAY_MAX_CONCURRENT_POLLS") {
             if let Ok(n) = s.parse::<usize>() {
                 c.max_concurrent_polls = n;
+            }
+        }
+        if let Ok(s) = std::env::var("GATEWAY_PLUGIN_ISOLATION") {
+            if !s.is_empty() {
+                c.plugin_isolation = s;
+            }
+        }
+        if let Ok(s) = std::env::var("GATEWAY_PLUGIN_HOST_BIN") {
+            if !s.is_empty() {
+                c.plugin_host_bin = Some(s);
             }
         }
         if let Ok(s) = std::env::var("GATEWAY_PERSIST_DEBOUNCE_MS") {

@@ -761,50 +761,61 @@ impl PluginLoader {
         mgr: &mut crate::manager::Manager,
         libraries: &mut Vec<Library>,
     ) -> Result<(), String> {
-        let lib = unsafe { Library::new(path) }.map_err(|e| format!("Library::new: {}", e))?;
-
-        // ABI 版本校验：符号存在且版本不符时拒绝加载。
-        // 版本不一致意味着跨边界的数据结构约定已改变，早失败远好于运行期错乱。
-        if let Ok(f) = unsafe {
-            lib.get::<unsafe extern "C-unwind" fn() -> u32>(b"gateway_plugin_abi_version\0")
-        } {
-            let plugin_abi = unsafe { f() };
-            let host_abi = gateway_sdk::ffi::FFI_ABI_VERSION;
-            if plugin_abi != host_abi {
-                return Err(format!(
-                    "ABI version mismatch: plugin={} host={} (rebuild the plugin against this SDK)",
-                    plugin_abi, host_abi
-                ));
-            }
-        } else {
-            warn!(
-                path = %path.display(),
-                "plugin does not export gateway_plugin_abi_version (built with an older SDK); loading anyway"
-            );
-        }
-
-        let free_fn: FreeStringFn = unsafe {
-            *lib.get(SYM_FREE_STRING)
-                .map_err(|e| format!("get free_string: {}", e))?
-        };
-
-        if let Ok(adapter) = Self::try_south(&lib, free_fn) {
-            let meta = Self::plugin_meta(&adapter, "south")?;
-            info!(path = %path.display(), name = %meta.name, "loaded south .so");
-            mgr.register_south(&meta.name, Arc::new(adapter));
-            libraries.push(lib);
+        let loaded = Self::load_plugin_file(path)?;
+        let name = loaded.meta().name.clone();
+        if let Some(p) = loaded.south() {
+            info!(path = %path.display(), name = %name, "loaded south .so");
+            mgr.register_south(&name, p);
+            libraries.push(*loaded.into_library());
             return Ok(());
         }
-
-        if let Ok(adapter) = Self::try_north(&lib, free_fn) {
-            let meta = Self::plugin_meta(&adapter, "north")?;
-            info!(path = %path.display(), name = %meta.name, "loaded north .so");
-            mgr.register_north(&meta.name, Arc::new(adapter));
-            libraries.push(lib);
+        if let Some(p) = loaded.north() {
+            info!(path = %path.display(), name = %name, "loaded north .so");
+            mgr.register_north(&name, p);
+            libraries.push(*loaded.into_library());
             return Ok(());
         }
-
         Err("no south/north symbols found".to_string())
+    }
+}
+
+/// 已加载但尚未注册的插件动态库。
+///
+/// 字段顺序即析构顺序：适配器（`south`/`north`）先于 `_lib` 析构，因为适配器 Drop 时
+/// 仍要回调库内的 `*_plugin_destroy`；`_lib` 提前释放会变成悬空函数指针。
+pub struct LoadedPlugin {
+    south: Option<Arc<dyn gateway_sdk::SouthPlugin>>,
+    north: Option<Arc<dyn gateway_sdk::NorthPlugin>>,
+    meta: gateway_sdk::ffi::FfiPluginMeta,
+    _lib: Box<Library>,
+}
+
+impl LoadedPlugin {
+    pub fn south(&self) -> Option<Arc<dyn gateway_sdk::SouthPlugin>> {
+        self.south.clone()
+    }
+
+    pub fn north(&self) -> Option<Arc<dyn gateway_sdk::NorthPlugin>> {
+        self.north.clone()
+    }
+
+    pub fn meta(&self) -> &gateway_sdk::ffi::FfiPluginMeta {
+        &self.meta
+    }
+
+    /// 取出动态库句柄（供调用方保持其常驻，例如 `PluginLoader` 的 libraries 列表）
+    pub fn into_library(self) -> Box<Library> {
+        self._lib
+    }
+}
+
+impl PluginLoader {
+    /// 加载一个插件动态库并构造适配器，**不注册到 Manager**。
+    ///
+    /// 供非「目录扫描」场景使用：进程级插件宿主（`gateway-plugin-host`）用它加载单个 .so，
+    /// 再由宿主进程对外提供 RPC；这样 FFI 符号解析与 ABI 校验只有一份实现。
+    pub fn load_plugin_file(path: &Path) -> Result<LoadedPlugin, String> {
+        load_plugin_file_impl(path)
     }
 
     /// 校验插件 meta 是否可用，并返回解析结果。
@@ -939,4 +950,56 @@ impl PluginLoader {
             cached_meta: std::sync::OnceLock::new(),
         })
     }
+}
+
+/// [`PluginLoader::load_plugin_file`] 的实现：ABI 校验 → 解析符号 → 构造南/北向适配器。
+fn load_plugin_file_impl(path: &Path) -> Result<LoadedPlugin, String> {
+    let lib = unsafe { Library::new(path) }.map_err(|e| format!("Library::new: {}", e))?;
+
+    // ABI 版本校验：符号存在且版本不符时拒绝加载。
+    // 版本不一致意味着跨边界的数据结构约定已改变，早失败远好于运行期错乱。
+    if let Ok(f) =
+        unsafe { lib.get::<unsafe extern "C-unwind" fn() -> u32>(b"gateway_plugin_abi_version\0") }
+    {
+        let plugin_abi = unsafe { f() };
+        let host_abi = gateway_sdk::ffi::FFI_ABI_VERSION;
+        if plugin_abi != host_abi {
+            return Err(format!(
+                "ABI version mismatch: plugin={} host={} (rebuild the plugin against this SDK)",
+                plugin_abi, host_abi
+            ));
+        }
+    } else {
+        warn!(
+            path = %path.display(),
+            "plugin does not export gateway_plugin_abi_version (built with an older SDK); loading anyway"
+        );
+    }
+
+    let free_fn: FreeStringFn = unsafe {
+        *lib.get(SYM_FREE_STRING)
+            .map_err(|e| format!("get free_string: {}", e))?
+    };
+
+    if let Ok(adapter) = PluginLoader::try_south(&lib, free_fn) {
+        let meta = PluginLoader::plugin_meta(&adapter, "south")?;
+        return Ok(LoadedPlugin {
+            south: Some(Arc::new(adapter)),
+            north: None,
+            meta,
+            _lib: Box::new(lib),
+        });
+    }
+
+    if let Ok(adapter) = PluginLoader::try_north(&lib, free_fn) {
+        let meta = PluginLoader::plugin_meta(&adapter, "north")?;
+        return Ok(LoadedPlugin {
+            south: None,
+            north: Some(Arc::new(adapter)),
+            meta,
+            _lib: Box::new(lib),
+        });
+    }
+
+    Err("no south/north symbols found".to_string())
 }

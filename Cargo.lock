@@ -692,6 +692,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "gateway-plugin-host"
+version = "0.1.0"
+dependencies = [
+ "gateway-core",
+ "gateway-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "gateway-sdk"
 version = "0.1.0"
 dependencies = [

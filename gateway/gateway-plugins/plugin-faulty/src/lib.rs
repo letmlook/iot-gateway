@@ -4,7 +4,9 @@
 //! 插件一旦 panic（或内部 `block_on`）会直接 abort 整个网关；本夹具用于把这类回归钉死在测试里。
 //!
 //! 触发方式：
-//! - 节点配置 `panic_on`：`open` | `start` | `poll` | `write`，其余值表示正常运行；
+//! - 节点配置 `panic_on`：`open` | `start` | `poll` | `write` | `abort`，其余值表示正常运行；
+//!   `abort` 会用 `std::process::abort()` 直接杀掉进程——用来验证**进程级隔离**是否真的生效
+//!   （进程内模式下它会杀掉整个网关，这正是需要隔离的理由）；
 //! - 环境变量 `FAULTY_PLUGIN_PANIC_META=1`：让加载期的 `meta` 调用 panic（该阶段拿不到节点配置）。
 
 #[cfg(feature = "ffi")]
@@ -27,6 +29,8 @@ pub enum PanicOn {
     Start,
     Poll,
     Write,
+    /// 直接终止进程（不是 panic 能捕获的那类故障）
+    Abort,
 }
 
 impl PanicOn {
@@ -37,6 +41,7 @@ impl PanicOn {
             Some("start") => PanicOn::Start,
             Some("poll") => PanicOn::Poll,
             Some("write") => PanicOn::Write,
+            Some("abort") => PanicOn::Abort,
             _ => PanicOn::None,
         }
     }
@@ -127,8 +132,14 @@ impl SouthPlugin for FaultyPlugin {
         tags: &[Tag],
     ) -> PluginResult<Vec<(TagId, DataValue)>> {
         let _ = group_id;
-        if self.mode_of(node_id) == PanicOn::Poll {
-            inject("poll_group");
+        match self.mode_of(node_id) {
+            PanicOn::Poll => inject("poll_group"),
+            // 硬崩溃：模拟段错误/abort 这类进程内无法挽回的故障
+            PanicOn::Abort => {
+                eprintln!("faulty plugin: aborting process on purpose (poll_group)");
+                std::process::abort();
+            }
+            _ => {}
         }
         Ok(tags.iter().map(|t| (t.id, DataValue::Int32(42))).collect())
     }
@@ -183,6 +194,14 @@ mod tests {
         assert_eq!(
             PanicOn::from_config(&cfg(json!({ "panic_on": "start" }))),
             PanicOn::Start
+        );
+    }
+
+    #[test]
+    fn abort_stage_is_parsed() {
+        assert_eq!(
+            PanicOn::from_config(&cfg(json!({ "panic_on": "abort" }))),
+            PanicOn::Abort
         );
     }
 
