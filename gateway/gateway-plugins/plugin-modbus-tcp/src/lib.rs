@@ -6,6 +6,7 @@ mod ffi;
 
 mod address;
 mod config;
+mod merge;
 mod state;
 mod value;
 
@@ -20,7 +21,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use address::{parse_address, parse_address_full, ModbusArea};
+use address::{parse_address, parse_address_full, ModbusArea, ParsedAddress};
 use config::{config_str, config_u16};
 use state::ModbusTcpState;
 use value::{register_to_value_ext, value_to_registers};
@@ -502,96 +503,195 @@ impl SouthPlugin for ModbusTcpPlugin {
                 .ok_or_else(|| PluginError::msg("modbus connection unavailable"))?;
 
             let send_interval = Duration::from_millis(s.send_interval_ms.min(5000));
-            let mut out = Vec::with_capacity(tags.len());
+
+            // 先规划：地址相邻、形状相同的寄存器点位合并为一次批量读
+            let parsed: Vec<Option<ParsedAddress>> = tags
+                .iter()
+                .map(|t| parse_address_full(&t.address, s.start_address))
+                .collect();
+            let reads: Vec<merge::TagRead> = parsed
+                .iter()
+                .enumerate()
+                .filter_map(|(i, p)| p.clone().map(|p| merge::TagRead::new(i, p)))
+                .collect();
+            let (plans, singles) = merge::plan_merges(
+                &reads,
+                merge::DEFAULT_MERGE_GAP,
+                merge::DEFAULT_MAX_READ_REGS,
+            );
+
+            // 现场可直接在 debug 日志里看到合并效果（请求数从 tags 个降到个位数）
+            tracing::debug!(
+                node_id = ?node_id,
+                tags = tags.len(),
+                merged_reads = plans.len(),
+                single_reads = singles.len(),
+                "modbus poll plan"
+            );
+
+            let mut slots: Vec<Option<(TagId, DataValue)>> = vec![None; tags.len()];
             let mut failure: Option<PluginError> = None;
 
-            'read: for tag in tags {
-                let value = match parse_address_full(&tag.address, s.start_address) {
-                    Some(parsed) => {
-                        let dt = tag.data_type.as_deref().unwrap_or("uint16");
-                        let v = match parsed.area {
-                            ModbusArea::Coil => match ctx.read_coils(parsed.start, parsed.count).await {
-                                Ok(Ok(v)) => DataValue::Bool(v.first().copied().unwrap_or(false)),
-                                Ok(Err(e)) => {
-                                    failure = Some(PluginError::msg(format!("read_coils exception: {}", e)));
-                                    break 'read;
-                                }
-                                Err(e) => {
-                                    failure = Some(PluginError::msg(format!("read_coils: {}", e)));
-                                    break 'read;
-                                }
-                            },
-                            ModbusArea::DiscreteInput => match ctx
-                                .read_discrete_inputs(parsed.start, parsed.count)
-                                .await
-                            {
-                                Ok(Ok(v)) => DataValue::Bool(v.first().copied().unwrap_or(false)),
-                                Ok(Err(e)) => {
-                                    failure = Some(PluginError::msg(format!(
-                                        "read_discrete_inputs exception: {}",
-                                        e
-                                    )));
-                                    break 'read;
-                                }
-                                Err(e) => {
-                                    failure = Some(PluginError::msg(format!(
-                                        "read_discrete_inputs: {}",
-                                        e
-                                    )));
-                                    break 'read;
-                                }
-                            },
-                            ModbusArea::InputRegister => match ctx
-                                .read_input_registers(parsed.start, parsed.count)
-                                .await
-                            {
-                                Ok(Ok(regs)) => {
-                                    register_to_value_ext(&regs, dt, &parsed.endian, parsed.bit_index)
-                                }
-                                Ok(Err(e)) => {
-                                    failure = Some(PluginError::msg(format!(
-                                        "read_input_registers exception: {}",
-                                        e
-                                    )));
-                                    break 'read;
-                                }
-                                Err(e) => {
-                                    failure = Some(PluginError::msg(format!(
-                                        "read_input_registers: {}",
-                                        e
-                                    )));
-                                    break 'read;
-                                }
-                            },
-                            ModbusArea::HoldingRegister => match ctx
-                                .read_holding_registers(parsed.start, parsed.count)
-                                .await
-                            {
-                                Ok(Ok(regs)) => {
-                                    register_to_value_ext(&regs, dt, &parsed.endian, parsed.bit_index)
-                                }
-                                Ok(Err(e)) => {
-                                    failure = Some(PluginError::msg(format!(
-                                        "read_holding_registers exception: {}",
-                                        e
-                                    )));
-                                    break 'read;
-                                }
-                                Err(e) => {
-                                    failure = Some(PluginError::msg(format!(
-                                        "read_holding_registers: {}",
-                                        e
-                                    )));
-                                    break 'read;
-                                }
-                            },
-                        };
-                        tokio::time::sleep(send_interval).await;
-                        v
+            // 1) 批量读：一次请求覆盖一个地址区间
+            'plan: for plan in &plans {
+                let regs = match plan.area {
+                    ModbusArea::HoldingRegister => {
+                        match ctx.read_holding_registers(plan.start, plan.count).await {
+                            Ok(Ok(v)) => v,
+                            Ok(Err(e)) => {
+                                failure = Some(PluginError::msg(format!(
+                                    "read_holding_registers exception: {}",
+                                    e
+                                )));
+                                break 'plan;
+                            }
+                            Err(e) => {
+                                failure =
+                                    Some(PluginError::msg(format!("read_holding_registers: {}", e)));
+                                break 'plan;
+                            }
+                        }
                     }
-                    None => DataValue::UInt16(0),
+                    ModbusArea::InputRegister => {
+                        match ctx.read_input_registers(plan.start, plan.count).await {
+                            Ok(Ok(v)) => v,
+                            Ok(Err(e)) => {
+                                failure = Some(PluginError::msg(format!(
+                                    "read_input_registers exception: {}",
+                                    e
+                                )));
+                                break 'plan;
+                            }
+                            Err(e) => {
+                                failure =
+                                    Some(PluginError::msg(format!("read_input_registers: {}", e)));
+                                break 'plan;
+                            }
+                        }
+                    }
+                    // 规划阶段只会产出寄存器类计划
+                    _ => continue 'plan,
                 };
-                out.push((tag.id, value));
+
+                for (idx, offset) in &plan.members {
+                    let Some(p) = parsed[*idx].as_ref() else {
+                        continue;
+                    };
+                    let begin = *offset as usize;
+                    let end = begin + p.count as usize;
+                    let window = regs.get(begin..end).unwrap_or(&[]);
+                    let dt = tags[*idx].data_type.as_deref().unwrap_or("uint16");
+                    slots[*idx] = Some((
+                        tags[*idx].id,
+                        register_to_value_ext(window, dt, &p.endian, p.bit_index),
+                    ));
+                }
+                tokio::time::sleep(send_interval).await;
+            }
+
+            // 2) 逐点读：线圈 / 离散输入 / 带 .BIT 的寄存器（不参与合并）
+            if failure.is_none() {
+                'single: for idx in &singles {
+                    let tag = &tags[*idx];
+                    let value = match parsed[*idx].as_ref() {
+                        Some(p) => {
+                            let dt = tag.data_type.as_deref().unwrap_or("uint16");
+                            match p.area {
+                                ModbusArea::Coil => {
+                                    match ctx.read_coils(p.start, p.count).await {
+                                        Ok(Ok(v)) => {
+                                            DataValue::Bool(v.first().copied().unwrap_or(false))
+                                        }
+                                        Ok(Err(e)) => {
+                                            failure = Some(PluginError::msg(format!(
+                                                "read_coils exception: {}",
+                                                e
+                                            )));
+                                            break 'single;
+                                        }
+                                        Err(e) => {
+                                            failure =
+                                                Some(PluginError::msg(format!("read_coils: {}", e)));
+                                            break 'single;
+                                        }
+                                    }
+                                }
+                                ModbusArea::DiscreteInput => {
+                                    match ctx.read_discrete_inputs(p.start, p.count).await {
+                                        Ok(Ok(v)) => {
+                                            DataValue::Bool(v.first().copied().unwrap_or(false))
+                                        }
+                                        Ok(Err(e)) => {
+                                            failure = Some(PluginError::msg(format!(
+                                                "read_discrete_inputs exception: {}",
+                                                e
+                                            )));
+                                            break 'single;
+                                        }
+                                        Err(e) => {
+                                            failure = Some(PluginError::msg(format!(
+                                                "read_discrete_inputs: {}",
+                                                e
+                                            )));
+                                            break 'single;
+                                        }
+                                    }
+                                }
+                                ModbusArea::InputRegister => {
+                                    match ctx.read_input_registers(p.start, p.count).await {
+                                        Ok(Ok(regs)) => register_to_value_ext(
+                                            &regs,
+                                            dt,
+                                            &p.endian,
+                                            p.bit_index,
+                                        ),
+                                        Ok(Err(e)) => {
+                                            failure = Some(PluginError::msg(format!(
+                                                "read_input_registers exception: {}",
+                                                e
+                                            )));
+                                            break 'single;
+                                        }
+                                        Err(e) => {
+                                            failure = Some(PluginError::msg(format!(
+                                                "read_input_registers: {}",
+                                                e
+                                            )));
+                                            break 'single;
+                                        }
+                                    }
+                                }
+                                ModbusArea::HoldingRegister => {
+                                    match ctx.read_holding_registers(p.start, p.count).await {
+                                        Ok(Ok(regs)) => register_to_value_ext(
+                                            &regs,
+                                            dt,
+                                            &p.endian,
+                                            p.bit_index,
+                                        ),
+                                        Ok(Err(e)) => {
+                                            failure = Some(PluginError::msg(format!(
+                                                "read_holding_registers exception: {}",
+                                                e
+                                            )));
+                                            break 'single;
+                                        }
+                                        Err(e) => {
+                                            failure = Some(PluginError::msg(format!(
+                                                "read_holding_registers: {}",
+                                                e
+                                            )));
+                                            break 'single;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        None => DataValue::UInt16(0),
+                    };
+                    slots[*idx] = Some((tag.id, value));
+                    tokio::time::sleep(send_interval).await;
+                }
             }
 
             match failure {
@@ -602,7 +702,11 @@ impl SouthPlugin for ModbusTcpPlugin {
                 }
                 None => {
                     cst.on_success();
-                    Ok(out)
+                    Ok(slots
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, v)| v.unwrap_or((tags[i].id, DataValue::UInt16(0))))
+                        .collect())
                 }
             }
         }

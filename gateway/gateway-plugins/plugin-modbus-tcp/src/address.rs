@@ -1,7 +1,7 @@
 //! Modbus TCP 地址解析：0x!addr / 1x!addr / 3x!addr / 4x!addr 或 1!400001[.BIT][#ENDIAN]。
 
 /// Modbus 区域：0=线圈 1=离散输入 3=输入寄存器 4=保持寄存器
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModbusArea {
     Coil,
     DiscreteInput,
@@ -10,14 +10,14 @@ pub enum ModbusArea {
 }
 
 /// 字节序：#L/#B(16bit) #LL/#LB/#BL/#BB(32/64bit)
-#[derive(Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Endianness {
     pub swap16: bool,
     pub order32: u8,
 }
 
 /// 解析后的地址（支持 4x!addr 与 1!400001[.BIT][#ENDIAN]）
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ParsedAddress {
     pub area: ModbusArea,
     pub start: u16,
