@@ -156,8 +156,25 @@ Backups created now can only be restored by this running instance. Set a fixed s
 
     let state = AppState::new(mgr, config.clone(), loader_opt, feature_manager, user_store, node_log_names);
     state.sync_node_log_names();
-    // 优雅退出时需要用到 Manager（state 随后会被 move 进 Router）
-    let shutdown_manager = state.manager.clone();
+    // 优雅退出时需要用到状态（state 随后会被 move 进 Router）
+    let shutdown_state = state.clone();
+
+    // 后台合并落盘：把去抖窗口内的多次变更合并成一次 SQLite 事务，
+    // 避免「改一个点位就全量重写一次配置库」的写放大。
+    if config.persist_debounce_ms > 0 {
+        let flusher = state.clone();
+        let tick_ms = (config.persist_debounce_ms / 2).max(50);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_millis(tick_ms));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                if flusher.persist_pending() {
+                    flusher.flush().await;
+                }
+            }
+        });
+    }
 
     // CORS：默认拒绝所有跨域来源（前端由本服务同源提供）；允许的来源需显式配置 GATEWAY_ALLOWED_ORIGINS
     let cors = if config.allowed_origins.is_empty() {
@@ -209,14 +226,15 @@ Backups created now can only be restored by this running instance. Set a fixed s
     tracing::info!("gateway listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, serve)
-        .with_graceful_shutdown(shutdown_signal(shutdown_manager))
+        .with_graceful_shutdown(shutdown_signal(shutdown_state))
         .await?;
     Ok(())
 }
 
 /// 优雅退出：收到 SIGINT/SIGTERM 后停止接收新请求，顺序停止所有运行中的节点，
 /// 等待采集任务收敛并落盘，避免停机时丢数据或留下孤儿任务。
-async fn shutdown_signal(manager: Arc<Manager>) {
+async fn shutdown_signal(state: AppState) {
+    let manager = state.manager.clone();
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -254,5 +272,7 @@ async fn shutdown_signal(manager: Arc<Manager>) {
             }
         }
     }
+    // 退出前强制落盘：去抖窗口内可能仍有未写入的变更
+    state.flush().await;
     tracing::info!("gateway stopped");
 }

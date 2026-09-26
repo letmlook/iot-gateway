@@ -18,6 +18,8 @@ pub struct AppState {
     pub user_store: Arc<UserStore>,
     /// 节点 ID -> 节点名称，用于节点日志文件名（按名称生成）
     pub node_log_names: Option<NodeLogNameMap>,
+    /// 持久化脏标记：true 表示内存中已有尚未落盘的变更
+    persist_dirty: Arc<std::sync::atomic::AtomicBool>,
     _loader: Option<Arc<PluginLoader>>,
 }
 
@@ -36,6 +38,7 @@ impl AppState {
             feature_manager,
             user_store,
             node_log_names,
+            persist_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             _loader: loader.map(Arc::new),
         }
     }
@@ -55,16 +58,33 @@ impl AppState {
         }
     }
 
-    /// 持久化到 config.data_db()（SQLite）；敏感配置项在落盘前加密
+    /// 标记有配置变更。去抖窗口内不立即写库，由后台任务合并为一次事务；
+    /// 窗口设为 0（`GATEWAY_PERSIST_DEBOUNCE_MS=0`）时退化为「每次变更立即落盘」。
     pub async fn persist(&self) {
+        use std::sync::atomic::Ordering;
+        self.persist_dirty.store(true, Ordering::Relaxed);
+        if self.config.persist_debounce_ms == 0 {
+            self.flush().await;
+        }
+    }
+
+    /// 是否仍有未落盘的变更
+    pub fn persist_pending(&self) -> bool {
+        self.persist_dirty.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 立即把当前快照落盘（合并此前累积的所有变更）。
+    /// 落盘失败时保留脏标记，交由下一次触发重试。
+    pub async fn flush(&self) {
+        use std::sync::atomic::Ordering;
+        if !self.persist_dirty.swap(false, Ordering::Relaxed) {
+            return;
+        }
         let path = self.config.data_db();
         let snap = self.manager.build_snapshot().await;
         let secret = self.config.master_secret.as_deref();
-        let res = match secret {
-            Some(k) => persist_save_secret(&path, &snap, Some(k)).await,
-            None => persist_save_secret(&path, &snap, None).await,
-        };
-        if let Err(e) = res {
+        if let Err(e) = persist_save_secret(&path, &snap, secret).await {
+            self.persist_dirty.store(true, Ordering::Relaxed);
             warn!(path = %path.display(), "persist failed: {}", e);
         }
     }

@@ -619,4 +619,63 @@ mod tests {
         .unwrap();
         assert_eq!(res.status().as_u16(), 200);
     }
+
+    // ---------- B3 持久化写合并 ----------
+
+    fn persist_state(dir: &std::path::Path, debounce_ms: u64) -> AppState {
+        let mut cfg = crate::config::Config::default();
+        cfg.data_dir = dir.to_path_buf();
+        cfg.disable_auth = true;
+        cfg.persist_debounce_ms = debounce_ms;
+        AppState::new(
+            Arc::new(Manager::new()),
+            cfg,
+            None,
+            crate::license::FeatureManager::without_license(),
+            Arc::new(crate::users::UserStore::empty()),
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn debounced_persist_defers_write_until_flush() {
+        let dir = std::env::temp_dir().join(format!("gw-persist-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = persist_state(&dir, 300);
+        let db = dir.join("data.db");
+
+        // 多次变更只累积脏标记，不立即写库
+        state.persist().await;
+        state.persist().await;
+        state.persist().await;
+        assert!(state.persist_pending(), "changes should be pending");
+        assert!(!db.exists(), "write must be deferred inside the debounce window");
+
+        // 一次 flush 把所有变更合并落盘
+        state.flush().await;
+        assert!(!state.persist_pending(), "dirty flag should be cleared");
+        assert!(db.exists(), "flush should persist the snapshot");
+
+        // flush 幂等：无新变更时不再重复写
+        let mtime = std::fs::metadata(&db).unwrap().modified().unwrap();
+        state.flush().await;
+        assert_eq!(
+            std::fs::metadata(&db).unwrap().modified().unwrap(),
+            mtime,
+            "flush without changes should be a no-op"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn immediate_mode_persists_on_every_change() {
+        let dir = std::env::temp_dir().join(format!("gw-persist0-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = persist_state(&dir, 0);
+        state.persist().await;
+        assert!(dir.join("data.db").exists(), "debounce=0 should write immediately");
+        assert!(!state.persist_pending());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

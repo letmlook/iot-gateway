@@ -40,6 +40,8 @@ pub struct Config {
     pub master_secret: Option<String>,
     /// 是否启用角色授权（RBAC）：默认开启；`GATEWAY_ENFORCE_ROLES=0` 可临时关闭以便灰度
     pub enforce_roles: bool,
+    /// 持久化写合并窗口（毫秒）：窗口内的多次变更合并为一次 SQLite 事务；0 表示每次变更立即落盘
+    pub persist_debounce_ms: u64,
 }
 
 fn default_bind_str() -> String {
@@ -51,6 +53,11 @@ fn random_secret() -> String {
     use rand::Rng;
     let bytes: [u8; 32] = rand::thread_rng().gen();
     hex::encode(bytes)
+}
+
+/// 持久化写合并窗口默认 300ms：足够合并一次页面上的连续操作，又不会让数据长时间只在内存里
+fn default_persist_debounce_ms() -> u64 {
+    300
 }
 
 fn parse_origins(s: &str) -> Vec<String> {
@@ -148,6 +155,7 @@ impl Default for Config {
             bind: default_bind_str(),
             master_secret: None,
             enforce_roles: true,
+            persist_debounce_ms: default_persist_debounce_ms(),
         }
     }
 }
@@ -174,6 +182,7 @@ impl Config {
             bind: if cf.bind.is_empty() { default_bind_str() } else { cf.bind },
             master_secret: None,
             enforce_roles: true,
+            persist_debounce_ms: default_persist_debounce_ms(),
         })
     }
 
@@ -280,6 +289,11 @@ impl Config {
         }
         if let Ok(s) = std::env::var("GATEWAY_ENFORCE_ROLES") {
             c.enforce_roles = !(s == "0" || s.eq_ignore_ascii_case("false"));
+        }
+        if let Ok(s) = std::env::var("GATEWAY_PERSIST_DEBOUNCE_MS") {
+            if let Ok(ms) = s.parse::<u64>() {
+                c.persist_debounce_ms = ms;
+            }
         }
         // 未提供备份密钥时随机生成：保证不再有「写死在仓库中的默认密钥」
         if c.backup_secret.is_empty() {

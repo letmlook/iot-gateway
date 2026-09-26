@@ -133,6 +133,7 @@ pub fn build_snapshot(
 }
 
 fn ensure_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
+    apply_pragmas(conn)?;
     conn.execute_batch(SCHEMA)?;
     let mut stmt = conn.prepare("SELECT version FROM meta LIMIT 1")?;
     let has_version = stmt.exists([])?;
@@ -140,6 +141,42 @@ fn ensure_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
     if !has_version {
         conn.execute("INSERT INTO meta (version) VALUES (?1)", [SNAPSHOT_VERSION])?;
     }
+    Ok(())
+}
+
+/// SQLite 运行参数：
+/// - `WAL`：读写并发（API 写不再阻塞读），显著降低 SQLITE_BUSY
+/// - `synchronous=NORMAL`：WAL 下进程崩溃不损坏库，仅在断电时可能丢最后若干提交
+/// - `busy_timeout`：并发写等待而不是立刻返回 SQLITE_BUSY
+/// - `foreign_keys`：保持引用完整性约束
+fn apply_pragmas(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;
+         PRAGMA busy_timeout = 5000;
+         PRAGMA foreign_keys = ON;",
+    )
+}
+
+/// 删除表中已不在快照里的行（`keys` 为空表示清空该表）
+fn delete_missing(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    key_expr: &str,
+    keys: &[String],
+) -> Result<(), PersistError> {
+    if keys.is_empty() {
+        tx.execute(&format!("DELETE FROM {}", table), [])?;
+        return Ok(());
+    }
+    let placeholders = vec!["?"; keys.len()].join(", ");
+    let sql = format!(
+        "DELETE FROM {} WHERE {} NOT IN ({})",
+        table, key_expr, placeholders
+    );
+    let params: Vec<&dyn rusqlite::ToSql> =
+        keys.iter().map(|k| k as &dyn rusqlite::ToSql).collect();
+    tx.execute(&sql, params.as_slice())?;
     Ok(())
 }
 
@@ -449,15 +486,19 @@ fn decrypt_snapshot(s: &mut Snapshot, secret: Option<&str>) {
 fn save_to_db(conn: &Connection, s: &Snapshot) -> Result<(), PersistError> {
     s.validate()?;
     let tx = conn.unchecked_transaction()?;
-    tx.execute("DELETE FROM nodes", [])?;
-    tx.execute("DELETE FROM groups", [])?;
-    tx.execute("DELETE FROM tags", [])?;
-    tx.execute("DELETE FROM subscriptions", [])?;
     tx.execute("UPDATE meta SET version = ?1", [s.version])?;
 
+    // 增量写入：UPSERT 只影响真正变化的行，配合末尾的“删除差集”保持全量语义。
+    // 相比原来的「DELETE 全表 + 全量 INSERT」，变更 1 个点位不再重写整库。
     for n in &s.nodes {
         tx.execute(
-            "INSERT INTO nodes (id, name, kind, plugin_name, config, state) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO nodes (id, name, kind, plugin_name, config, state) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                kind = excluded.kind,
+                plugin_name = excluded.plugin_name,
+                config = excluded.config,
+                state = excluded.state",
             params![
                 n.config.id.0.to_string(),
                 n.config.name,
@@ -468,9 +509,16 @@ fn save_to_db(conn: &Connection, s: &Snapshot) -> Result<(), PersistError> {
             ],
         )?;
     }
+    let node_keys: Vec<String> = s.nodes.iter().map(|n| n.config.id.0.to_string()).collect();
+    delete_missing(&tx, "nodes", "id", &node_keys)?;
+
     for (nid, g) in &s.groups {
         tx.execute(
-            "INSERT INTO groups (node_id, group_id, name, interval_ms, description) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO groups (node_id, group_id, name, interval_ms, description) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(node_id, group_id) DO UPDATE SET
+                name = excluded.name,
+                interval_ms = excluded.interval_ms,
+                description = excluded.description",
             params![
                 nid.0.to_string(),
                 g.id.0.to_string(),
@@ -480,9 +528,24 @@ fn save_to_db(conn: &Connection, s: &Snapshot) -> Result<(), PersistError> {
             ],
         )?;
     }
+    let group_keys: Vec<String> = s
+        .groups
+        .iter()
+        .map(|(nid, g)| format!("{}|{}", nid.0, g.id.0))
+        .collect();
+    delete_missing(&tx, "groups", "node_id || '|' || group_id", &group_keys)?;
+
     for (nid, t) in &s.tags {
         tx.execute(
-            "INSERT INTO tags (tag_id, node_id, group_id, name, address, attr, data_type, description) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO tags (tag_id, node_id, group_id, name, address, attr, data_type, description) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(tag_id) DO UPDATE SET
+                node_id = excluded.node_id,
+                group_id = excluded.group_id,
+                name = excluded.name,
+                address = excluded.address,
+                attr = excluded.attr,
+                data_type = excluded.data_type,
+                description = excluded.description",
             params![
                 t.id.0.to_string(),
                 nid.0.to_string(),
@@ -495,10 +558,14 @@ fn save_to_db(conn: &Connection, s: &Snapshot) -> Result<(), PersistError> {
             ],
         )?;
     }
+    let tag_keys: Vec<String> = s.tags.iter().map(|(_, t)| t.id.0.to_string()).collect();
+    delete_missing(&tx, "tags", "tag_id", &tag_keys)?;
+
     for (north_id, subs) in &s.subscriptions {
         for sub in subs {
             tx.execute(
-                "INSERT INTO subscriptions (north_node_id, south_node_id, group_id) VALUES (?1, ?2, ?3)",
+                "INSERT INTO subscriptions (north_node_id, south_node_id, group_id) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(north_node_id, south_node_id, group_id) DO NOTHING",
                 params![
                     north_id.0.to_string(),
                     sub.south_node_id.0.to_string(),
@@ -507,6 +574,21 @@ fn save_to_db(conn: &Connection, s: &Snapshot) -> Result<(), PersistError> {
             )?;
         }
     }
+    let sub_keys: Vec<String> = s
+        .subscriptions
+        .iter()
+        .flat_map(|(nid, subs)| {
+            subs.iter()
+                .map(move |sub| format!("{}|{}|{}", nid.0, sub.south_node_id.0, sub.group_id.0))
+        })
+        .collect();
+    delete_missing(
+        &tx,
+        "subscriptions",
+        "north_node_id || '|' || south_node_id || '|' || group_id",
+        &sub_keys,
+    )?;
+
     tx.commit()?;
     Ok(())
 }
@@ -543,15 +625,6 @@ pub async fn save_secret(
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    if path.exists() {
-        let backup_path = path
-            .parent()
-            .map(|p| p.join(path.file_name().unwrap().to_string_lossy().to_string() + ".bak"))
-            .unwrap_or_else(|| PathBuf::from(path.to_string_lossy().to_string() + ".bak"));
-        if let Err(e) = tokio::fs::copy(path, &backup_path).await {
-            tracing::warn!(path = ?backup_path, "backup before save failed: {}", e);
-        }
-    }
     let path_buf = path.to_path_buf();
     let path_log = path_buf.display().to_string();
     let snap = match secret {
@@ -564,11 +637,57 @@ pub async fn save_secret(
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
         )?;
         ensure_schema(&conn)?;
+        // 备份改为节流执行（默认每小时一次）且使用一致性快照，
+        // 不再「每次保存都整文件 copy」造成 O(库大小) 开销。
+        if let Err(e) = maybe_backup(&conn, &path_buf) {
+            tracing::warn!(path = %path_buf.display(), "backup before save failed: {}", e);
+        }
         save_to_db(&conn, &snap)
     })
     .await
     .map_err(|e| PersistError::Io(std::io::Error::other(e)))??;
     info!(path = %path_log, version = s.version, encrypted = secret.is_some(), "persist saved");
+    Ok(())
+}
+
+/// 备份节流间隔（秒）：距上次备份不足该时长则跳过
+const BACKUP_INTERVAL_SECS: u64 = 3600;
+static LAST_BACKUP_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 生成一致性备份 `{db}.bak`。`VACUUM INTO` 产出事务一致的快照，
+/// 比直接 copy 正在写入的数据库文件更可靠。
+fn maybe_backup(conn: &Connection, path: &Path) -> Result<(), PersistError> {
+    use std::sync::atomic::Ordering;
+    if !path.exists() {
+        return Ok(());
+    }
+    let now = now_epoch_secs();
+    let last = LAST_BACKUP_SECS.load(Ordering::Relaxed);
+    if last != 0 && now.saturating_sub(last) < BACKUP_INTERVAL_SECS {
+        return Ok(());
+    }
+    // 只有一个任务能拿到这次备份机会
+    if LAST_BACKUP_SECS
+        .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return Ok(());
+    }
+    let backup_path = path
+        .parent()
+        .map(|p| p.join(path.file_name().unwrap().to_string_lossy().to_string() + ".bak"))
+        .unwrap_or_else(|| PathBuf::from(path.to_string_lossy().to_string() + ".bak"));
+    // VACUUM INTO 要求目标文件不存在
+    let _ = std::fs::remove_file(&backup_path);
+    conn.execute("VACUUM INTO ?1", [backup_path.to_string_lossy().to_string()])?;
+    info!(path = %backup_path.display(), "database snapshot created");
     Ok(())
 }
 
@@ -787,5 +906,85 @@ mod tests {
         apply_to_store(&store, &snap);
         assert_eq!(store.nodes_list().len(), 1);
         assert_eq!(store.nodes_list()[0].config.id, id);
+    }
+
+    fn cleanup_db(path: &Path) {
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
+    }
+
+    #[tokio::test]
+    async fn wal_mode_is_enabled() {
+        let path = temp_db("wal");
+        save(&path, &snapshot_with_mqtt_password()).await.expect("save");
+        let conn = Connection::open(&path).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode.to_lowercase(), "wal", "WAL should be enabled for concurrent access");
+        let busy: i64 = conn.query_row("PRAGMA busy_timeout", [], |r| r.get(0)).unwrap();
+        assert_eq!(busy, 5000, "busy_timeout should be configured");
+        drop(conn);
+        cleanup_db(&path);
+    }
+
+    #[tokio::test]
+    async fn incremental_save_updates_and_removes_rows() {
+        let path = temp_db("upsert");
+        let mut snap = snapshot_with_mqtt_password();
+        let keep_id = snap.nodes[0].config.id;
+        let extra = node_with("sim-2", serde_json::json!({ "poll_base_ms": 1000 }));
+        let drop_id = extra.config.id;
+        snap.nodes.push(extra);
+        save(&path, &snap).await.expect("first save");
+
+        // 同时验证「更新」与「删除」：重命名保留节点，移除另一个节点
+        snap.nodes.retain(|n| n.config.id != drop_id);
+        snap.nodes[0].config.name = "renamed".to_string();
+        save(&path, &snap).await.expect("second save");
+
+        let loaded = load(&path).await.unwrap().unwrap();
+        assert_eq!(loaded.nodes.len(), 1, "removed node must not survive an incremental save");
+        assert_eq!(loaded.nodes[0].config.id, keep_id);
+        assert_eq!(loaded.nodes[0].config.name, "renamed", "upsert should apply updates");
+
+        // 重复保存同一快照不应产生重复行
+        save(&path, &snap).await.expect("third save");
+        let again = load(&path).await.unwrap().unwrap();
+        assert_eq!(again.nodes.len(), 1);
+        cleanup_db(&path);
+    }
+
+    #[tokio::test]
+    async fn throttled_backup_creates_consistent_snapshot() {
+        let path = temp_db("bak");
+        save(&path, &snapshot_with_mqtt_password()).await.expect("save");
+        // 重置节流计时，确保本次一定执行备份
+        super::LAST_BACKUP_SECS.store(0, std::sync::atomic::Ordering::Relaxed);
+
+        let conn = Connection::open(&path).unwrap();
+        maybe_backup(&conn, &path).expect("backup should succeed");
+        let bak = PathBuf::from(format!("{}.bak", path.display()));
+        assert!(bak.exists(), "throttled backup file should exist");
+
+        // 备份本身必须是可独立打开、数据完整的一致性快照
+        let bak_conn = Connection::open(&bak).unwrap();
+        let rows: i64 = bak_conn
+            .query_row("SELECT COUNT(1) FROM nodes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "snapshot should contain the saved node");
+
+        // 节流：紧接着再次调用不应重复备份（时间戳保持不变）
+        super::LAST_BACKUP_SECS.store(now_epoch_secs(), std::sync::atomic::Ordering::Relaxed);
+        let before = std::fs::metadata(&bak).unwrap().modified().unwrap();
+        maybe_backup(&conn, &path).expect("second backup call");
+        let after = std::fs::metadata(&bak).unwrap().modified().unwrap();
+        assert_eq!(before, after, "backup should be throttled within the interval");
+
+        drop(bak_conn);
+        drop(conn);
+        cleanup_db(&path);
+        let _ = std::fs::remove_file(&bak);
     }
 }
