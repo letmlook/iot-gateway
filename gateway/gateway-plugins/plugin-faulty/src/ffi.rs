@@ -6,4 +6,4 @@
 //!   宿主侧会以 `Rust cannot catch foreign exceptions` 直接 abort 整个进程。
 //! - **运行时管理**：每次调用创建单线程 runtime，宿主保证调用发生在独立线程上（见 core `run_sync`）。
 
-gateway_sdk::export_south_plugin!(crate::OpcuaPlugin);
+gateway_sdk::export_south_plugin!(crate::FaultyPlugin);

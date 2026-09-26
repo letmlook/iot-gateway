@@ -10,4 +10,7 @@ members = [
     "gateway/gateway-plugins/plugin-modbus-rtu",
     "gateway/gateway-plugins/plugin-opcua",
     "gateway/gateway-plugins/plugin-virb",
+    # 测试夹具：故障注入 / ABI 不匹配（不参与发布）
+    "gateway/gateway-plugins/plugin-faulty",
+    "gateway/gateway-plugins/plugin-abi-mismatch",
 ]

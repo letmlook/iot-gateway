@@ -339,7 +339,8 @@ impl SouthPlugin for SouthSoAdapter {
                 unsafe { free(ptr) };
             }
             let s = s.ok_or_else(|| "poll_group null".to_string())?;
-            serde_json::from_str(&s).map_err(|e| e.to_string())
+            // 失败时插件返回的是 {"ok":false,"err":...}，需先识别以免报出误导性的类型错误
+            gateway_sdk::parse_value_result(Some(s.as_str()))
         })
         .map_err(gateway_sdk::PluginError::msg)
     }
@@ -377,7 +378,8 @@ impl SouthPlugin for SouthSoAdapter {
                 unsafe { free(ptr) };
             }
             let s = s.ok_or_else(|| "list_groups null".to_string())?;
-            serde_json::from_str(&s).map_err(|e| e.to_string())
+            // 失败时插件返回的是 {"ok":false,"err":...}，需先识别以免报出误导性的类型错误
+            gateway_sdk::parse_value_result(Some(s.as_str()))
         })
         .map_err(gateway_sdk::PluginError::msg)
     }
@@ -402,7 +404,8 @@ impl SouthPlugin for SouthSoAdapter {
                 unsafe { free(ptr) };
             }
             let s = s.ok_or_else(|| "list_tags null".to_string())?;
-            serde_json::from_str(&s).map_err(|e| e.to_string())
+            // 失败时插件返回的是 {"ok":false,"err":...}，需先识别以免报出误导性的类型错误
+            gateway_sdk::parse_value_result(Some(s.as_str()))
         })
         .map_err(gateway_sdk::PluginError::msg)
     }
@@ -692,6 +695,23 @@ impl Drop for NorthSoAdapter {
     }
 }
 
+/// 元数据访问抽象：让南/北向适配器共用同一套 meta 校验逻辑
+trait MetaProvider {
+    fn meta_json_of(&self) -> Result<String, String>;
+}
+
+impl MetaProvider for SouthSoAdapter {
+    fn meta_json_of(&self) -> Result<String, String> {
+        Self::meta_json(self)
+    }
+}
+
+impl MetaProvider for NorthSoAdapter {
+    fn meta_json_of(&self) -> Result<String, String> {
+        Self::meta_json(self)
+    }
+}
+
 /// FFI handle 的 Send 包装。
 ///
 /// 安全性依据：handle 由适配器持有并在其析构前始终有效；每次调用都在独立线程上执行，
@@ -769,22 +789,39 @@ impl PluginLoader {
         };
 
         if let Ok(adapter) = Self::try_south(&lib, free_fn) {
-            let name = adapter.meta().name.to_string();
-            info!(path = %path.display(), name = %name, "loaded south .so");
-            mgr.register_south(&name, Arc::new(adapter));
+            let meta = Self::plugin_meta(&adapter, "south")?;
+            info!(path = %path.display(), name = %meta.name, "loaded south .so");
+            mgr.register_south(&meta.name, Arc::new(adapter));
             libraries.push(lib);
             return Ok(());
         }
 
         if let Ok(adapter) = Self::try_north(&lib, free_fn) {
-            let name = adapter.meta().name.to_string();
-            info!(path = %path.display(), name = %name, "loaded north .so");
-            mgr.register_north(&name, Arc::new(adapter));
+            let meta = Self::plugin_meta(&adapter, "north")?;
+            info!(path = %path.display(), name = %meta.name, "loaded north .so");
+            mgr.register_north(&meta.name, Arc::new(adapter));
             libraries.push(lib);
             return Ok(());
         }
 
         Err("no south/north symbols found".to_string())
+    }
+
+    /// 校验插件 meta 是否可用，并返回解析结果。
+    ///
+    /// 注意不能只看 `meta_json()` 的 `Ok/Err`：插件的 meta 若 panic，导出函数内部的
+    /// panic 捕获会把它转成 `{"ok":false,"err":...}`——那依然是一次**成功的字符串返回**。
+    /// 若不做内容校验，`meta()` 会退化为占位名 `"?"`，从而把一个永远不可用的插件注册进去。
+    fn plugin_meta<T: MetaProvider>(adapter: &T, kind: &str) -> Result<FfiPluginMeta, String> {
+        let json = adapter
+            .meta_json_of()
+            .map_err(|e| format!("{} plugin meta unavailable: {}", kind, e))?;
+        let meta: FfiPluginMeta = gateway_sdk::parse_value_result(Some(json.as_str()))
+            .map_err(|e| format!("{} plugin meta unusable: {}", kind, e))?;
+        if meta.name.trim().is_empty() || meta.name == "?" {
+            return Err(format!("{} plugin meta has no usable name", kind));
+        }
+        Ok(meta)
     }
 
     fn try_south(lib: &Library, free_fn: FreeStringFn) -> Result<SouthSoAdapter, String> {

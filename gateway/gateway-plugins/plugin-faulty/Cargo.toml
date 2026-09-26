@@ -1,0 +1,22 @@
+[package]
+name = "plugin-faulty"
+version = "0.1.0"
+edition = "2021"
+description = "测试夹具：按配置在指定生命周期阶段 panic，用于验证宿主的 FFI 隔离能力"
+publish = false
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+# 夹具默认就导出 C ABI：`cargo test --workspace` 会顺带产出 .so/.dylib，
+# FFI 故障注入测试因此不需要在测试里再调 cargo 构建。
+default = ["ffi"]
+ffi = []
+
+[dependencies]
+gateway-sdk = { path = "../../gateway-sdk" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

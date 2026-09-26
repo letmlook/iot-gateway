@@ -3,7 +3,7 @@
 //! 插件编译为 cdylib，导出约定符号；网关通过 libloading 加载 .so 并调用。
 
 use std::ffi::CStr;
-use std::os::raw::c_char;
+use std::os::raw::{c_char, c_void};
 
 /// 当前 FFI ABI 版本。
 ///
@@ -188,4 +188,666 @@ pub unsafe fn ptr_to_string(ptr: *const c_char) -> Option<String> {
         return None;
     }
     CStr::from_ptr(ptr).to_str().ok().map(|s| s.to_string())
+}
+
+/// 解析「成功返回数据、失败返回 `FfiResult`」的插件返回值。
+///
+/// 插件约定：成功时返回数据本身的 JSON（数组/对象），失败时返回 `{"ok":false,"err":"..."}`。
+/// 若直接按目标类型反序列化，失败时会得到「invalid type: map, expected a sequence」这类
+/// 与真实原因无关的报错；因此这里先探测失败对象，把插件给出的原因原样透出。
+pub fn parse_value_result<T: serde::de::DeserializeOwned>(json: Option<&str>) -> Result<T, String> {
+    let s = match json {
+        Some(x) if !x.is_empty() => x,
+        _ => return Err("plugin returned empty result".to_string()),
+    };
+    if let Ok(r) = serde_json::from_str::<FfiResult>(s) {
+        if !r.ok {
+            return Err(r.err.unwrap_or_else(|| "unknown plugin error".to_string()));
+        }
+    }
+    serde_json::from_str(s).map_err(|e| e.to_string())
+}
+
+// ---------- 插件侧：panic 隔离 ----------
+
+/// 把 panic 负载转成可读消息
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        format!("plugin panicked: {}", s)
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        format!("plugin panicked: {}", s)
+    } else {
+        "plugin panicked".to_string()
+    }
+}
+
+/// 在**插件侧**捕获 panic，把一次异常转成一次失败的 FFI 调用。
+///
+/// # 为什么必须在插件侧捕获
+///
+/// 插件（cdylib）与宿主各自静态链接了一份 Rust 运行时。跨动态库传播的 panic 在宿主侧
+/// 会被判定为 foreign exception 并直接 abort 整个进程（实测报错：
+/// `fatal runtime error: Rust cannot catch foreign exceptions, aborting`）。
+/// 所以**绝不允许异常越过 C ABI 边界**——每个导出函数都必须在自己的 crate 内
+/// `catch_unwind`。本函数是该边界的统一实现，由 `export_south_plugin!` /
+/// `export_north_plugin!` 宏自动套用，手写导出时请自行包裹。
+///
+/// 捕获到的 panic 仍会经 panic hook 打印到 stderr，便于现场定位。
+pub fn guard_ptr<F>(f: F) -> *mut c_char
+where
+    F: FnOnce() -> *mut c_char,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(p) => p,
+        Err(e) => json_ptr(&FfiResult::failure(panic_message(e.as_ref()))),
+    }
+}
+
+// ---------- 插件侧：导出用的小工具 ----------
+
+/// 空指针（表示「无结果」，宿主按可选项处理）
+pub fn null_ptr() -> *mut c_char {
+    std::ptr::null_mut()
+}
+
+/// 可序列化值 → JSON C 字符串
+pub fn json_ptr<T: serde::Serialize>(v: &T) -> *mut c_char {
+    match serde_json::to_string(v) {
+        Ok(s) => alloc_c_string(&s),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// `PluginResult<()>` → JSON C 字符串
+pub fn result_ptr(r: crate::PluginResult<()>) -> *mut c_char {
+    match r {
+        Ok(()) => json_ptr(&FfiResult::success()),
+        Err(e) => json_ptr(&FfiResult::failure(e.to_string())),
+    }
+}
+
+/// `PluginResult<T>` → JSON C 字符串
+pub fn value_ptr<T: serde::Serialize>(r: crate::PluginResult<T>) -> *mut c_char {
+    match r {
+        Ok(v) => json_ptr(&v),
+        Err(e) => json_ptr(&FfiResult::failure(e.to_string())),
+    }
+}
+
+/// 把插件句柄还原为 `&mut T`；空指针返回 None（不 panic，避免导出函数在边界上崩）
+///
+/// # Safety
+/// `handle` 必须来自本 SDK 生成的 `*_plugin_create` 导出。
+pub unsafe fn handle_mut<'a, T>(handle: *mut c_void) -> Option<&'a mut T> {
+    if handle.is_null() {
+        None
+    } else {
+        Some(&mut *(handle as *mut T))
+    }
+}
+
+/// 把插件句柄还原为 `&T`
+///
+/// # Safety
+/// 同 [`handle_mut`]。
+pub unsafe fn handle_ref<'a, T>(handle: *mut c_void) -> Option<&'a T> {
+    if handle.is_null() {
+        None
+    } else {
+        Some(&*(handle as *const T))
+    }
+}
+
+/// C 字符串 → String（null/非法 UTF-8 时返回空串）
+///
+/// # Safety
+/// `p` 必须为 null 或指向 NUL 结尾的合法 C 字符串。
+pub unsafe fn cstr_or_default(p: *const c_char) -> String {
+    ptr_to_string(p).unwrap_or_default()
+}
+
+/// JSON 解析，失败时返回 `Default`（跨边界入参容错）
+pub fn parse_or_default<T: serde::de::DeserializeOwned + Default>(s: &str) -> T {
+    serde_json::from_str(s).unwrap_or_default()
+}
+
+// ---------- 插件侧：导出宏 ----------
+
+/// 生成南向插件的全部 C ABI 导出（含 panic 隔离与运行时管理）。
+///
+/// ```ignore
+/// // 插件 crate 的 src/ffi.rs
+/// gateway_sdk::export_south_plugin!(crate::MyPlugin);
+/// ```
+///
+/// 约定：
+/// - `MyPlugin` 必须实现 `SouthPlugin` 且提供 `new()`；
+/// - 调用方需依赖 `tokio`（本宏为每次调用创建 current_thread runtime；宿主保证调用发生在独立线程上）；
+/// - 宏已包含 `gateway_south_plugin_*` 全量符号，勿再手写同名的 `#[no_mangle]` 函数。
+#[macro_export]
+macro_rules! export_south_plugin {
+    ($plugin_ty:ty) => {
+        // 把 trait 引入作用域，使宏展开不依赖调用方是否 import 过 SouthPlugin
+        use $crate::SouthPlugin as _;
+
+        /// 单线程 runtime：宿主保证每次 FFI 调用都在独立线程执行，故此处 `block_on` 是安全的。
+        /// （若在 tokio worker 线程上直接 `block_on`，会 panic。见 gateway-core 的 `run_sync`。）
+        #[doc(hidden)]
+        pub fn __gateway_plugin_block_on<F: ::std::future::Future>(f: F) -> F::Output {
+            ::tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build plugin runtime")
+                .block_on(f)
+        }
+
+        #[no_mangle]
+        pub extern "C-unwind" fn gateway_south_plugin_create() -> *mut ::std::os::raw::c_void {
+            ::std::boxed::Box::into_raw(::std::boxed::Box::new(<$plugin_ty>::new()))
+                as *mut ::std::os::raw::c_void
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_south_plugin_destroy(
+            handle: *mut ::std::os::raw::c_void,
+        ) {
+            // 析构里的 panic 无法转成返回值：吞掉并泄漏，也好过 abort 整个网关
+            let _ = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
+                if !handle.is_null() {
+                    let _ = ::std::boxed::Box::from_raw(handle as *mut $plugin_ty);
+                }
+            }));
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_south_plugin_meta(
+            handle: *mut ::std::os::raw::c_void,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_ref::<$plugin_ty>(handle) {
+                Some(p) => $crate::ffi::json_ptr(&$crate::ffi::meta_to_ffi(&p.meta())),
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_south_plugin_open(
+            handle: *mut ::std::os::raw::c_void,
+            node_id_json: *const ::std::os::raw::c_char,
+            config_json: *const ::std::os::raw::c_char,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_mut::<$plugin_ty>(handle) {
+                Some(p) => {
+                    let node_id: $crate::NodeId =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(node_id_json));
+                    let config: $crate::PluginConfig =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(config_json));
+                    $crate::ffi::result_ptr(__gateway_plugin_block_on(p.open(node_id, config)))
+                }
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_south_plugin_close(
+            handle: *mut ::std::os::raw::c_void,
+            node_id_json: *const ::std::os::raw::c_char,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_mut::<$plugin_ty>(handle) {
+                Some(p) => {
+                    let node_id: $crate::NodeId =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(node_id_json));
+                    $crate::ffi::result_ptr(__gateway_plugin_block_on(p.close(node_id)))
+                }
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_south_plugin_init(
+            handle: *mut ::std::os::raw::c_void,
+            node_id_json: *const ::std::os::raw::c_char,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_mut::<$plugin_ty>(handle) {
+                Some(p) => {
+                    let node_id: $crate::NodeId =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(node_id_json));
+                    $crate::ffi::result_ptr(__gateway_plugin_block_on(p.init(node_id)))
+                }
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_south_plugin_uninit(
+            handle: *mut ::std::os::raw::c_void,
+            node_id_json: *const ::std::os::raw::c_char,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_mut::<$plugin_ty>(handle) {
+                Some(p) => {
+                    let node_id: $crate::NodeId =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(node_id_json));
+                    $crate::ffi::result_ptr(__gateway_plugin_block_on(p.uninit(node_id)))
+                }
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_south_plugin_start(
+            handle: *mut ::std::os::raw::c_void,
+            node_id_json: *const ::std::os::raw::c_char,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_mut::<$plugin_ty>(handle) {
+                Some(p) => {
+                    let node_id: $crate::NodeId =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(node_id_json));
+                    $crate::ffi::result_ptr(__gateway_plugin_block_on(p.start(node_id)))
+                }
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_south_plugin_stop(
+            handle: *mut ::std::os::raw::c_void,
+            node_id_json: *const ::std::os::raw::c_char,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_mut::<$plugin_ty>(handle) {
+                Some(p) => {
+                    let node_id: $crate::NodeId =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(node_id_json));
+                    $crate::ffi::result_ptr(__gateway_plugin_block_on(p.stop(node_id)))
+                }
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_south_plugin_setting(
+            handle: *mut ::std::os::raw::c_void,
+            node_id_json: *const ::std::os::raw::c_char,
+            config_json: *const ::std::os::raw::c_char,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_mut::<$plugin_ty>(handle) {
+                Some(p) => {
+                    let node_id: $crate::NodeId =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(node_id_json));
+                    let config: $crate::PluginConfig =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(config_json));
+                    $crate::ffi::result_ptr(__gateway_plugin_block_on(p.setting(node_id, config)))
+                }
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_south_plugin_validate_tag(
+            handle: *mut ::std::os::raw::c_void,
+            node_id_json: *const ::std::os::raw::c_char,
+            tag_json: *const ::std::os::raw::c_char,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_mut::<$plugin_ty>(handle) {
+                Some(p) => {
+                    let node_id: $crate::NodeId =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(node_id_json));
+                    match serde_json::from_str::<$crate::Tag>(&$crate::ffi::cstr_or_default(
+                        tag_json,
+                    )) {
+                        Ok(tag) => $crate::ffi::result_ptr(__gateway_plugin_block_on(
+                            p.validate_tag(node_id, &tag),
+                        )),
+                        Err(_) => $crate::ffi::json_ptr(&$crate::ffi::FfiResult::failure(
+                            "invalid tag json",
+                        )),
+                    }
+                }
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_south_plugin_poll_group(
+            handle: *mut ::std::os::raw::c_void,
+            node_id_json: *const ::std::os::raw::c_char,
+            group_id_json: *const ::std::os::raw::c_char,
+            tags_json: *const ::std::os::raw::c_char,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_mut::<$plugin_ty>(handle) {
+                Some(p) => {
+                    let node_id: $crate::NodeId =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(node_id_json));
+                    let group_id: $crate::GroupId =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(group_id_json));
+                    let tags: ::std::vec::Vec<$crate::Tag> =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(tags_json));
+                    $crate::ffi::value_ptr(__gateway_plugin_block_on(
+                        p.poll_group(node_id, group_id, &tags),
+                    ))
+                }
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_south_plugin_write_tags(
+            handle: *mut ::std::os::raw::c_void,
+            node_id_json: *const ::std::os::raw::c_char,
+            values_json: *const ::std::os::raw::c_char,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_mut::<$plugin_ty>(handle) {
+                Some(p) => {
+                    let node_id: $crate::NodeId =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(node_id_json));
+                    let values: ::std::vec::Vec<($crate::Tag, $crate::DataValue)> =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(values_json));
+                    $crate::ffi::result_ptr(__gateway_plugin_block_on(
+                        p.write_tags(node_id, &values),
+                    ))
+                }
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_south_plugin_list_groups(
+            handle: *mut ::std::os::raw::c_void,
+            node_id_json: *const ::std::os::raw::c_char,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_mut::<$plugin_ty>(handle) {
+                Some(p) => {
+                    let node_id: $crate::NodeId =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(node_id_json));
+                    $crate::ffi::value_ptr(__gateway_plugin_block_on(p.list_groups(node_id)))
+                }
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_south_plugin_list_tags(
+            handle: *mut ::std::os::raw::c_void,
+            node_id_json: *const ::std::os::raw::c_char,
+            group_id_json: *const ::std::os::raw::c_char,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_mut::<$plugin_ty>(handle) {
+                Some(p) => {
+                    let node_id: $crate::NodeId =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(node_id_json));
+                    let group_id: $crate::GroupId =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(group_id_json));
+                    $crate::ffi::value_ptr(__gateway_plugin_block_on(
+                        p.list_tags(node_id, group_id),
+                    ))
+                }
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_south_plugin_config_schema(
+            handle: *mut ::std::os::raw::c_void,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_ref::<$plugin_ty>(handle) {
+                Some(p) => match p.config_schema() {
+                    Some(s) => $crate::ffi::json_ptr(&s),
+                    None => $crate::ffi::null_ptr(),
+                },
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_south_plugin_tag_schema(
+            handle: *mut ::std::os::raw::c_void,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_ref::<$plugin_ty>(handle) {
+                Some(p) => match p.tag_schema() {
+                    Some(s) => $crate::ffi::json_ptr(&s),
+                    None => $crate::ffi::null_ptr(),
+                },
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+    };
+}
+
+/// 生成北向插件的全部 C ABI 导出（含 panic 隔离与运行时管理）。
+///
+/// ```ignore
+/// // 插件 crate 的 src/ffi.rs
+/// gateway_sdk::export_north_plugin!(crate::MyPlugin);
+/// ```
+///
+/// 约定同 [`export_south_plugin!`]。
+#[macro_export]
+macro_rules! export_north_plugin {
+    ($plugin_ty:ty) => {
+        use $crate::NorthPlugin as _;
+
+        /// 单线程 runtime：宿主保证每次 FFI 调用都在独立线程执行，故此处 `block_on` 是安全的。
+        #[doc(hidden)]
+        pub fn __gateway_plugin_block_on<F: ::std::future::Future>(f: F) -> F::Output {
+            ::tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build plugin runtime")
+                .block_on(f)
+        }
+
+        #[no_mangle]
+        pub extern "C-unwind" fn gateway_north_plugin_create() -> *mut ::std::os::raw::c_void {
+            ::std::boxed::Box::into_raw(::std::boxed::Box::new(<$plugin_ty>::new()))
+                as *mut ::std::os::raw::c_void
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_north_plugin_destroy(
+            handle: *mut ::std::os::raw::c_void,
+        ) {
+            let _ = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
+                if !handle.is_null() {
+                    let _ = ::std::boxed::Box::from_raw(handle as *mut $plugin_ty);
+                }
+            }));
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_north_plugin_meta(
+            handle: *mut ::std::os::raw::c_void,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_ref::<$plugin_ty>(handle) {
+                Some(p) => $crate::ffi::json_ptr(&$crate::ffi::meta_to_ffi(&p.meta())),
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_north_plugin_open(
+            handle: *mut ::std::os::raw::c_void,
+            node_id_json: *const ::std::os::raw::c_char,
+            config_json: *const ::std::os::raw::c_char,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_mut::<$plugin_ty>(handle) {
+                Some(p) => {
+                    let node_id: $crate::NodeId =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(node_id_json));
+                    let config: $crate::PluginConfig =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(config_json));
+                    $crate::ffi::result_ptr(__gateway_plugin_block_on(p.open(node_id, config)))
+                }
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_north_plugin_close(
+            handle: *mut ::std::os::raw::c_void,
+            node_id_json: *const ::std::os::raw::c_char,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_mut::<$plugin_ty>(handle) {
+                Some(p) => {
+                    let node_id: $crate::NodeId =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(node_id_json));
+                    $crate::ffi::result_ptr(__gateway_plugin_block_on(p.close(node_id)))
+                }
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_north_plugin_init(
+            handle: *mut ::std::os::raw::c_void,
+            node_id_json: *const ::std::os::raw::c_char,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_mut::<$plugin_ty>(handle) {
+                Some(p) => {
+                    let node_id: $crate::NodeId =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(node_id_json));
+                    $crate::ffi::result_ptr(__gateway_plugin_block_on(p.init(node_id)))
+                }
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_north_plugin_uninit(
+            handle: *mut ::std::os::raw::c_void,
+            node_id_json: *const ::std::os::raw::c_char,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_mut::<$plugin_ty>(handle) {
+                Some(p) => {
+                    let node_id: $crate::NodeId =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(node_id_json));
+                    $crate::ffi::result_ptr(__gateway_plugin_block_on(p.uninit(node_id)))
+                }
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_north_plugin_start(
+            handle: *mut ::std::os::raw::c_void,
+            node_id_json: *const ::std::os::raw::c_char,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_mut::<$plugin_ty>(handle) {
+                Some(p) => {
+                    let node_id: $crate::NodeId =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(node_id_json));
+                    $crate::ffi::result_ptr(__gateway_plugin_block_on(p.start(node_id)))
+                }
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_north_plugin_stop(
+            handle: *mut ::std::os::raw::c_void,
+            node_id_json: *const ::std::os::raw::c_char,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_mut::<$plugin_ty>(handle) {
+                Some(p) => {
+                    let node_id: $crate::NodeId =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(node_id_json));
+                    $crate::ffi::result_ptr(__gateway_plugin_block_on(p.stop(node_id)))
+                }
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_north_plugin_setting(
+            handle: *mut ::std::os::raw::c_void,
+            node_id_json: *const ::std::os::raw::c_char,
+            config_json: *const ::std::os::raw::c_char,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_mut::<$plugin_ty>(handle) {
+                Some(p) => {
+                    let node_id: $crate::NodeId =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(node_id_json));
+                    let config: $crate::PluginConfig =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(config_json));
+                    $crate::ffi::result_ptr(__gateway_plugin_block_on(p.setting(node_id, config)))
+                }
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_north_plugin_set_subscriptions(
+            handle: *mut ::std::os::raw::c_void,
+            node_id_json: *const ::std::os::raw::c_char,
+            subscriptions_json: *const ::std::os::raw::c_char,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_mut::<$plugin_ty>(handle) {
+                Some(p) => {
+                    let node_id: $crate::NodeId =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(node_id_json));
+                    let subs: ::std::vec::Vec<$crate::GroupSubscription> =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(
+                            subscriptions_json,
+                        ));
+                    $crate::ffi::result_ptr(__gateway_plugin_block_on(
+                        p.set_subscriptions(node_id, &subs),
+                    ))
+                }
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_north_plugin_on_group_data(
+            handle: *mut ::std::os::raw::c_void,
+            node_id_json: *const ::std::os::raw::c_char,
+            group_data_json: *const ::std::os::raw::c_char,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_mut::<$plugin_ty>(handle) {
+                Some(p) => {
+                    let node_id: $crate::NodeId =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(node_id_json));
+                    match serde_json::from_str::<$crate::GroupData>(&$crate::ffi::cstr_or_default(
+                        group_data_json,
+                    )) {
+                        Ok(data) => $crate::ffi::result_ptr(__gateway_plugin_block_on(
+                            p.on_group_data(node_id, ::std::sync::Arc::new(data)),
+                        )),
+                        Err(_) => $crate::ffi::json_ptr(&$crate::ffi::FfiResult::failure(
+                            "invalid group_data json",
+                        )),
+                    }
+                }
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_north_plugin_connection_status(
+            handle: *mut ::std::os::raw::c_void,
+            node_id_json: *const ::std::os::raw::c_char,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_mut::<$plugin_ty>(handle) {
+                Some(p) => {
+                    let node_id: $crate::NodeId =
+                        $crate::ffi::parse_or_default(&$crate::ffi::cstr_or_default(node_id_json));
+                    match __gateway_plugin_block_on(p.connection_status(node_id)) {
+                        Some(v) => $crate::ffi::json_ptr(&v),
+                        None => $crate::ffi::null_ptr(),
+                    }
+                }
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C-unwind" fn gateway_north_plugin_config_schema(
+            handle: *mut ::std::os::raw::c_void,
+        ) -> *mut ::std::os::raw::c_char {
+            $crate::ffi::guard_ptr(|| match $crate::ffi::handle_ref::<$plugin_ty>(handle) {
+                Some(p) => match p.config_schema() {
+                    Some(s) => $crate::ffi::json_ptr(&s),
+                    None => $crate::ffi::null_ptr(),
+                },
+                None => $crate::ffi::null_ptr(),
+            })
+        }
+    };
 }

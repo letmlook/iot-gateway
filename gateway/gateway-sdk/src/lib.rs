@@ -12,7 +12,7 @@ pub mod schema;
 pub mod types;
 
 pub use error::{PluginError, PluginErrorCode, PluginResult};
-pub use ffi::{parse_result, ptr_to_string, FfiPluginMeta, FfiResult};
+pub use ffi::{parse_result, parse_value_result, ptr_to_string, FfiPluginMeta, FfiResult};
 pub use log::{debug, error, info, node_log, trace, warn, NodeLogLevel};
 pub use messages::{GroupData, GroupSubscription, TagRead, TagWrite};
 pub use plugin::{NorthPlugin, PluginInfo, PluginMeta, SouthPlugin};

@@ -106,11 +106,32 @@
 
 ## 八、插件开发步骤
 
-1. 新建 crate，依赖 `gateway-sdk`。
-2. 实现 `SouthPlugin` 或 `NorthPlugin`（含 `meta`、`open`/`close`，及 `init`/`uninit`/`start`/`stop`/`setting` 按需覆盖）。
+1. 新建 crate，依赖 `gateway-sdk`（`.so` 形态还需 `tokio`），`Cargo.toml` 中
+   `[lib] crate-type = ["lib", "cdylib"]`，并用 `ffi` feature 区分「静态链接」与「编译为 .so」。
+2. 实现 `SouthPlugin` 或 `NorthPlugin`（含 `meta`、`open`/`close`，及 `init`/`uninit`/`start`/`stop`/`setting` 按需覆盖），并提供 `new()`。
 3. 南向可选：`config_schema`、`tag_schema`、`validate_tag`；实现 `poll_group`，按需 `write_tags`。
 4. 北向：`set_subscriptions`、`on_group_data`。
-5. 在 `gateway-server` 的 `main` 中 `register_south` / `register_north`，并加入 workspace。
+5. **导出 C ABI**：新增 `src/ffi.rs`，一行宏调用即可（勿手写 `#[no_mangle]` 函数）：
+
+   ```rust
+   #[cfg(feature = "ffi")]
+   mod ffi;
+   // src/ffi.rs 内容：
+   gateway_sdk::export_south_plugin!(crate::MyPlugin);   // 北向用 export_north_plugin!
+   ```
+
+   宏会生成全部 `gateway_south_plugin_*` / `gateway_north_plugin_*` 符号，并统一处理
+   panic 隔离与运行时管理。
+6. 在 `gateway-server` 的 `main` 中 `register_south` / `register_north`（静态链接时），并加入 workspace。
+
+### FFI 契约（务必遵守）
+
+| 约定 | 原因 |
+|------|------|
+| 每个导出函数必须在**插件自己的 crate 内** `catch_unwind` | 插件与宿主各自静态链接了一份 Rust 运行时；异常一旦越过 C ABI 边界，宿主会以 `Rust cannot catch foreign exceptions` 直接 abort 整个进程。`export_*` 宏已内置该保护 |
+| 不得在 tokio worker 线程上直接 `block_on` | 会触发 `Cannot start a runtime from within a runtime`。宿主保证每次 FFI 调用都在独立线程执行；宏生成的 `__gateway_plugin_block_on` 因此是安全的 |
+| 必须携带 ABI 版本 | `gateway_plugin_abi_version()` 由 SDK 导出，宿主加载前校验；不匹配或不声明都会被拒绝 |
+| 成功返回数据本身，失败返回 `{"ok":false,"err":"..."}` | 宿主用 `gateway_sdk::parse_value_result` 解析，能区分「数据」与「失败原因」 |
 
 ---
 
@@ -119,7 +140,8 @@
 | 项目 | 本 SDK |
 |------|--------|
 | 实现语言 | Rust，静态链接 crate 或 .so |
-| 模块导出 | `PluginMeta` + trait 实现 |
+| 模块导出 | `PluginMeta` + trait 实现；C ABI 由 `export_south_plugin!` / `export_north_plugin!` 生成 |
 | 配置 Schema | `config_schema()` 返回 `ConfigSchema` |
 | 生命周期 | open→init→start / stop→uninit→close，`async` |
 | 校验 | `validate_tag` + 可选 `ConfigSchema::validate_address` |
+| 故障隔离 | 插件侧 `catch_unwind`（宏内置）+ 宿主侧独立线程调用 + ABI 版本门禁 |

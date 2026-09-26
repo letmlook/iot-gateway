@@ -1,0 +1,11 @@
+[package]
+name = "plugin-abi-mismatch"
+version = "0.1.0"
+edition = "2021"
+description = "测试夹具：只导出一个与宿主不一致的 ABI 版本号，用于验证加载前的 ABI 门禁"
+publish = false
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
