@@ -626,8 +626,9 @@ fn main() {
          因此只应用于「同机同负载下改造前后对比」，并建议各跑 3 次取中位数。",
     );
     report.note(
-        "持久化保存是最显眼的瓶颈（5000 点位约 83 ms/次）：`save_to_db` 对每一行都重新 prepare \
-         语句。已在本基线之后用 `prepare_cached` 优化，见同目录后续基线文件。",
+        "持久化保存曾是最大瓶颈（5000 点位约 83 ms/次）：`save_to_db` 对每一行都重新 prepare \
+         语句，删除差集还会拼出约 10 KB 的 `NOT IN (...)`。已用 `prepare_cached` + 临时键表修掉，\
+         同机复测降到约 13 ms/次（见 baseline-2026-09-26-persist-fix.md）。",
     );
     let md = report.markdown();
     print!("{}", md);
