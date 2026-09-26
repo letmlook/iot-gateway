@@ -18,7 +18,9 @@ pub use manager::{Manager, SouthConnectionState};
 pub use node::{Node, NodeConfig};
 pub use persist::{
     apply_to_store, build_snapshot, load as persist_load, load_json as persist_load_json,
-    save as persist_save, save_with_backup as persist_save_with_backup, PersistError, Snapshot,
+    save as persist_save, save_secret as persist_save_secret,
+    load_secret as persist_load_secret, has_plaintext_secrets as persist_has_plaintext_secrets,
+    save_with_backup as persist_save_with_backup, PersistError, Snapshot,
     SNAPSHOT_VERSION,
 };
 pub use store::Store;

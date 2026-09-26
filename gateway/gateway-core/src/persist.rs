@@ -349,6 +349,103 @@ fn load_from_db(conn: &Connection) -> Result<Snapshot, PersistError> {
     })
 }
 
+// ---------- 敏感配置落盘加密 ----------
+/// 加密值前缀：用于识别「已加密」并在无密钥时避免误解密
+const ENC_PREFIX: &str = "enc:v1:";
+/// AES-256-GCM nonce 长度
+const NONCE_LEN: usize = 12;
+
+fn secret_key(secret: &str) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(secret.as_bytes());
+    let out = h.finalize();
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&out);
+    key
+}
+
+/// AES-256-GCM 加密字符串，返回 `enc:v1:<base64(nonce|ciphertext)>`；失败时返回 None（由调用方决定降级为明文）
+fn encrypt_secret(secret: &str, plain: &str) -> Option<String> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    use aes_gcm::{Aes256Gcm, Nonce};
+    let cipher = Aes256Gcm::new_from_slice(&secret_key(secret)).ok()?;
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    use rand::RngCore;
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let ct = cipher
+        .encrypt(Nonce::from_slice(&nonce_bytes), plain.as_bytes())
+        .ok()?;
+    let mut blob = nonce_bytes.to_vec();
+    blob.extend_from_slice(&ct);
+    use base64::Engine;
+    Some(format!(
+        "{}{}",
+        ENC_PREFIX,
+        base64::engine::general_purpose::STANDARD.encode(blob)
+    ))
+}
+
+/// 解密 `enc:v1:...`；前缀不匹配或解密失败返回 None（保留原值，避免丢配置）
+fn decrypt_secret(secret: &str, value: &str) -> Option<String> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    use aes_gcm::{Aes256Gcm, Nonce};
+    use base64::Engine;
+    let b64 = value.strip_prefix(ENC_PREFIX)?;
+    let blob = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    if blob.len() <= NONCE_LEN {
+        return None;
+    }
+    let (nonce_bytes, ct) = blob.split_at(NONCE_LEN);
+    let cipher = Aes256Gcm::new_from_slice(&secret_key(secret)).ok()?;
+    let pt = cipher
+        .decrypt(Nonce::from_slice(nonce_bytes), ct)
+        .ok()?;
+    String::from_utf8(pt).ok()
+}
+
+/// 对快照中所有节点的敏感配置项加密（幂等：已是加密值则跳过）
+fn encrypt_snapshot(s: &Snapshot, secret: &str) -> Snapshot {
+    let mut out = s.clone();
+    for n in &mut out.nodes {
+        for (k, v) in n.config.config.iter_mut() {
+            if !gateway_sdk::schema::is_sensitive_key(k) {
+                continue;
+            }
+            if let Some(s) = v.as_str() {
+                if s.starts_with(ENC_PREFIX) || s.is_empty() {
+                    continue;
+                }
+                if let Some(enc) = encrypt_secret(secret, s) {
+                    *v = serde_json::Value::String(enc);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 解密快照中的敏感配置项；无密钥或解密失败时保留密文（仅告警，不丢数据）
+fn decrypt_snapshot(s: &mut Snapshot, secret: Option<&str>) {
+    let Some(secret) = secret else { return };
+    for n in &mut s.nodes {
+        for (k, v) in n.config.config.iter_mut() {
+            let Some(s) = v.as_str() else { continue };
+            if !s.starts_with(ENC_PREFIX) {
+                continue;
+            }
+            match decrypt_secret(secret, s) {
+                Some(plain) => *v = serde_json::Value::String(plain),
+                None => tracing::warn!(
+                    node = %n.config.name,
+                    key = %k,
+                    "sensitive config could not be decrypted (wrong or changed GATEWAY_SECRET_KEY?)"
+                ),
+            }
+        }
+    }
+}
+
 fn save_to_db(conn: &Connection, s: &Snapshot) -> Result<(), PersistError> {
     s.validate()?;
     let tx = conn.unchecked_transaction()?;
@@ -414,8 +511,11 @@ fn save_to_db(conn: &Connection, s: &Snapshot) -> Result<(), PersistError> {
     Ok(())
 }
 
-/// 从 SQLite 数据库加载快照。path 为 db 文件；文件不存在返回 `Ok(None)`。
-pub async fn load(path: &Path) -> Result<Option<Snapshot>, PersistError> {
+/// 从 SQLite 数据库加载快照，并对敏感配置解密。`secret` 为 `None` 时不解密（保留密文）。
+pub async fn load_secret(
+    path: &Path,
+    secret: Option<&str>,
+) -> Result<Option<Snapshot>, PersistError> {
     if !path.exists() {
         return Ok(None);
     }
@@ -427,14 +527,19 @@ pub async fn load(path: &Path) -> Result<Option<Snapshot>, PersistError> {
         load_from_db(&conn)
     })
     .await
-    .map_err(|e| PersistError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-    let s = snap?;
+    .map_err(|e| PersistError::Io(std::io::Error::other(e)))?;
+    let mut s = snap?;
+    decrypt_snapshot(&mut s, secret);
     info!(path = %path_log, version = s.version, "persist loaded");
     Ok(Some(s))
 }
 
-/// 将快照写入 SQLite。path 为 db 文件；不存在则创建。若文件已存在则先备份为 {path}.bak。
-pub async fn save(path: &Path, s: &Snapshot) -> Result<(), PersistError> {
+/// 将快照写入 SQLite（可选地先对敏感配置加密）。
+pub async fn save_secret(
+    path: &Path,
+    s: &Snapshot,
+    secret: Option<&str>,
+) -> Result<(), PersistError> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -449,7 +554,10 @@ pub async fn save(path: &Path, s: &Snapshot) -> Result<(), PersistError> {
     }
     let path_buf = path.to_path_buf();
     let path_log = path_buf.display().to_string();
-    let snap = s.clone();
+    let snap = match secret {
+        Some(k) => encrypt_snapshot(s, k),
+        None => s.clone(),
+    };
     tokio::task::spawn_blocking(move || {
         let conn = Connection::open_with_flags(
             &path_buf,
@@ -459,9 +567,31 @@ pub async fn save(path: &Path, s: &Snapshot) -> Result<(), PersistError> {
         save_to_db(&conn, &snap)
     })
     .await
-    .map_err(|e| PersistError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
-    info!(path = %path_log, version = s.version, "persist saved");
+    .map_err(|e| PersistError::Io(std::io::Error::other(e)))??;
+    info!(path = %path_log, version = s.version, encrypted = secret.is_some(), "persist saved");
     Ok(())
+}
+
+/// 快照中是否存在仍以明文保存的敏感配置项（用于首次启用加密时回写）
+pub fn has_plaintext_secrets(s: &Snapshot) -> bool {
+    s.nodes.iter().any(|n| {
+        n.config.config.iter().any(|(k, v)| {
+            gateway_sdk::schema::is_sensitive_key(k)
+                && v.as_str()
+                    .map(|x| !x.is_empty() && !x.starts_with(ENC_PREFIX))
+                    .unwrap_or(false)
+        })
+    })
+}
+
+/// 不加密的保存（保持向后兼容）
+pub async fn save(path: &Path, s: &Snapshot) -> Result<(), PersistError> {
+    save_secret(path, s, None).await
+}
+
+/// 不解密的加载（保持向后兼容）
+pub async fn load(path: &Path) -> Result<Option<Snapshot>, PersistError> {
+    load_secret(path, None).await
 }
 
 /// 与 `save` 相同；保留接口兼容，备份由上层或定期拷贝 db 文件实现。
@@ -504,5 +634,158 @@ pub fn apply_to_store(store: &Store, s: &Snapshot) {
     }
     for (nid, t) in &s.tags {
         store.tag_insert(*nid, t.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::node::Node;
+    use gateway_sdk::types::NodeKind;
+
+    fn temp_db(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("gw-test-{}-{}.db", name, uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_file(&p);
+        let _ = std::fs::remove_file(format!("{}.bak", p.display()));
+        p
+    }
+
+    fn node_with(name: &str, config: serde_json::Value) -> Node {
+        let mut n = Node::new(name, NodeKind::South, "sim", serde_json::from_value(config).unwrap());
+        n.state = NodeState::Running;
+        n
+    }
+
+    fn snapshot_with_mqtt_password() -> Snapshot {
+        let mut nodes = Vec::new();
+        nodes.push(node_with(
+            "mqtt-app",
+            serde_json::json!({ "host": "127.0.0.1", "port": 1883, "password": "p@ssw0rd" }),
+        ));
+        Snapshot {
+            version: SNAPSHOT_VERSION,
+            nodes,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_roundtrip_preserves_nodes() {
+        let path = temp_db("roundtrip");
+        let snap = snapshot_with_mqtt_password();
+        let node_id = snap.nodes[0].config.id;
+        save(&path, &snap).await.expect("save failed");
+
+        let loaded = load(&path).await.expect("load failed").expect("no snapshot");
+        assert_eq!(loaded.nodes.len(), 1);
+        assert_eq!(loaded.nodes[0].config.id, node_id);
+        assert_eq!(loaded.nodes[0].config.name, "mqtt-app");
+        assert_eq!(loaded.nodes[0].state, NodeState::Running);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn secret_is_encrypted_at_rest_and_decrypted_on_load() {
+        let path = temp_db("enc");
+        let snap = snapshot_with_mqtt_password();
+        save_secret(&path, &snap, Some("unit-test-secret")).await.expect("save failed");
+
+        // 数据库中不应出现明文口令
+        let conn = Connection::open(&path).unwrap();
+        let cfg: String = conn
+            .query_row("SELECT config FROM nodes LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert!(!cfg.contains("p@ssw0rd"), "plaintext password leaked into db");
+        assert!(cfg.contains(ENC_PREFIX), "value was not encrypted");
+        drop(conn);
+
+        // 正确密钥可读回明文
+        let loaded = load_secret(&path, Some("unit-test-secret"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded.nodes[0].config.config.get("password").unwrap(),
+            "p@ssw0rd"
+        );
+        // 主机等非敏感字段保持明文可读
+        assert_eq!(
+            loaded.nodes[0].config.config.get("host").unwrap(),
+            "127.0.0.1"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn wrong_secret_keeps_ciphertext_without_panic() {
+        let path = temp_db("wrongkey");
+        let snap = snapshot_with_mqtt_password();
+        save_secret(&path, &snap, Some("right-secret")).await.unwrap();
+
+        let loaded = load_secret(&path, Some("wrong-secret"))
+            .await
+            .unwrap()
+            .unwrap();
+        // 解密失败时保留密文（不丢配置），而非崩溃或返回空
+        let v = loaded.nodes[0]
+            .config
+            .config
+            .get("password")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert!(v.starts_with(ENC_PREFIX));
+
+        // 无密钥加载同样不丢数据
+        let plain_load = load_secret(&path, None).await.unwrap().unwrap();
+        assert!(plain_load.nodes[0]
+            .config
+            .config
+            .get("password")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .starts_with(ENC_PREFIX));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn plaintext_secrets_detection() {
+        let snap = snapshot_with_mqtt_password();
+        assert!(has_plaintext_secrets(&snap));
+
+        // 无口令的节点集合不应触发
+        let mut clean = snapshot_with_mqtt_password();
+        clean.nodes[0].config.config.remove("password");
+        assert!(!has_plaintext_secrets(&clean));
+
+        // 已加密的口令不应重复触发回写
+        let mut encrypted = snapshot_with_mqtt_password();
+        let enc = encrypt_secret("k", "p@ssw0rd").expect("encrypt failed");
+        encrypted.nodes[0]
+            .config
+            .config
+            .insert("password".to_string(), serde_json::Value::String(enc));
+        assert!(!has_plaintext_secrets(&encrypted));
+    }
+
+    #[test]
+    fn encrypt_decrypt_roundtrip() {
+        let enc = encrypt_secret("secret", "hello").unwrap();
+        assert!(enc.starts_with(ENC_PREFIX));
+        assert_ne!(enc, format!("{}hello", ENC_PREFIX));
+        assert_eq!(decrypt_secret("secret", &enc).unwrap(), "hello");
+        assert!(decrypt_secret("other-secret", &enc).is_none());
+        assert!(decrypt_secret("secret", "not-encrypted").is_none());
+    }
+
+    #[test]
+    fn nodes_are_restored_into_store() {
+        let snap = snapshot_with_mqtt_password();
+        let id = snap.nodes[0].config.id;
+        let store = Store::new();
+        apply_to_store(&store, &snap);
+        assert_eq!(store.nodes_list().len(), 1);
+        assert_eq!(store.nodes_list()[0].config.id, id);
     }
 }

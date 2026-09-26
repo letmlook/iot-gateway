@@ -80,7 +80,7 @@ impl SouthPlugin for VirbPlugin {
             }
         }
         let ch: usize = tag.address.trim().parse().map_err(|_| PluginError::tag_invalid("address must be channel number 1..N"))?;
-        if ch < 1 || ch > 32 {
+        if !(1..=32).contains(&ch) {
             return Err(PluginError::tag_invalid("address must be 1..32"));
         }
         Ok(())

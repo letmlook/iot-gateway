@@ -32,7 +32,22 @@ Thumbs.db
 *.swo
 *~
 
+# WorkBuddy 本地工作数据（AI 会话记忆等，不入库）
+.workbuddy/
+
 # Local env
 .env
 .env.*
 !.env.example
+
+# 密钥 / 授权签名私钥禁止入库（泄露后可签发任意 license）
+scripts/*.pem
+*.key
+*.pkey
+
+# 已签发的授权文件（每台机器不同，不应入库）
+config/license.dat
+
+# 初始管理员随机口令（首次登录后应删除）
+/data/.admin_initial_password
+**/.admin_initial_password

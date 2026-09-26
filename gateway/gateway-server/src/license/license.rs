@@ -94,7 +94,7 @@ pub fn load_and_verify_license(license_path: &Path) -> Result<LicensePayload, Li
     let payload: LicensePayload =
         serde_json::from_slice(&payload_bytes).map_err(|e| LicenseError::InvalidFormat(e.to_string()))?;
 
-    let current_machine_id = hardware::machine_id().map_err(|e| LicenseError::Internal(e))?;
+    let current_machine_id = hardware::machine_id().map_err(LicenseError::Internal)?;
     if payload.machine_id != current_machine_id {
         return Err(LicenseError::MachineMismatch {
             expected: payload.machine_id.clone(),
@@ -102,11 +102,23 @@ pub fn load_and_verify_license(license_path: &Path) -> Result<LicensePayload, Li
         });
     }
 
-    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-    if payload.expiry_date < today {
-        return Err(LicenseError::Expired {
-            expiry_date: payload.expiry_date.clone(),
-        });
+    // 到期判定：按日期解析比较（而非字符串比较），并对非法日期直接判为无效，
+    // 避免 "2026-1-5" 这类非零填充日期被误判。
+    let today = chrono::Utc::now().date_naive();
+    match chrono::NaiveDate::parse_from_str(payload.expiry_date.trim(), "%Y-%m-%d") {
+        Ok(expiry) => {
+            if expiry < today {
+                return Err(LicenseError::Expired {
+                    expiry_date: payload.expiry_date.clone(),
+                });
+            }
+        }
+        Err(_) => {
+            return Err(LicenseError::InvalidFormat(format!(
+                "expiry_date 不是合法日期（期望 YYYY-MM-DD）: {}",
+                payload.expiry_date
+            )));
+        }
     }
 
     Ok(payload)

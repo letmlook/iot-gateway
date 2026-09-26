@@ -85,12 +85,12 @@ fn parse_i16(data: &[u8], e: VirbEndianess) -> i32 {
     if data.len() < 2 {
         return 0;
     }
-    let v = match e {
+    
+    match e {
         VirbEndianess::AB => i16::from_be_bytes([data[0], data[1]]) as i32,
         VirbEndianess::BA => i16::from_le_bytes([data[0], data[1]]) as i32,
         _ => i16::from_be_bytes([data[0], data[1]]) as i32,
-    };
-    v
+    }
 }
 
 /// 解析 4 字节 (ABCD/BADC/DCBA/CDAB)

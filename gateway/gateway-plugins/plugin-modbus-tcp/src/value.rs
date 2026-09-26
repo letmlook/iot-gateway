@@ -129,18 +129,18 @@ pub fn value_to_registers(value: &DataValue, data_type: &str) -> Vec<u16> {
         }
         DataValue::String(s) => {
             let bytes = s.as_bytes();
-            let mut regs = Vec::with_capacity((bytes.len() + 1) / 2);
+            let mut regs = Vec::with_capacity(bytes.len().div_ceil(2));
             for chunk in bytes.chunks(2) {
-                let low = chunk.get(0).copied().unwrap_or(0);
+                let low = chunk.first().copied().unwrap_or(0);
                 let high = chunk.get(1).copied().unwrap_or(0);
                 regs.push(u16::from_le_bytes([low, high]));
             }
             regs
         }
         DataValue::Bytes(b) => {
-            let mut regs = Vec::with_capacity((b.len() + 1) / 2);
+            let mut regs = Vec::with_capacity(b.len().div_ceil(2));
             for chunk in b.chunks(2) {
-                let low = chunk.get(0).copied().unwrap_or(0);
+                let low = chunk.first().copied().unwrap_or(0);
                 let high = chunk.get(1).copied().unwrap_or(0);
                 regs.push(u16::from_le_bytes([low, high]));
             }

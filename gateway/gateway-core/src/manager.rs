@@ -349,7 +349,7 @@ impl Manager {
                             let tags = store.tags_by_group(id, gid);
                             match plugin.poll_group(id, gid, &tags).await {
                                 Ok(values) => {
-                                    let point_count = values.len();
+                                    let _point_count = values.len();
                                     let node_name = store.node_get(id).map(|n| n.config.name);
                                     let group_name = store.group_get(id, gid).map(|g| g.name);
                                     let tag_names: std::collections::HashMap<_, _> = values

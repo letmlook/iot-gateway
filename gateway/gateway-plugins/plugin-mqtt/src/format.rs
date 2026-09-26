@@ -30,7 +30,7 @@ pub fn topic_from_template(
         .replace("${timestamp}", &timestamp_s)
 }
 
-/// NeuronEX ECP 类型：1=布尔 2=整型 3=浮点 4=字符串
+/// ECP 类型：1=布尔 2=整型 3=浮点 4=字符串
 pub fn data_value_ecp_type(v: &DataValue) -> u8 {
     match v {
         DataValue::Bool(_) => 1,
@@ -41,7 +41,7 @@ pub fn data_value_ecp_type(v: &DataValue) -> u8 {
     }
 }
 
-/// DataValue 转为 JSON 标量（NeuronEX values/tags 用）
+/// DataValue 转为 JSON 标量（values/tags 格式用）
 pub fn data_value_to_json_scalar(v: &DataValue) -> serde_json::Value {
     if let Some(b) = v.as_bool() {
         return serde_json::json!(b);
@@ -80,7 +80,7 @@ pub fn tag_key(data: &GroupData, tag_id: &TagId) -> String {
         .unwrap_or_else(|| tag_id.0.to_string())
 }
 
-/// 按上传格式生成 payload。格式见 NeuronEX：https://docs.emqx.com/zh/neuronex/latest/configuration/north-apps/mqtt/api.html
+/// 按上传格式生成 payload。取值：values_format / tags_format / ecp_format / group_data / raw_data
 /// node/group/values 的 key 均用名称，不把 id 放到 topic 和字段中。
 pub fn payload_for_format(data: &GroupData, upload_format: &str) -> Vec<u8> {
     let node_s = data

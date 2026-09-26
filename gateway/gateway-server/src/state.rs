@@ -4,7 +4,7 @@ use crate::config::Config;
 use crate::license::FeatureManager;
 use crate::logging::NodeLogNameMap;
 use crate::users::UserStore;
-use gateway_core::{persist_save, PluginLoader, Manager};
+use gateway_core::{persist_save_secret, PluginLoader, Manager};
 use std::sync::Arc;
 use tracing::warn;
 
@@ -55,11 +55,16 @@ impl AppState {
         }
     }
 
-    /// 持久化到 config.data_db()（SQLite）
+    /// 持久化到 config.data_db()（SQLite）；敏感配置项在落盘前加密
     pub async fn persist(&self) {
         let path = self.config.data_db();
         let snap = self.manager.build_snapshot().await;
-        if let Err(e) = persist_save(&path, &snap).await {
+        let secret = self.config.master_secret.as_deref();
+        let res = match secret {
+            Some(k) => persist_save_secret(&path, &snap, Some(k)).await,
+            None => persist_save_secret(&path, &snap, None).await,
+        };
+        if let Err(e) = res {
             warn!(path = %path.display(), "persist failed: {}", e);
         }
     }

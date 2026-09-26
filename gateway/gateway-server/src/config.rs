@@ -28,8 +28,36 @@ pub struct Config {
     pub disable_auth: bool,
     /// API Bearer Token；若设置则除 /api/health、/api/metrics 外需带 Authorization: Bearer <token>
     pub token: Option<String>,
-    /// 备份加密密钥（GATEWAY_BACKUP_SECRET）；生产环境务必设置强密钥
+    /// 备份加密密钥（GATEWAY_BACKUP_SECRET）；未设置时随机生成，仅本进程可用
     pub backup_secret: String,
+    /// 备份密钥是否为运行时随机生成（未配置 GATEWAY_BACKUP_SECRET）
+    pub backup_secret_ephemeral: bool,
+    /// CORS 允许的来源列表（GATEWAY_ALLOWED_ORIGINS，逗号分隔）；为空表示不允许任何跨域来源
+    pub allowed_origins: Vec<String>,
+    /// HTTP 监听地址（GATEWAY_BIND），默认 0.0.0.0
+    pub bind: String,
+    /// 敏感配置落盘加密密钥（GATEWAY_SECRET_KEY，或回退显式设置的 GATEWAY_BACKUP_SECRET）；None 表示明文存储并告警
+    pub master_secret: Option<String>,
+    /// 是否启用角色授权（RBAC）：默认开启；`GATEWAY_ENFORCE_ROLES=0` 可临时关闭以便灰度
+    pub enforce_roles: bool,
+}
+
+fn default_bind_str() -> String {
+    "0.0.0.0".into()
+}
+
+/// 生成 32 字节随机密钥（hex），用于未显式配置时的备份加密
+fn random_secret() -> String {
+    use rand::Rng;
+    let bytes: [u8; 32] = rand::thread_rng().gen();
+    hex::encode(bytes)
+}
+
+fn parse_origins(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|x| x.trim().to_string())
+        .filter(|x| !x.is_empty())
+        .collect()
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -55,14 +83,12 @@ struct ConfigFile {
     disable_auth: bool,
     #[serde(default)]
     token: Option<String>,
-    #[serde(default = "default_backup_secret_str")]
+    #[serde(default)]
     backup_secret: String,
-}
-
-fn default_backup_secret_str() -> String {
-    std::env::var("GATEWAY_BACKUP_SECRET").unwrap_or_else(|_| {
-        "gateway-backup-default-secret-change-in-production".to_string()
-    })
+    #[serde(default)]
+    allowed_origins: Vec<String>,
+    #[serde(default = "default_bind_str")]
+    bind: String,
 }
 
 fn default_data_dir_str() -> String {
@@ -115,7 +141,13 @@ impl Default for Config {
             log_dir_nodes: Some(default_log_dir_nodes()),
             disable_auth: false,
             token: None,
-            backup_secret: default_backup_secret_str(),
+            // 默认不提供密钥，from_env 会以随机值兜底并告警
+            backup_secret: String::new(),
+            backup_secret_ephemeral: true,
+            allowed_origins: Vec::new(),
+            bind: default_bind_str(),
+            master_secret: None,
+            enforce_roles: true,
         }
     }
 }
@@ -136,11 +168,12 @@ impl Config {
             log_dir_nodes: cf.log_dir_nodes.map(PathBuf::from),
             disable_auth: cf.disable_auth,
             token: cf.token,
-            backup_secret: if cf.backup_secret.is_empty() {
-                default_backup_secret_str()
-            } else {
-                cf.backup_secret
-            },
+            backup_secret_ephemeral: cf.backup_secret.is_empty(),
+            backup_secret: cf.backup_secret,
+            allowed_origins: cf.allowed_origins,
+            bind: if cf.bind.is_empty() { default_bind_str() } else { cf.bind },
+            master_secret: None,
+            enforce_roles: true,
         })
     }
 
@@ -164,7 +197,9 @@ impl Config {
             log_dir_nodes: Some(default_log_dir_nodes().to_string_lossy().into_owned()),
             disable_auth: false,
             token: None,
-            backup_secret: default_backup_secret_str(),
+            backup_secret: String::new(),
+            allowed_origins: Vec::new(),
+            bind: default_bind_str(),
         };
         if let Ok(json) = serde_json::to_string_pretty(&default_cfg) {
             let _ = std::fs::write(&path, json);
@@ -188,10 +223,7 @@ impl Config {
             });
         let mut c = config_path
             .and_then(|p| Self::from_file(&p))
-            .unwrap_or_else(Config::default);
-        if c.backup_secret.is_empty() {
-            c.backup_secret = default_backup_secret_str();
-        }
+            .unwrap_or_default();
         if let Ok(s) = std::env::var("GATEWAY_PORT") {
             if let Ok(p) = s.parse::<u16>() {
                 c.port = p;
@@ -235,8 +267,40 @@ impl Config {
         if let Ok(s) = std::env::var("GATEWAY_BACKUP_SECRET") {
             if !s.is_empty() {
                 c.backup_secret = s;
+                c.backup_secret_ephemeral = false;
             }
         }
+        if let Ok(s) = std::env::var("GATEWAY_ALLOWED_ORIGINS") {
+            c.allowed_origins = parse_origins(&s);
+        }
+        if let Ok(s) = std::env::var("GATEWAY_BIND") {
+            if !s.is_empty() {
+                c.bind = s;
+            }
+        }
+        if let Ok(s) = std::env::var("GATEWAY_ENFORCE_ROLES") {
+            c.enforce_roles = !(s == "0" || s.eq_ignore_ascii_case("false"));
+        }
+        // 未提供备份密钥时随机生成：保证不再有「写死在仓库中的默认密钥」
+        if c.backup_secret.is_empty() {
+            c.backup_secret = random_secret();
+            c.backup_secret_ephemeral = true;
+        }
+        // 敏感配置落盘加密密钥：优先 GATEWAY_SECRET_KEY；回退显式设置的 GATEWAY_BACKUP_SECRET。
+        // 随机（ephemeral）密钥不可用于加密落盘，否则重启后无法解密。
+        c.master_secret = match std::env::var("GATEWAY_SECRET_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())
+        {
+            Some(s) => Some(s),
+            None => {
+                if c.backup_secret_ephemeral {
+                    None
+                } else {
+                    Some(c.backup_secret.clone())
+                }
+            }
+        };
         c
     }
 

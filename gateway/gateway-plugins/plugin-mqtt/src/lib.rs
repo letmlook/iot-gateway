@@ -56,12 +56,12 @@ impl NorthPlugin for MqttPlugin {
         PluginMeta {
             name: "mqtt",
             kind: PluginKind::North,
-            description: Some("MQTT 北向：QoS 0/1/2、主题模板、TLS、离线缓存；上报格式兼容 NeuronEX values/tags/ecp 及 group_data/raw_data"),
+            description: Some("MQTT 北向：QoS 0/1/2、主题模板、TLS、离线缓存；上报格式支持 values/tags/ecp 及 group_data/raw_data"),
             version: "0.2.0",
             name_zh: Some("MQTT"),
             name_en: Some("MQTT"),
-            description_zh: Some("MQTT 北向：QoS 0/1/2、主题模板、TLS、离线缓存；上报格式兼容 NeuronEX values/tags/ecp 及 group_data/raw_data"),
-            description_en: Some("MQTT north: QoS 0/1/2, topic template, TLS, offline cache; upload formats aligned with NeuronEX values/tags/ecp, group_data, raw_data"),
+            description_zh: Some("MQTT 北向：QoS 0/1/2、主题模板、TLS、离线缓存；上报格式支持 values/tags/ecp 及 group_data/raw_data"),
+            description_en: Some("MQTT north: QoS 0/1/2, topic template, TLS, offline cache; upload formats: values, tags, ecp, group_data, raw_data"),
         }
     }
 

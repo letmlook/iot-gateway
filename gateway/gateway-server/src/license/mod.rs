@@ -6,7 +6,6 @@ mod feature;
 mod hardware;
 mod license;
 
-pub use error::LicenseError;
 pub use feature::FeatureManager;
 pub use hardware::machine_id;
 pub use license::{load_and_verify_license, LicensePayload};

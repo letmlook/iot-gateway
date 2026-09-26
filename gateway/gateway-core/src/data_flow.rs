@@ -72,7 +72,7 @@ impl DataFlowMetrics {
             let key = (south_node_id, group_id, *tag_id);
             self.published_per_tag
                 .entry(key)
-                .or_insert_with(AtomicU64::default)
+                .or_default()
                 .fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -89,7 +89,7 @@ impl DataFlowMetrics {
             let key = (north_node_id, south_node_id, group_id, *tag_id);
             self.forwarded_per_tag
                 .entry(key)
-                .or_insert_with(AtomicU64::default)
+                .or_default()
                 .fetch_add(1, Ordering::Relaxed);
         }
     }

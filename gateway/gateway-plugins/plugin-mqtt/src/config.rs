@@ -11,11 +11,11 @@ pub const DEFAULT_KEEP_ALIVE_SECS: u64 = 30;
 pub const DEFAULT_CACHE_SYNC_INTERVAL_MS: u64 = 100;
 pub const DEFAULT_QOS: u8 = 1;
 pub const UPLOAD_FORMAT_GROUP_DATA: &str = "group_data";
-/// NeuronEX Values-format：timestamp、node、group、values(点位名->标量)、errors、metas
+/// Values-format：timestamp、node、group、values(点位名->标量)、errors、metas
 pub const UPLOAD_FORMAT_VALUES_FORMAT: &str = "values_format";
-/// NeuronEX Tags-format：timestamp、node、group、tags:[{name, value}]
+/// Tags-format：timestamp、node、group、tags:[{name, value}]
 pub const UPLOAD_FORMAT_TAGS_FORMAT: &str = "tags_format";
-/// NeuronEX ECP-format：timestamp、node、group、tags:[{name, value, type:1|2|3|4}]
+/// ECP-format：timestamp、node、group、tags:[{name, value, type:1|2|3|4}]
 pub const UPLOAD_FORMAT_ECP_FORMAT: &str = "ecp_format";
 /// 与 raw_data.json 一致：node、group、timestamp(ms)、values(tag->[num])、errors、metas
 pub const UPLOAD_FORMAT_RAW_DATA: &str = "raw_data";
@@ -155,9 +155,9 @@ pub fn config_schema() -> ConfigSchema {
             name: "upload_format".to_string(),
             name_zh: Some("上报数据格式".to_string()),
             name_en: Some("Upload Format".to_string()),
-            description: Some("JSON format aligned with NeuronEX: values_format, tags_format, ecp_format, group_data, raw_data.".to_string()),
-            description_zh: Some("上报 JSON 格式，兼容 NeuronEX：values_format/tags_format/ecp_format，及 group_data、raw_data.".to_string()),
-            description_en: Some("JSON format aligned with NeuronEX: values_format, tags_format, ecp_format, group_data, raw_data.".to_string()),
+            description: Some("Upload format: values_format, tags_format, ecp_format, group_data, raw_data.".to_string()),
+            description_zh: Some("上报 JSON 格式：values_format/tags_format/ecp_format，及 group_data、raw_data.".to_string()),
+            description_en: Some("Upload format: values_format, tags_format, ecp_format, group_data, raw_data.".to_string()),
             attribute: ParamAttribute::Optional,
             ty: ParamType::Select,
             default: Some(serde_json::json!(UPLOAD_FORMAT_VALUES_FORMAT)),

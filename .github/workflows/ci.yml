@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  backend:
+    name: Backend check + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check
+        run: cargo check --workspace --all-targets
+      - name: cargo test
+        run: cargo test --workspace
+
+  quality:
+    name: Quality (fmt + clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo clippy
+        # 强制：新增代码不得引入 clippy 告警。
+        # 下列 lint 为既有设计取舍（复杂插件签名 / handler 参数较多 / 行业缩写常量 / 测试构造默认值），
+        # 已在存量代码中统一豁免，避免逐处 #[allow] 造成噪音。
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings \
+            -A clippy::type_complexity \
+            -A clippy::too_many_arguments \
+            -A clippy::upper_case_acronyms \
+            -A clippy::module_inception \
+            -A clippy::missing_safety_doc \
+            -A clippy::field_reassign_with_default \
+            -A clippy::needless_range_loop \
+            -A clippy::doc_markdown \
+            -A clippy::doc_lazy_continuation
+      - name: cargo fmt (advisory)
+        # 仓库尚未整体格式化（存量 52 文件差异），先作为提示；执行 `cargo fmt --all` 后可改为强制
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install and build
+        working-directory: web
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+          npm run build

@@ -7,7 +7,9 @@
   "log_level": "debug",
   "log_file": "logs/gateway.log",
   "log_dir_nodes": "logs/nodes",
-  "disable_auth": true,
+  "disable_auth": false,
   "token": null,
-  "backup_secret": "gateway-backup-default-secret-change-in-production"
+  "backup_secret": "",
+  "allowed_origins": [],
+  "bind": "0.0.0.0"
 }

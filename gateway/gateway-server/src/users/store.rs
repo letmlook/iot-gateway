@@ -26,8 +26,29 @@ CREATE INDEX IF NOT EXISTS idx_users_token ON users(token);
 
 /// 系统初始化时的默认管理员：用户名
 const DEFAULT_ADMIN_USERNAME: &str = "admin";
-/// 系统初始化时的默认管理员密码（首次登录后建议修改）
-const DEFAULT_ADMIN_PASSWORD: &str = "admin123";
+/// 连续登录失败达到该次数后临时锁定账号，防止暴力破解
+const MAX_FAILED_LOGINS: u32 = 5;
+/// 登录失败锁定时长（秒）
+const LOGIN_LOCK_SECS: i64 = 300;
+
+/// 生成高强度随机口令（20 位：大小写字母 + 数字 + 符号，已剔除易混淆字符）
+fn generate_random_password() -> String {
+    use rand::Rng;
+    const ALPHABET: &[u8] =
+        b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*-_";
+    let mut rng = rand::thread_rng();
+    (0..20)
+        .map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char)
+        .collect()
+}
+
+/// 当前 UNIX 时间戳（秒）
+fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
 
 /// 用户角色
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,7 +130,11 @@ fn verify_password(password: &str, hash: &str) -> Result<bool, String> {
 /// 当 open 失败时使用 empty()，此时所有接口返回空/假/错误，不阻塞启动。
 pub struct UserStore {
     db_path: Option<Arc<std::path::PathBuf>>,
-    tokens: RwLock<std::collections::HashSet<String>>,
+    tokens: RwLock<std::collections::HashMap<String, UserRole>>,
+    /// 首次初始化时生成的随机管理员口令（供启动日志/文件输出，取走后清空）
+    initial_password: std::sync::OnceLock<String>,
+    /// 登录失败计数：username -> (失败次数, 最近失败时间戳秒)
+    failed_logins: RwLock<std::collections::HashMap<String, (u32, i64)>>,
 }
 
 impl UserStore {
@@ -117,58 +142,95 @@ impl UserStore {
     pub fn empty() -> Self {
         Self {
             db_path: None,
-            tokens: RwLock::new(std::collections::HashSet::new()),
+            tokens: RwLock::new(std::collections::HashMap::new()),
+            initial_password: std::sync::OnceLock::new(),
+            failed_logins: RwLock::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// 取出首次初始化时生成的随机管理员口令（只在本次进程首次创建 admin 时有值）
+    pub fn take_initial_password(&self) -> Option<String> {
+        self.initial_password.get().cloned()
     }
 
     fn path(&self) -> Option<Arc<std::path::PathBuf>> {
         self.db_path.clone()
     }
 
-    /// 打开或创建数据库并确保 users 表存在；若不存在用户名为 admin 则创建默认 admin/admin123。
+/// 把随机初始口令写入数据目录下的 `.admin_initial_password`（0600），失败仅告警不影响启动。
+fn write_initial_password_file(db_path: &Path, pwd: &str) {
+    let Some(dir) = db_path.parent() else { return };
+    let file = dir.join(".admin_initial_password");
+    if let Err(e) = std::fs::write(&file, pwd) {
+        tracing::warn!("write {} failed: {}", file.display(), e);
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+    }
+}
+
+/// 打开或创建数据库并确保 users 表存在；若不存在 admin 用户则创建，**口令为随机生成**
+    /// （写入数据目录 `.admin_initial_password`，权限 0600，首次登录后应删除并修改口令）。
     pub fn open(db_path: &Path) -> Result<Self, String> {
         let path = db_path.to_path_buf();
-        let tokens = tokio::task::block_in_place(|| {
+        let (tokens, generated) = tokio::task::block_in_place(|| {
             let conn = rusqlite::Connection::open(&path).map_err(|e| e.to_string())?;
             conn.execute_batch(USERS_SCHEMA).map_err(|e| e.to_string())?;
             let mut stmt = conn.prepare("SELECT 1 FROM users WHERE username = ?1 LIMIT 1").map_err(|e| e.to_string())?;
             let has_admin = stmt.exists([DEFAULT_ADMIN_USERNAME]).map_err(|e| e.to_string())?;
             drop(stmt);
+            let mut generated: Option<String> = None;
             if !has_admin {
+                let pwd = generate_random_password();
                 let id = Uuid::new_v4().to_string();
-                let hash = hash_password(DEFAULT_ADMIN_PASSWORD)?;
+                let hash = hash_password(&pwd)?;
                 let now = now_iso();
                 conn.execute(
                     "INSERT INTO users (id, username, password_hash, role, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     params![&id, DEFAULT_ADMIN_USERNAME, &hash, "admin", &now, &now],
                 ).map_err(|e| e.to_string())?;
-                tracing::info!("default admin user created (username: {}, please change password after first login)", DEFAULT_ADMIN_USERNAME);
+                Self::write_initial_password_file(&path, &pwd);
+                tracing::info!("default admin created with a RANDOM password (see .admin_initial_password in data dir); change it after first login");
+                generated = Some(pwd);
             } else if std::env::var("GATEWAY_RESET_ADMIN_PASSWORD").map(|s| s == "1" || s.eq_ignore_ascii_case("true")).unwrap_or(false) {
-                let hash = hash_password(DEFAULT_ADMIN_PASSWORD)?;
+                let pwd = generate_random_password();
+                let hash = hash_password(&pwd)?;
                 let now = now_iso();
                 let n = conn.execute(
-                    "UPDATE users SET password_hash = ?1, updated_at = ?2 WHERE username = ?3",
+                    "UPDATE users SET password_hash = ?1, token = NULL, updated_at = ?2 WHERE username = ?3",
                     params![&hash, &now, DEFAULT_ADMIN_USERNAME],
                 ).map_err(|e| e.to_string())?;
                 if n > 0 {
-                    tracing::info!("admin password reset to default (GATEWAY_RESET_ADMIN_PASSWORD is set; please unset after login)");
+                    Self::write_initial_password_file(&path, &pwd);
+                    tracing::info!("admin password reset to a RANDOM value (unset GATEWAY_RESET_ADMIN_PASSWORD after login)");
+                    generated = Some(pwd);
                 }
             }
-            let mut stmt = conn.prepare("SELECT token FROM users WHERE token IS NOT NULL AND token != ''").map_err(|e| e.to_string())?;
-            let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?;
-            let mut set = std::collections::HashSet::new();
-            for row in rows {
-                if let Ok(t) = row {
-                    set.insert(t);
-                }
+            let mut stmt = conn.prepare("SELECT token, role FROM users WHERE token IS NOT NULL AND token != ''").map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            }).map_err(|e| e.to_string())?;
+            let mut map = std::collections::HashMap::new();
+            for (t, role) in rows.flatten() {
+                map.insert(t, UserRole::from_str(&role));
             }
-            Ok::<_, String>(set)
+            Ok::<_, String>((map, generated))
         })?;
+        let initial_password = std::sync::OnceLock::new();
+        if let Some(p) = generated {
+            let _ = initial_password.set(p);
+        }
         Ok(Self {
             db_path: Some(Arc::new(path)),
             tokens: RwLock::new(tokens),
+            initial_password,
+            failed_logins: RwLock::new(std::collections::HashMap::new()),
         })
     }
+
 
     fn row_to_user(r: &UserRow) -> User {
         User {
@@ -194,9 +256,22 @@ impl UserStore {
             tracing::warn!("login failed: username is empty");
             return Err("username required".into());
         }
+        // 登录失败限流：连续失败达到阈值后临时锁定，防止暴力破解
+        {
+            let now = now_secs();
+            let fl = self.failed_logins.read().await;
+            if let Some((count, last)) = fl.get(username.as_str()) {
+                if *count >= MAX_FAILED_LOGINS && now - *last < LOGIN_LOCK_SECS {
+                    let left = LOGIN_LOCK_SECS - (now - *last);
+                    tracing::warn!("login blocked: account '{}' locked ({}s left)", username, left);
+                    return Err(format!("account temporarily locked, retry after {}s", left));
+                }
+            }
+        }
         let password = password.to_string();
         tracing::info!("login attempt: username={}", username);
-        let (token, user) = tokio::task::spawn_blocking(move || {
+        let user_key = username.clone();
+        let result = tokio::task::spawn_blocking(move || {
             let conn = rusqlite::Connection::open(path.as_path()).map_err(|e| {
                 tracing::error!("login: db open failed: {}", e);
                 e.to_string()
@@ -243,48 +318,68 @@ impl UserStore {
                 "UPDATE users SET token = ?1, updated_at = ?2 WHERE id = ?3",
                 params![&token, &now, &row.id],
             ).map_err(|e| e.to_string())?;
+            let old_token = row.token.clone();
             let user = Self::row_to_user(&row);
             tracing::info!("login success: user '{}' (id={})", username, row.id);
-            Ok::<_, String>((token, user))
+            Ok::<_, String>((token, user, old_token))
         })
         .await
-        .map_err(|e| e.to_string())??;
-        self.tokens.write().await.insert(token.clone());
-        Ok((token, user))
+        .map_err(|e| e.to_string())?;
+        match result {
+            Ok((token, user, old_token)) => {
+                let mut tokens = self.tokens.write().await;
+                if let Some(t) = old_token {
+                    if !t.is_empty() {
+                        tokens.remove(&t);
+                    }
+                }
+                tokens.insert(token.clone(), user.role);
+                drop(tokens);
+                self.failed_logins.write().await.remove(&user_key);
+                Ok((token, user))
+            }
+            Err(e) => {
+                let now = now_secs();
+                let mut fl = self.failed_logins.write().await;
+                let entry = fl.entry(user_key.clone()).or_insert((0, now));
+                entry.0 += 1;
+                entry.1 = now;
+                tracing::warn!(
+                    "login failed for '{}': {} consecutive failure(s), {} left before lock",
+                    user_key,
+                    entry.0,
+                    MAX_FAILED_LOGINS.saturating_sub(entry.0)
+                );
+                Err(e)
+            }
+        }
     }
 
-    /// 校验 Bearer token 是否有效（内存缓存）
-    pub fn token_valid(&self, token: &str) -> bool {
-        self.tokens.try_read().map(|t| t.contains(token)).unwrap_or(false)
-    }
-
-    /// 根据 token 取用户信息
-    pub async fn get_user_by_token(&self, token: &str) -> Option<User> {
+    /// 登出：使该 token 立即失效（清空 DB 中的 token 并移出内存缓存）
+    pub async fn logout(&self, token: &str) -> Result<(), String> {
+        self.tokens.write().await.remove(token);
         let path = match self.path() {
             Some(p) => p,
-            None => return None,
+            None => return Ok(()),
         };
         let token = token.to_string();
         tokio::task::spawn_blocking(move || {
-            let conn = rusqlite::Connection::open(path.as_path()).ok()?;
-            let mut stmt = conn.prepare(
-                "SELECT id, username, password_hash, role, token, created_at, updated_at FROM users WHERE token = ?1",
-            ).ok()?;
-            let row: UserRow = stmt.query_row([token.as_str()], |r| {
-                Ok(UserRow {
-                    id: r.get(0)?,
-                    username: r.get(1)?,
-                    password_hash: r.get(2)?,
-                    role: r.get(3)?,
-                    token: r.get(4)?,
-                    created_at: r.get(5)?,
-                    updated_at: r.get(6)?,
-                })
-            }).ok()?;
-            Some(Self::row_to_user(&row))
+            let conn = rusqlite::Connection::open(path.as_path()).map_err(|e| e.to_string())?;
+            conn.execute(
+                "UPDATE users SET token = NULL WHERE token = ?1",
+                params![&token],
+            )
+            .map_err(|e| e.to_string())?;
+            Ok::<_, String>(())
         })
         .await
-        .ok()?
+        .map_err(|e| e.to_string())??;
+        Ok(())
+    }
+
+    /// 取 token 对应用户的角色，供授权（RBAC）判定使用
+    pub fn role_of(&self, token: &str) -> Option<UserRole> {
+        self.tokens.try_read().ok().and_then(|t| t.get(token).copied())
     }
 
     pub async fn list(&self) -> Result<Vec<User>, String> {
@@ -455,19 +550,33 @@ impl UserStore {
         let id = id.to_string();
         let hash = hash_password(new_password)?;
         let now = now_iso();
-        tokio::task::spawn_blocking(move || {
-            let conn = rusqlite::Connection::open(path.as_path()).map_err(|e| e.to_string())?;
-            let n = conn.execute(
-                "UPDATE users SET password_hash = ?1, updated_at = ?2 WHERE id = ?3",
-                params![&hash, &now, &id],
-            ).map_err(|e| e.to_string())?;
-            if n == 0 {
-                return Err::<(), String>("user not found".into());
+        // 改密后原有会话必须立即失效：清空该用户的 token
+        let old_token = tokio::task::spawn_blocking({
+            let path = Arc::clone(&path);
+            let id = id.clone();
+            move || {
+                let conn = rusqlite::Connection::open(path.as_path()).map_err(|e| e.to_string())?;
+                let old: Option<String> = conn
+                    .query_row("SELECT token FROM users WHERE id = ?1", [id.as_str()], |r| r.get(0))
+                    .ok()
+                    .flatten();
+                let n = conn.execute(
+                    "UPDATE users SET password_hash = ?1, token = NULL, updated_at = ?2 WHERE id = ?3",
+                    params![&hash, &now, &id],
+                ).map_err(|e| e.to_string())?;
+                if n == 0 {
+                    return Err::<Option<String>, String>("user not found".into());
+                }
+                Ok(old)
             }
-            Ok(())
         })
         .await
         .map_err(|e| e.to_string())??;
+        if let Some(t) = old_token {
+            if !t.is_empty() {
+                self.tokens.write().await.remove(&t);
+            }
+        }
         Ok(())
     }
 

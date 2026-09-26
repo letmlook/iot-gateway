@@ -95,9 +95,7 @@ impl Store {
     /// 同节点下组名唯一：按名称查找组
     pub fn group_get_by_name(&self, node_id: NodeId, name: &str) -> Option<Group> {
         self.groups
-            .iter()
-            .filter(|r| r.key().0 == node_id && r.value().name == name)
-            .next()
+            .iter().find(|r| r.key().0 == node_id && r.value().name == name)
             .map(|r| r.value().clone())
     }
 

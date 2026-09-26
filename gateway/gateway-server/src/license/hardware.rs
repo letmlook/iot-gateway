@@ -30,10 +30,3 @@ fn first_mac_string() -> String {
         Ok(None) | Err(_) => "no-mac".to_string(),
     }
 }
-
-/// 仅在启用 license 时链接 hex；避免未使用 license 时多依赖。
-/// 此处我们直接依赖 hex，保持实现简单；若希望零额外依赖，可改为手写 hex 编码。
-pub(crate) fn sha256_hex(input: &[u8]) -> String {
-    let hash = Sha256::digest(input);
-    hex::encode(hash)
-}

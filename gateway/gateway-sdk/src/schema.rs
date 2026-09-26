@@ -102,6 +102,9 @@ pub struct ConfigSchema {
     pub params: Vec<ParamSchema>,
     /// 点位地址正则（按数据类型）
     pub tag_regex: Option<Vec<TagRegexEntry>>,
+    /// 敏感参数名列表（如口令、私钥路径）：API 返回时脱敏为 `"***"`，持久化时加密存储
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensitive: Option<Vec<String>>,
 }
 
 impl ConfigSchema {
@@ -119,6 +122,44 @@ impl ConfigSchema {
         self
     }
 
+    /// 声明敏感参数名（口令、私钥、AK/SK 等）：这些值不会被 API 明文返回，也不会明文入库
+    pub fn sensitive(mut self, names: &[&str]) -> Self {
+        let mut v = self.sensitive.unwrap_or_default();
+        for n in names {
+            if !v.iter().any(|x| x == n) {
+                v.push((*n).to_string());
+            }
+        }
+        self.sensitive = Some(v);
+        self
+    }
+
+    /// 是否为敏感字段：命中插件显式声明或名称兜底约定
+    pub fn is_sensitive(&self, key: &str) -> bool {
+        if self
+            .sensitive
+            .as_ref()
+            .map(|v| v.iter().any(|n| n == key))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        is_sensitive_key(key)
+    }
+
+    /// 返回脱敏后的配置副本：敏感字段统一替换为 `"***"`
+    pub fn mask_config(&self, config: &PluginConfig) -> PluginConfig {
+        let mut out = config.clone();
+        for key in config.keys() {
+            if self.is_sensitive(key) {
+                if let Some(v) = out.get_mut(key) {
+                    *v = serde_json::Value::String(MASKED.to_string());
+                }
+            }
+        }
+        out
+    }
+
     /// 依赖是否满足：无 depends_on 则 true；有则检查 config[depends_on] 是否等于 depends_value 或在 depends_values 中。
     pub fn param_visible(&self, param: &ParamSchema, config: &PluginConfig) -> bool {
         let Some(ref key) = param.depends_on else {
@@ -132,7 +173,7 @@ impl ConfigSchema {
             return dep_val == *expect;
         }
         if let Some(ref list) = param.depends_values {
-            return list.iter().any(|v| *v == dep_val);
+            return list.contains(&dep_val);
         }
         false
     }
@@ -263,4 +304,145 @@ pub struct TagSchema {
     /// 地址格式说明（英文）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address_format_en: Option<String>,
+}
+
+/// API 脱敏占位值
+pub const MASKED: &str = "***";
+
+/// 名称兜底判定的敏感字段关键字
+const SENSITIVE_KEYWORDS: &[&str] = &[
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "private_key",
+    "client_key",
+    "api_key",
+    "access_key",
+];
+
+/// 凭据类配置项判定：命中即视为敏感（不通过 API 明文返回、落盘时加密）
+pub fn is_sensitive_key(key: &str) -> bool {
+    // 归一化后再匹配：忽略大小写与 `_`/`-`，使 accessKey / access_key / ACCESS-KEY 同等对待
+    let norm = |s: &str| -> String {
+        s.to_ascii_lowercase()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect()
+    };
+    let k = norm(key);
+    SENSITIVE_KEYWORDS.iter().any(|s| k.contains(&norm(s)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::PluginConfig;
+
+    fn cfg(pairs: &[(&str, serde_json::Value)]) -> PluginConfig {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn sensitive_keywords_are_detected() {
+        assert!(is_sensitive_key("password"));
+        assert!(is_sensitive_key("mqtt_password"));
+        assert!(is_sensitive_key("client_key"));
+        assert!(is_sensitive_key("accessKey"));
+        assert!(!is_sensitive_key("host"));
+        assert!(!is_sensitive_key("interval_ms"));
+    }
+
+    #[test]
+    fn schema_sensitive_declaration_and_masking() {
+        let schema = ConfigSchema::new().sensitive(&["auth_aes_key"]);
+        assert!(schema.is_sensitive("auth_aes_key"));
+        // 未在列表中但命中名称约定，同样视为敏感
+        assert!(schema.is_sensitive("password"));
+
+        let config = cfg(&[
+            ("host", serde_json::json!("broker.local")),
+            ("password", serde_json::json!("p@ss")),
+            ("auth_aes_key", serde_json::json!("k1")),
+        ]);
+        let masked = schema.mask_config(&config);
+        assert_eq!(masked.get("host").unwrap(), "broker.local");
+        assert_eq!(masked.get("password").unwrap(), MASKED);
+        assert_eq!(masked.get("auth_aes_key").unwrap(), MASKED);
+    }
+
+    #[test]
+    fn validate_config_enforces_required_and_ranges() {
+        let schema = ConfigSchema::new()
+            .param(ParamSchema {
+                name: "host".to_string(),
+                ty: ParamType::String,
+                attribute: ParamAttribute::Required,
+                ..Default::default()
+            })
+            .param(ParamSchema {
+                name: "port".to_string(),
+                ty: ParamType::Int,
+                attribute: ParamAttribute::Required,
+                valid: Some(ParamValid {
+                    min: Some(1),
+                    max: Some(65535),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+
+        // 缺失必填
+        assert!(schema
+            .validate_config(&cfg(&[("port", serde_json::json!(1883))]))
+            .is_err());
+        // 超出范围
+        assert!(schema
+            .validate_config(&cfg(&[
+                ("host", serde_json::json!("127.0.0.1")),
+                ("port", serde_json::json!(70000))
+            ]))
+            .is_err());
+        // 合法
+        assert!(schema
+            .validate_config(&cfg(&[
+                ("host", serde_json::json!("127.0.0.1")),
+                ("port", serde_json::json!(1883))
+            ]))
+            .is_ok());
+    }
+
+    #[test]
+    fn validate_address_matches_tag_regex() {
+        let schema = ConfigSchema::new().tag_regex(vec![TagRegexEntry {
+            data_type: "int16".to_string(),
+            regex: r"^4\d{4}$".to_string(),
+        }]);
+        assert!(schema.validate_address("int16", "40001"));
+        assert!(!schema.validate_address("int16", "abc"));
+        // 未配置的数据类型默认通过
+        assert!(schema.validate_address("float64", "anything"));
+    }
+
+    #[test]
+    fn depends_on_controls_visibility_and_validation() {
+        let schema = ConfigSchema::new().param(ParamSchema {
+            name: "password".to_string(),
+            ty: ParamType::String,
+            attribute: ParamAttribute::Required,
+            depends_on: Some("auth".to_string()),
+            depends_value: Some(serde_json::json!(true)),
+            ..Default::default()
+        });
+        let vis = cfg(&[("auth", serde_json::json!(true))]);
+        let invis = cfg(&[("auth", serde_json::json!(false))]);
+        assert!(schema.param_visible(&schema.params[0], &vis));
+        assert!(!schema.param_visible(&schema.params[0], &invis));
+        // 隐藏字段不参与必填校验
+        assert!(schema.validate_config(&invis).is_ok());
+        assert!(schema.validate_config(&vis).is_err());
+    }
 }

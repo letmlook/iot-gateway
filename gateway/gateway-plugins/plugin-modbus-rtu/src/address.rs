@@ -57,7 +57,7 @@ pub fn parse_address_full(addr: &str, start_address: u8) -> Option<ParsedAddress
         let rest = rest.trim_start_matches('.');
         let rest_upper = rest.to_uppercase();
         let is_string_len = rest_upper.ends_with('H') || rest_upper.ends_with('L') || rest_upper.ends_with('D') || rest_upper.ends_with('E');
-        let len_str: &str = if is_string_len { rest_upper.trim_end_matches(|c: char| c == 'H' || c == 'L' || c == 'D' || c == 'E') } else { &rest_upper };
+        let len_str: &str = if is_string_len { rest_upper.trim_end_matches(['H', 'L', 'D', 'E']) } else { &rest_upper };
         if !is_string_len && rest.len() == 1 {
             if let Ok(b) = rest.parse::<u8>() {
                 if b <= 15 {
@@ -67,7 +67,7 @@ pub fn parse_address_full(addr: &str, start_address: u8) -> Option<ParsedAddress
             parse_address_core(base, start_address)?
         } else if let Ok(len) = len_str.parse::<usize>() {
             let (a, s, _) = parse_address_core(base, start_address)?;
-            let regs = (len + 1) / 2;
+            let regs = len.div_ceil(2);
             return Some(ParsedAddress { area: a, start: s, count: regs as u16, bit_index: None, endian });
         } else {
             parse_address_core(base, start_address)?
@@ -97,13 +97,13 @@ fn parse_address_core(addr: &str, start_address: u8) -> Option<(ModbusArea, u16,
     }
     let _slave: u8 = parts[0].parse().ok().filter(|&s| s <= 247)?;
     let addr_num: u32 = parts.get(1).and_then(|s| s.parse().ok())?;
-    let (area, base) = if addr_num >= 400001 && addr_num <= 465536 {
+    let (area, base) = if (400001..=465536).contains(&addr_num) {
         (ModbusArea::HoldingRegister, 400000u32)
-    } else if addr_num >= 300001 && addr_num <= 365536 {
+    } else if (300001..=365536).contains(&addr_num) {
         (ModbusArea::InputRegister, 300000)
-    } else if addr_num >= 100001 && addr_num <= 165536 {
+    } else if (100001..=165536).contains(&addr_num) {
         (ModbusArea::DiscreteInput, 100000)
-    } else if addr_num >= 1 && addr_num <= 65536 {
+    } else if (1..=65536).contains(&addr_num) {
         (ModbusArea::Coil, 0)
     } else {
         return None;

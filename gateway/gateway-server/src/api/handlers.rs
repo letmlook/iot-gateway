@@ -5,7 +5,7 @@ use axum::extract::{Multipart, Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
-use gateway_sdk::{Group, NodeKind, NodeState, NodeId, PluginConfig, PluginInfo, Tag, GroupSubscription};
+use gateway_sdk::{Group, GroupSubscription, NodeId, NodeKind, NodeState, PluginConfig, Tag};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -124,6 +124,24 @@ pub async fn login(
     }
 }
 
+/// 登出：使当前 Bearer token 立即失效（清空 DB token 并移出内存缓存）
+pub async fn logout(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.to_string());
+    if let Some(t) = token {
+        if !t.is_empty() {
+            let _ = state.user_store.logout(&t).await;
+        }
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 // ---------- Users ----------
 #[derive(serde::Deserialize)]
 pub struct CreateUserRequest {
@@ -148,7 +166,7 @@ fn parse_user_id(s: &str) -> Result<String, ApiError> {
 }
 
 pub async fn list_users(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
-    let list = state.user_store.list().await.map_err(|e| ApiError::internal(e))?;
+    let list = state.user_store.list().await.map_err(ApiError::internal)?;
     let arr: Vec<serde_json::Value> = list
         .into_iter()
         .map(|u| {
@@ -183,7 +201,7 @@ pub async fn create_user(
         .user_store
         .create(username, password, role_enum)
         .await
-        .map_err(|e| ApiError::bad_request(e))?;
+        .map_err(ApiError::bad_request)?;
     Ok(Json(serde_json::json!({
         "id": user.id,
         "username": user.username,
@@ -202,7 +220,7 @@ pub async fn get_user(
         .user_store
         .get(&id)
         .await
-        .map_err(|e| ApiError::internal(e))?
+        .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("user not found"))?;
     Ok(Json(serde_json::json!({
         "id": user.id,
@@ -229,7 +247,7 @@ pub async fn update_user(
         .user_store
         .update_simple(&id, username, role)
         .await
-        .map_err(|e| ApiError::bad_request(e))?;
+        .map_err(ApiError::bad_request)?;
     Ok(Json(serde_json::json!({
         "id": user.id,
         "username": user.username,
@@ -248,7 +266,7 @@ pub async fn delete_user(
         .user_store
         .delete(&id)
         .await
-        .map_err(|e| ApiError::internal(e))?;
+        .map_err(ApiError::internal)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -263,7 +281,7 @@ pub async fn change_password(
         .user_store
         .set_password(&id, password)
         .await
-        .map_err(|e| ApiError::bad_request(e))?;
+        .map_err(ApiError::bad_request)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -280,7 +298,7 @@ pub async fn version() -> Json<serde_json::Value> {
 // ---------- License（完全离线，无网络请求）----------
 /// 返回当前设备机器码，供客户发送给管理员生成授权文件。
 pub async fn license_machine_id() -> Result<Json<serde_json::Value>, ApiError> {
-    let mid = crate::license::machine_id().map_err(|e| ApiError::internal(e))?;
+    let mid = crate::license::machine_id().map_err(ApiError::internal)?;
     Ok(Json(serde_json::json!({ "machineId": mid })))
 }
 
@@ -474,8 +492,11 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     }))
 }
 
-/// 默认备份/恢复密码（未填写时使用，保证文件仍为加密不可直接查看）
-const DEFAULT_BACKUP_SECRET: &str = "gateway-backup";
+/// 备份/恢复的默认密钥来源：优先使用服务配置（GATEWAY_BACKUP_SECRET / 随机生成），
+/// 不再使用写死在代码中的固定口令。
+fn backup_secret_of(state: &AppState) -> String {
+    state.config.backup_secret.clone()
+}
 
 #[derive(Deserialize, Default)]
 pub struct BackupReq {
@@ -490,7 +511,7 @@ pub async fn backup(
     let secret = body
         .password
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_BACKUP_SECRET.to_string());
+        .unwrap_or_else(|| backup_secret_of(&state));
     let snap = state.manager.build_snapshot().await;
     let data = backup::encrypt_backup(&snap, &secret).map_err(ApiError::internal)?;
     let filename = format!(
@@ -535,13 +556,36 @@ pub async fn restore(
     let data = file_data.ok_or_else(|| ApiError::bad_request("missing backup file"))?;
     let secret = password
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_BACKUP_SECRET.to_string());
+        .unwrap_or_else(|| backup_secret_of(&state));
     let snap = backup::decrypt_backup(&data, &secret).map_err(ApiError::bad_request)?;
     if snap.version != gateway_core::SNAPSHOT_VERSION {
         return Err(ApiError::bad_request(format!(
             "unsupported snapshot version: {}, expected {}",
             snap.version,
             gateway_core::SNAPSHOT_VERSION
+        )));
+    }
+    // License 门禁前移到「最终状态」校验：恢复前先整体检查插件授权与点位上限，
+    // 避免通过备份绕过 create_node / add_tag 的增量校验。
+    let mut violations: Vec<String> = Vec::new();
+    for n in &snap.nodes {
+        if !state.feature_manager.can_use_plugin(&n.config.plugin_name) {
+            violations.push(format!(
+                "plugin '{}' is not licensed (node '{}')",
+                n.config.plugin_name, n.config.name
+            ));
+        }
+    }
+    if let Err(e) = state
+        .feature_manager
+        .check_tag_limit(0, snap.tags.len() as u64)
+    {
+        violations.push(e);
+    }
+    if !violations.is_empty() {
+        return Err(ApiError::forbidden(format!(
+            "restore rejected by license policy: {}",
+            violations.join("; ")
         )));
     }
     state.manager.apply_snapshot(&snap).await;
@@ -761,6 +805,43 @@ pub struct CreateNodeReq {
     pub config: PluginConfig,
 }
 
+/// 按插件 Schema 脱敏节点配置：敏感字段（口令、私钥、Token 等）统一返回 `"***"`
+fn mask_plugin_config(
+    state: &AppState,
+    plugin_name: &str,
+    north: bool,
+    cfg: &serde_json::Value,
+) -> serde_json::Value {
+    let map: gateway_sdk::PluginConfig =
+        serde_json::from_value(cfg.clone()).unwrap_or_default();
+    let schema = if north {
+        state
+            .manager
+            .north_plugin(plugin_name)
+            .and_then(|p| p.config_schema())
+    } else {
+        state
+            .manager
+            .south_plugin(plugin_name)
+            .and_then(|p| p.config_schema())
+    };
+    let masked = match schema {
+        Some(s) => s.mask_config(&map),
+        None => map
+            .into_iter()
+            .map(|(k, v)| {
+                let v = if gateway_sdk::schema::is_sensitive_key(&k) {
+                    serde_json::Value::String(gateway_sdk::schema::MASKED.to_string())
+                } else {
+                    v
+                };
+                (k, v)
+            })
+            .collect(),
+    };
+    serde_json::to_value(masked).unwrap_or_else(|_| serde_json::json!({}))
+}
+
 pub async fn list_nodes(State(state): State<AppState>) -> Json<Vec<serde_json::Value>> {
     let nodes = state.manager.nodes_list();
     let mut result = Vec::with_capacity(nodes.len());
@@ -780,6 +861,16 @@ pub async fn list_nodes(State(state): State<AppState>) -> Json<Vec<serde_json::V
                         serde_json::to_value(&conn).unwrap_or(serde_json::json!({ "connected": conn.connected, "last_error": conn.last_error })),
                     );
                 }
+            }
+            // 脱敏：口令 / 私钥 / Token 等敏感配置不以明文返回
+            if let Some(cfg) = obj.get_mut("config") {
+                let masked = mask_plugin_config(
+                    &state,
+                    &node.config.plugin_name,
+                    node.kind() == NodeKind::North,
+                    cfg,
+                );
+                *cfg = masked;
             }
         }
         result.push(j);
@@ -830,6 +921,15 @@ pub async fn get_node(
                 );
             }
         }
+        if let Some(cfg) = obj.get_mut("config") {
+            let masked = mask_plugin_config(
+                &state,
+                &node.config.plugin_name,
+                node.kind() == NodeKind::North,
+                cfg,
+            );
+            *cfg = masked;
+        }
     }
     Ok(Json(j))
 }
@@ -858,7 +958,14 @@ pub async fn get_node_setting(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let nid = parse_node_id(&id)?;
     let node = state.manager.node_get(nid).ok_or_else(|| ApiError::not_found("node not found"))?;
-    Ok(Json(serde_json::json!({ "config": node.config.config })))
+    // 脱敏后返回：前端表单仍可展示 "***"，未修改不会覆盖真实值
+    let masked = mask_plugin_config(
+        &state,
+        &node.config.plugin_name,
+        node.kind() == NodeKind::North,
+        &serde_json::to_value(&node.config.config).unwrap_or_else(|_| serde_json::json!({})),
+    );
+    Ok(Json(serde_json::json!({ "config": masked })))
 }
 
 pub async fn delete_node(
@@ -1180,9 +1287,22 @@ pub async fn node_setting(
     Json(req): Json<NodeSettingReq>,
 ) -> Result<StatusCode, ApiError> {
     let nid = parse_node_id(&id)?;
+    // 前端表单对敏感字段只回显 "***"：若提交值仍为该占位符，则保留原有真实值，避免被覆盖
+    let mut config = req.config;
+    if let Some(node) = state.manager.node_get(nid) {
+        for (k, v) in config.iter_mut() {
+            if gateway_sdk::schema::is_sensitive_key(k)
+                && v.as_str() == Some(gateway_sdk::schema::MASKED)
+            {
+                if let Some(old) = node.config.config.get(k) {
+                    *v = old.clone();
+                }
+            }
+        }
+    }
     state
         .manager
-        .node_setting(nid, req.config)
+        .node_setting(nid, config)
         .await
         .map_err(ApiError::bad_request)?;
     state.persist().await;
@@ -1227,4 +1347,389 @@ pub async fn write_tags(
         .await
         .map_err(ApiError::bad_request)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------- 硬件信息 ----------
+/// 硬件与运行环境信息，供系统信息页展示。
+pub async fn hardware(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let hardware_id = crate::license::machine_id().ok();
+    let info = tokio::task::spawn_blocking(move || {
+        use sysinfo::{CpuExt, DiskExt, SystemExt};
+        let mut sys = sysinfo::System::new_all();
+        // CPU 使用率为两次采样的差值，需短暂间隔后再采样
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        sys.refresh_cpu();
+        let cpu_usage = sys.global_cpu_info().cpu_usage() as f64 / 100.0;
+        let memory_total = sys.total_memory().saturating_mul(1024); // sysinfo 以 KB 为单位
+        let memory_used = sys.used_memory().saturating_mul(1024);
+        let (disk_total, disk_available) = {
+            let mut total = 0u64;
+            let mut avail = 0u64;
+            for d in sys.disks() {
+                total += d.total_space();
+                avail += d.available_space();
+            }
+            (total, avail)
+        };
+        serde_json::json!({
+            "cpu_count": sys.cpus().len(),
+            "cpu_usage": cpu_usage,
+            "memory_total": memory_total,
+            "memory_used": memory_used,
+            "memory_available": sys.available_memory().saturating_mul(1024),
+            "disk_total": disk_total,
+            "disk_available": disk_available,
+            "hostname": sys.host_name(),
+            "os_version": sys.long_os_version().unwrap_or_else(|| sys.os_version().unwrap_or_default()),
+            "kernel_version": sys.kernel_version().unwrap_or_default(),
+        })
+    })
+    .await
+    .unwrap_or_else(|_| serde_json::json!({}));
+
+    let mut out = info;
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("hardware_id".into(), serde_json::json!(hardware_id));
+        obj.insert("arch".into(), serde_json::json!(std::env::consts::ARCH));
+        obj.insert("os".into(), serde_json::json!(std::env::consts::OS));
+        obj.insert(
+            "data_dir".into(),
+            serde_json::json!(state.config.data_dir.display().to_string()),
+        );
+    }
+    Json(out)
+}
+
+// ---------- 日志管理 ----------
+#[derive(Deserialize)]
+pub struct LogConfigReq {
+    pub level: Option<String>,
+    pub upload_enabled: Option<bool>,
+}
+
+/// 进程内日志上传开关（功能占位：当前版本不主动上传日志）
+static LOG_UPLOAD_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn valid_log_level(s: &str) -> bool {
+    matches!(s, "trace" | "debug" | "info" | "warn" | "error")
+}
+
+/// 当前生效的配置文件路径（GATEWAY_CONFIG 或 config/gateway.json）
+fn config_file_path() -> std::path::PathBuf {
+    std::env::var("GATEWAY_CONFIG")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("config").join("gateway.json"))
+}
+
+pub async fn get_log_config(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "level": state.config.log_level,
+        "filter": state.config.log_filter,
+        "file": state.config.log_file.as_ref().map(|p| p.display().to_string()),
+        "dir_nodes": state.config.log_dir_nodes.as_ref().map(|p| p.display().to_string()),
+        "upload_enabled": LOG_UPLOAD_ENABLED.load(std::sync::atomic::Ordering::Relaxed),
+        "upload_supported": false,
+    }))
+}
+
+/// 修改日志级别；写入配置文件以便重启后继续生效（下次启动生效）。
+pub async fn put_log_config(
+    State(state): State<AppState>,
+    Json(req): Json<LogConfigReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut level = state.config.log_level.clone();
+    let mut persisted = false;
+    if let Some(l) = req.level.as_deref() {
+        let l = l.trim().to_lowercase();
+        if !valid_log_level(&l) {
+            return Err(ApiError::bad_request(
+                "invalid log level, expect one of trace|debug|info|warn|error",
+            ));
+        }
+        level = l;
+        let path = config_file_path();
+        match tokio::fs::read_to_string(&path).await {
+            Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(mut v) => {
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("log_level".into(), serde_json::json!(level));
+                    }
+                    if let Ok(s) = serde_json::to_string_pretty(&v) {
+                        persisted = tokio::fs::write(&path, s).await.is_ok();
+                    }
+                }
+                Err(e) => tracing::warn!("parse {} failed: {}", path.display(), e),
+            },
+            Err(e) => tracing::warn!("read {} failed: {}", path.display(), e),
+        }
+    }
+    if let Some(v) = req.upload_enabled {
+        LOG_UPLOAD_ENABLED.store(v, std::sync::atomic::Ordering::Relaxed);
+    }
+    Ok(Json(serde_json::json!({
+        "level": level,
+        "upload_enabled": LOG_UPLOAD_ENABLED.load(std::sync::atomic::Ordering::Relaxed),
+        "persisted": persisted,
+        "restart_required": true,
+    })))
+}
+
+/// 单个日志文件最大返回字节（超出取尾部）
+const MAX_LOG_BYTES: u64 = 20 * 1024 * 1024;
+
+async fn read_log_tail(path: &std::path::Path) -> Option<String> {
+    let meta = tokio::fs::metadata(path).await.ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let bytes = if meta.len() > MAX_LOG_BYTES {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = std::fs::File::open(path).ok()?;
+        f.seek(SeekFrom::End(-(MAX_LOG_BYTES as i64))).ok()?;
+        let mut buf = Vec::with_capacity(MAX_LOG_BYTES as usize);
+        f.read_to_end(&mut buf).ok()?;
+        String::from_utf8_lossy(&buf).to_string()
+    } else {
+        tokio::fs::read_to_string(path).await.ok()?
+    };
+    Some(bytes)
+}
+
+/// 主日志文件基础名（tracing_appender 按日滚动，实际文件名形如 gateway.log.2026-09-26）
+const GATEWAY_LOG_STEM: &str = "gateway.log";
+
+/// 主日志文件列表（含按日滚动产生的历史文件，按名称排序）
+fn gateway_log_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut list = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return list;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name.starts_with(GATEWAY_LOG_STEM) && p.is_file() {
+            list.push(p);
+        }
+    }
+    list.sort();
+    list
+}
+
+fn node_log_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut list = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return list;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        let Some(ext) = p.extension().and_then(|x| x.to_str()) else {
+            continue;
+        };
+        if ext == "log" && p.is_file() {
+            list.push(p);
+        }
+    }
+    list.sort();
+    list
+}
+
+/// 日志下载：type=system|driver|node|all（node 需配合 node_id）
+pub async fn download_log(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<axum::response::Response, ApiError> {
+    use axum::http::{header, Response, StatusCode};
+
+    let kind = q.get("type").map(|s| s.as_str()).unwrap_or("all");
+    let mut buf = String::new();
+    let filename = match kind {
+        "system" | "gateway" => {
+            let dir = state
+                .config
+                .log_file
+                .as_ref()
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from("logs"));
+            let files = gateway_log_files(&dir);
+            if files.is_empty() {
+                return Err(ApiError::not_found("system log file not found"));
+            }
+            for f in files {
+                if let Some(content) = read_log_tail(&f).await {
+                    buf.push_str(&format!(
+                        "\n===== {} =====\n",
+                        f.file_name().and_then(|n| n.to_str()).unwrap_or("gateway.log")
+                    ));
+                    buf.push_str(&content);
+                }
+            }
+            "gateway-system.log".to_string()
+        }
+        "driver" | "node" => {
+            let dir = state
+                .config
+                .log_dir_nodes
+                .clone()
+                .unwrap_or_else(|| std::path::PathBuf::from("logs/nodes"));
+            let files: Vec<std::path::PathBuf> = match (kind, q.get("node_id")) {
+                ("node", Some(nid)) => {
+                    let p = crate::logging::node_log_file_path(&dir, nid, state.node_log_names.as_ref());
+                    if !p.exists() {
+                        return Err(ApiError::not_found("node log file not found"));
+                    }
+                    vec![p]
+                }
+                _ => node_log_files(&dir),
+            };
+            if files.is_empty() {
+                return Err(ApiError::not_found("node log files not found"));
+            }
+            for f in files {
+                if let Some(content) = read_log_tail(&f).await {
+                    buf.push_str(&format!(
+                        "\n===== {} =====\n",
+                        f.file_name().and_then(|n| n.to_str()).unwrap_or("node.log")
+                    ));
+                    buf.push_str(&content);
+                }
+            }
+            format!("gateway-{}.log", kind)
+        }
+        "all" => {
+            let gdir = state
+                .config
+                .log_file
+                .as_ref()
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from("logs"));
+            for f in gateway_log_files(&gdir) {
+                if let Some(content) = read_log_tail(&f).await {
+                    buf.push_str(&format!(
+                        "\n===== system/{} =====\n",
+                        f.file_name().and_then(|n| n.to_str()).unwrap_or("gateway.log")
+                    ));
+                    buf.push_str(&content);
+                }
+            }
+            let ndir = state
+                .config
+                .log_dir_nodes
+                .clone()
+                .unwrap_or_else(|| std::path::PathBuf::from("logs/nodes"));
+            for f in node_log_files(&ndir) {
+                if let Some(content) = read_log_tail(&f).await {
+                    buf.push_str(&format!(
+                        "\n===== nodes/{} =====\n",
+                        f.file_name().and_then(|n| n.to_str()).unwrap_or("node.log")
+                    ));
+                    buf.push_str(&content);
+                }
+            }
+            if buf.is_empty() {
+                return Err(ApiError::not_found("no log files found"));
+            }
+            "gateway-all.log".to_string()
+        }
+        other => {
+            return Err(ApiError::bad_request(format!(
+                "invalid type '{}', expect one of system|driver|node|all",
+                other
+            )))
+        }
+    };
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", filename),
+        )
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(axum::body::Body::from(buf))
+        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "build response failed").into_response())
+        .into_response())
+}
+
+// ---------- 系统配置 ----------
+/// 返回当前生效的系统配置（**脱敏**：token、备份密钥等敏感项不返回明文）
+pub async fn get_system_config(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let c = &state.config;
+    Json(serde_json::json!({
+        "port": c.port,
+        "bind": c.bind,
+        "data_dir": c.data_dir.display().to_string(),
+        "static_dir": c.static_dir.display().to_string(),
+        "plugins_dir": c.plugins_dir.display().to_string(),
+        "log_level": c.log_level,
+        "log_filter": c.log_filter,
+        "log_file": c.log_file.as_ref().map(|p| p.display().to_string()),
+        "log_dir_nodes": c.log_dir_nodes.as_ref().map(|p| p.display().to_string()),
+        "auth_enabled": !c.disable_auth,
+        "token_configured": c.token.is_some(),
+        "allowed_origins": c.allowed_origins,
+        "backup_secret_configured": !c.backup_secret_ephemeral,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct SystemConfigReq {
+    pub log_level: Option<String>,
+    pub log_filter: Option<String>,
+}
+
+/// 热改安全子集（日志级别/filter）；其余配置需通过配置文件或环境变量修改后重启。
+pub async fn put_system_config(
+    State(state): State<AppState>,
+    Json(req): Json<SystemConfigReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut v: serde_json::Value = serde_json::to_value(get_system_config(State(state.clone())).await.0)
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let path = config_file_path();
+    let mut persisted = false;
+    if tokio::fs::metadata(&path).await.is_ok() {
+        if let Ok(text) = tokio::fs::read_to_string(&path).await {
+            if let Ok(mut cfg) = serde_json::from_str::<serde_json::Value>(&text) {
+                let mut changed = false;
+                if let Some(l) = req.log_level.as_deref() {
+                    let l = l.trim().to_lowercase();
+                    if !valid_log_level(&l) {
+                        return Err(ApiError::bad_request(
+                            "invalid log_level, expect one of trace|debug|info|warn|error",
+                        ));
+                    }
+                    if let Some(obj) = cfg.as_object_mut() {
+                        obj.insert("log_level".into(), serde_json::json!(l));
+                        changed = true;
+                    }
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("log_level".into(), serde_json::json!(l));
+                    }
+                }
+                if let Some(f) = req.log_filter.as_deref() {
+                    if let Some(obj) = cfg.as_object_mut() {
+                        obj.insert("log_filter".into(), serde_json::json!(f));
+                        changed = true;
+                    }
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("log_filter".into(), serde_json::json!(f));
+                    }
+                }
+                if changed {
+                    if let Ok(s) = serde_json::to_string_pretty(&cfg) {
+                        persisted = tokio::fs::write(&path, s).await.is_ok();
+                    }
+                }
+            }
+        }
+    }
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("persisted".into(), serde_json::json!(persisted));
+        obj.insert("restart_required".into(), serde_json::json!(true));
+    }
+    Ok(Json(v))
 }

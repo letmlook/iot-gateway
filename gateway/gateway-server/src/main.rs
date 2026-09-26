@@ -9,7 +9,9 @@ mod state;
 mod users;
 
 use axum::Router;
-use gateway_core::{persist_load, persist_load_json, persist_save, PluginLoader, Manager};
+use gateway_core::{
+    persist_load_json, persist_load_secret, persist_save_secret, Manager, PluginLoader,
+};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -66,15 +68,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     let db_path = config.data_db();
     let json_path = config.data_file();
+    let secret = config.master_secret.as_deref();
+    if secret.is_none() {
+        tracing::warn!(
+            "SECURITY: GATEWAY_SECRET_KEY (or a fixed GATEWAY_BACKUP_SECRET) is not set; \
+node credentials such as MQTT passwords will be stored in PLAINTEXT in data.db. Set GATEWAY_SECRET_KEY to enable encryption at rest."
+        );
+    }
     if !db_path.exists() && json_path.exists() {
         if let Ok(Some(snap)) = persist_load_json(&json_path).await {
-            if persist_save(&db_path, &snap).await.is_ok() {
+            if persist_save_secret(&db_path, &snap, secret).await.is_ok() {
                 tracing::info!("migrated {} -> {}", json_path.display(), db_path.display());
             }
         }
     }
-    match persist_load(&db_path).await {
+    match persist_load_secret(&db_path, secret).await {
         Ok(Some(snap)) => {
+            // 历史数据可能仍是明文口令：启用密钥后首次启动把它们加密回写
+            if secret.is_some() && gateway_core::persist_has_plaintext_secrets(&snap) {
+                let _ = persist_save_secret(&db_path, &snap, secret).await;
+                tracing::info!("encrypted existing plaintext credentials in {}", db_path.display());
+            }
             // 在 apply_snapshot 前填充 node_log_names，确保节点启动后首次写日志即用节点名称
             if let Some(ref map) = node_log_names {
                 if let Ok(mut m) = map.write() {
@@ -117,22 +131,128 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     };
 
+    // 首次初始化生成的随机管理员口令：只在本次生成时输出一次，登录后应删除 .admin_initial_password 并改密
+    if let Some(pwd) = user_store.take_initial_password() {
+        tracing::warn!(
+            "SECURITY: 已为初始管理员 admin 生成随机口令（同时写入数据目录 .admin_initial_password，权限 0600）。请首次登录后立即修改口令并删除该文件。"
+        );
+        tracing::warn!("SECURITY: initial admin password = {}", pwd);
+    }
+
+    // 安全基线：生产环境不允许关闭认证；确需关闭时必须显式设置环境变量并接受告警
+    if config.disable_auth {
+        tracing::warn!(
+            "SECURITY WARNING: API authentication is DISABLED (disable_auth=true). \
+All /api endpoints are accessible without credentials, including write_tags (PLC write), restore and user management. \
+Set disable_auth=false or unset GATEWAY_DISABLE_AUTH for any non-local deployment."
+        );
+    }
+    if config.backup_secret_ephemeral {
+        tracing::warn!(
+            "SECURITY: GATEWAY_BACKUP_SECRET is not set; a random key was generated for this process. \
+Backups created now can only be restored by this running instance. Set a fixed strong secret to restore elsewhere."
+        );
+    }
+
     let state = AppState::new(mgr, config.clone(), loader_opt, feature_manager, user_store, node_log_names);
     state.sync_node_log_names();
+    // 优雅退出时需要用到 Manager（state 随后会被 move 进 Router）
+    let shutdown_manager = state.manager.clone();
+
+    // CORS：默认拒绝所有跨域来源（前端由本服务同源提供）；允许的来源需显式配置 GATEWAY_ALLOWED_ORIGINS
+    let cors = if config.allowed_origins.is_empty() {
+        CorsLayer::new()
+    } else {
+        let origins: Vec<axum::http::HeaderValue> = config
+            .allowed_origins
+            .iter()
+            .filter_map(|o| o.parse().ok())
+            .collect();
+        if origins.is_empty() {
+            tracing::warn!("GATEWAY_ALLOWED_ORIGINS contains no valid origin; cross-origin requests stay blocked");
+            CorsLayer::new()
+        } else {
+            tracing::info!("CORS allowed origins: {:?}", config.allowed_origins);
+            CorsLayer::new()
+                .allow_origin(tower_http::cors::AllowOrigin::list(origins))
+                .allow_methods([
+                    axum::http::Method::GET,
+                    axum::http::Method::POST,
+                    axum::http::Method::PUT,
+                    axum::http::Method::DELETE,
+                    axum::http::Method::OPTIONS,
+                ])
+                .allow_headers([
+                    axum::http::header::AUTHORIZATION,
+                    axum::http::header::CONTENT_TYPE,
+                ])
+        }
+    };
 
     let app = Router::new()
         .nest("/api", api::router(state.clone()))
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .with_state(state);
 
     let serve = Router::new()
         .merge(app)
         .fallback(api::serve_static_or_index);
 
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.port));
+    let addr: std::net::SocketAddr = match config.bind.parse::<std::net::IpAddr>() {
+        Ok(ip) => std::net::SocketAddr::from((ip, config.port)),
+        Err(_) => {
+            tracing::warn!("invalid bind address '{}', falling back to 0.0.0.0", config.bind);
+            std::net::SocketAddr::from(([0, 0, 0, 0], config.port))
+        }
+    };
     tracing::info!("gateway listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, serve).await?;
+    axum::serve(listener, serve)
+        .with_graceful_shutdown(shutdown_signal(shutdown_manager))
+        .await?;
     Ok(())
+}
+
+/// 优雅退出：收到 SIGINT/SIGTERM 后停止接收新请求，顺序停止所有运行中的节点，
+/// 等待采集任务收敛并落盘，避免停机时丢数据或留下孤儿任务。
+async fn shutdown_signal(manager: Arc<Manager>) {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(e) => {
+                tracing::warn!("install SIGTERM handler failed: {}", e);
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("SIGINT received, shutting down gracefully"),
+        _ = terminate => tracing::info!("SIGTERM received, shutting down gracefully"),
+    }
+
+    let running: Vec<_> = manager
+        .nodes_list()
+        .into_iter()
+        .filter(|n| n.state == gateway_sdk::NodeState::Running)
+        .map(|n| n.id())
+        .collect();
+    if !running.is_empty() {
+        tracing::info!("stopping {} running node(s) before exit", running.len());
+        for id in running {
+            if let Err(e) = manager.node_stop(id).await {
+                tracing::warn!(node = %id.0, "stop node during shutdown failed: {}", e);
+            }
+        }
+    }
+    tracing::info!("gateway stopped");
 }
