@@ -1,0 +1,48 @@
+name: Release
+
+# 打 tag（v*）时构建发布产物并创建 GitHub Release。
+# 产物：gateway / gateway-plugin-host / 插件 .so / 前端静态资源 / config / deploy，
+# 附带 SHA256SUMS。Windows 与多平台矩阵待定（见 docs/多租户决策方案.md 同级的未决问题）。
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Package release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # git describe 需要完整历史才能给出正确的版本号
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Package
+        run: ./scripts/package-release.sh
+
+      - name: Show artefacts
+        run: ls -la dist/
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/*.tar.gz dist/SHA256SUMS \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes
