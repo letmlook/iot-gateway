@@ -5,8 +5,21 @@
 use std::ffi::CStr;
 use std::os::raw::c_char;
 
+/// 当前 FFI ABI 版本。
+///
+/// 宿主加载 .so 时会校验插件导出的 `gateway_plugin_abi_version()`：
+/// 版本不一致说明插件与宿主的数据结构约定已经不同，直接拒绝加载比运行期崩溃更安全。
+/// 该符号由本 SDK 统一导出，因此所有使用本 SDK 构建的插件都会自带。
+pub const FFI_ABI_VERSION: u32 = 1;
+
+/// 插件 ABI 版本（由 SDK 导出，宿主通过 libloading 读取）
+#[no_mangle]
+pub extern "C-unwind" fn gateway_plugin_abi_version() -> u32 {
+    FFI_ABI_VERSION
+}
+
 /// 宿主提供给 .so 插件的节点日志回调：level (0=Error,1=Warn,2=Info,3=Debug,4=Trace)，node_id 与 message 均为 UTF-8 C 字符串。
-pub type PluginLogCallback = unsafe extern "C" fn(level: u8, node_id: *const c_char, message: *const c_char);
+pub type PluginLogCallback = unsafe extern "C-unwind" fn(level: u8, node_id: *const c_char, message: *const c_char);
 
 /// 结果 JSON：`{"ok":true}` 或 `{"ok":false,"err":"..."}`。插件分配，宿主复制后调用 `gateway_plugin_free_string` 释放。
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -48,6 +61,9 @@ pub struct FfiPluginMeta {
     /// 英文描述
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description_en: Option<String>,
+    /// 插件编译时使用的 FFI ABI 版本（0 表示旧插件未声明）
+    #[serde(default)]
+    pub abi_version: u32,
 }
 
 impl Default for FfiPluginMeta {
@@ -61,6 +77,7 @@ impl Default for FfiPluginMeta {
             name_en: None,
             description_zh: None,
             description_en: None,
+            abi_version: 0,
         }
     }
 }
@@ -123,6 +140,7 @@ pub fn meta_to_ffi(m: &crate::plugin::PluginMeta) -> FfiPluginMeta {
         name_en: m.name_en.map(|s| s.to_string()),
         description_zh: m.description_zh.map(|s| s.to_string()),
         description_en: m.description_en.map(|s| s.to_string()),
+        abi_version: FFI_ABI_VERSION,
     }
 }
 
@@ -137,7 +155,7 @@ pub fn alloc_c_string(s: &str) -> *mut c_char {
 
 /// 释放 `alloc_c_string` 分配的指针；.so 插件须重新导出此符号供宿主调用。
 #[no_mangle]
-pub unsafe extern "C" fn gateway_plugin_free_string(ptr: *mut c_char) {
+pub unsafe extern "C-unwind" fn gateway_plugin_free_string(ptr: *mut c_char) {
     if ptr.is_null() {
         return;
     }

@@ -29,12 +29,12 @@ fn ptr_from_cstr(ptr: *const c_char) -> Option<String> {
 }
 
 #[no_mangle]
-pub extern "C" fn gateway_north_plugin_create() -> *mut c_void {
+pub extern "C-unwind" fn gateway_north_plugin_create() -> *mut c_void {
     Box::into_raw(Box::new(super::MqttPlugin::new())) as *mut c_void
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn gateway_north_plugin_destroy(handle: *mut c_void) {
+pub unsafe extern "C-unwind" fn gateway_north_plugin_destroy(handle: *mut c_void) {
     if handle.is_null() {
         return;
     }
@@ -42,7 +42,7 @@ pub unsafe extern "C" fn gateway_north_plugin_destroy(handle: *mut c_void) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn gateway_north_plugin_meta(handle: *mut c_void) -> *mut c_char {
+pub unsafe extern "C-unwind" fn gateway_north_plugin_meta(handle: *mut c_void) -> *mut c_char {
     if handle.is_null() {
         return std::ptr::null_mut();
     }
@@ -56,7 +56,7 @@ unsafe fn north(handle: *mut c_void) -> &'static mut super::MqttPlugin {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn gateway_north_plugin_open(
+pub unsafe extern "C-unwind" fn gateway_north_plugin_open(
     handle: *mut c_void,
     node_id_json: *const c_char,
     config_json: *const c_char,
@@ -70,7 +70,7 @@ pub unsafe extern "C" fn gateway_north_plugin_open(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn gateway_north_plugin_close(
+pub unsafe extern "C-unwind" fn gateway_north_plugin_close(
     handle: *mut c_void,
     node_id_json: *const c_char,
 ) -> *mut c_char {
@@ -81,7 +81,7 @@ pub unsafe extern "C" fn gateway_north_plugin_close(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn gateway_north_plugin_init(
+pub unsafe extern "C-unwind" fn gateway_north_plugin_init(
     handle: *mut c_void,
     node_id_json: *const c_char,
 ) -> *mut c_char {
@@ -92,7 +92,7 @@ pub unsafe extern "C" fn gateway_north_plugin_init(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn gateway_north_plugin_uninit(
+pub unsafe extern "C-unwind" fn gateway_north_plugin_uninit(
     handle: *mut c_void,
     node_id_json: *const c_char,
 ) -> *mut c_char {
@@ -103,7 +103,7 @@ pub unsafe extern "C" fn gateway_north_plugin_uninit(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn gateway_north_plugin_start(
+pub unsafe extern "C-unwind" fn gateway_north_plugin_start(
     handle: *mut c_void,
     node_id_json: *const c_char,
 ) -> *mut c_char {
@@ -114,7 +114,7 @@ pub unsafe extern "C" fn gateway_north_plugin_start(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn gateway_north_plugin_stop(
+pub unsafe extern "C-unwind" fn gateway_north_plugin_stop(
     handle: *mut c_void,
     node_id_json: *const c_char,
 ) -> *mut c_char {
@@ -125,7 +125,7 @@ pub unsafe extern "C" fn gateway_north_plugin_stop(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn gateway_north_plugin_setting(
+pub unsafe extern "C-unwind" fn gateway_north_plugin_setting(
     handle: *mut c_void,
     node_id_json: *const c_char,
     config_json: *const c_char,
@@ -139,7 +139,7 @@ pub unsafe extern "C" fn gateway_north_plugin_setting(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn gateway_north_plugin_set_subscriptions(
+pub unsafe extern "C-unwind" fn gateway_north_plugin_set_subscriptions(
     handle: *mut c_void,
     node_id_json: *const c_char,
     subscriptions_json: *const c_char,
@@ -153,7 +153,7 @@ pub unsafe extern "C" fn gateway_north_plugin_set_subscriptions(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn gateway_north_plugin_on_group_data(
+pub unsafe extern "C-unwind" fn gateway_north_plugin_on_group_data(
     handle: *mut c_void,
     node_id_json: *const c_char,
     group_data_json: *const c_char,
@@ -170,7 +170,7 @@ pub unsafe extern "C" fn gateway_north_plugin_on_group_data(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn gateway_north_plugin_connection_status(
+pub unsafe extern "C-unwind" fn gateway_north_plugin_connection_status(
     handle: *mut c_void,
     node_id_json: *const c_char,
 ) -> *mut c_char {
@@ -187,7 +187,7 @@ pub unsafe extern "C" fn gateway_north_plugin_connection_status(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn gateway_north_plugin_config_schema(handle: *mut c_void) -> *mut c_char {
+pub unsafe extern "C-unwind" fn gateway_north_plugin_config_schema(handle: *mut c_void) -> *mut c_char {
     if handle.is_null() {
         return std::ptr::null_mut();
     }

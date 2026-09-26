@@ -14,17 +14,17 @@ use std::path::Path;
 use std::sync::Arc;
 use tracing::{info, warn};
 
-type CreateFn = unsafe extern "C" fn() -> *mut c_void;
-type DestroyFn = unsafe extern "C" fn(*mut c_void);
-type MetaFn = unsafe extern "C" fn(*mut c_void) -> *mut c_char;
-type FreeStringFn = unsafe extern "C" fn(*mut c_char);
-type StrStrFn = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> *mut c_char;
-type StrFn = unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char;
+type CreateFn = unsafe extern "C-unwind" fn() -> *mut c_void;
+type DestroyFn = unsafe extern "C-unwind" fn(*mut c_void);
+type MetaFn = unsafe extern "C-unwind" fn(*mut c_void) -> *mut c_char;
+type FreeStringFn = unsafe extern "C-unwind" fn(*mut c_char);
+type StrStrFn = unsafe extern "C-unwind" fn(*mut c_void, *const c_char, *const c_char) -> *mut c_char;
+type StrFn = unsafe extern "C-unwind" fn(*mut c_void, *const c_char) -> *mut c_char;
 type StrStrStrFn =
-    unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, *const c_char) -> *mut c_char;
-type VoidFn = unsafe extern "C" fn(*mut c_void) -> *mut c_char;
+    unsafe extern "C-unwind" fn(*mut c_void, *const c_char, *const c_char, *const c_char) -> *mut c_char;
+type VoidFn = unsafe extern "C-unwind" fn(*mut c_void) -> *mut c_char;
 /// set_log(handle, node_id_cstr, log_callback)
-type SetLogFn = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_void);
+type SetLogFn = unsafe extern "C-unwind" fn(*mut c_void, *const c_char, *const c_void);
 
 /// 持有已加载的 .so，保证符号在插件生命周期内有效。
 pub struct PluginLoader {
@@ -45,7 +45,7 @@ fn cstr(s: &str) -> CString {
 
 /// 宿主提供给 .so 插件的节点日志回调：将插件发来的 level/node_id/message 转为 tracing 事件，由 NodeFileLayer 按节点写文件。
 #[allow(dead_code)]
-pub unsafe extern "C" fn gateway_host_log(level: u8, node_id: *const c_char, message: *const c_char) {
+pub unsafe extern "C-unwind" fn gateway_host_log(level: u8, node_id: *const c_char, message: *const c_char) {
     let node_id_str = match gateway_sdk::ptr_to_string(node_id) {
         Some(s) => s,
         None => return,
@@ -671,6 +671,27 @@ impl PluginLoader {
         libraries: &mut Vec<Library>,
     ) -> Result<(), String> {
         let lib = unsafe { Library::new(path) }.map_err(|e| format!("Library::new: {}", e))?;
+
+        // ABI 版本校验：符号存在且版本不符时拒绝加载。
+        // 版本不一致意味着跨边界的数据结构约定已改变，早失败远好于运行期错乱。
+        if let Ok(f) = unsafe {
+            lib.get::<unsafe extern "C-unwind" fn() -> u32>(b"gateway_plugin_abi_version\0")
+        } {
+            let plugin_abi = unsafe { f() };
+            let host_abi = gateway_sdk::ffi::FFI_ABI_VERSION;
+            if plugin_abi != host_abi {
+                return Err(format!(
+                    "ABI version mismatch: plugin={} host={} (rebuild the plugin against this SDK)",
+                    plugin_abi, host_abi
+                ));
+            }
+        } else {
+            warn!(
+                path = %path.display(),
+                "plugin does not export gateway_plugin_abi_version (built with an older SDK); loading anyway"
+            );
+        }
+
         let free_fn: FreeStringFn = unsafe { *lib.get(SYM_FREE_STRING).map_err(|e| format!("get free_string: {}", e))? };
 
         if let Ok(adapter) = Self::try_south(&lib, free_fn) {
