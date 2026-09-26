@@ -30,6 +30,14 @@ pub struct SouthConnectionState {
     pub last_error: Option<String>,
 }
 
+/// 点位最近一次采集到的值（来自采集链路，不额外访问设备）
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct LastValue {
+    pub value: gateway_sdk::types::DataValue,
+    /// 采集时刻（毫秒时间戳）
+    pub ts_ms: i64,
+}
+
 /// 路由核心
 /// 南向轮询周期下限（毫秒）：低于该值的配置会被钳制，避免忙循环打满 CPU
 pub const MIN_POLL_INTERVAL_MS: u64 = 10;
@@ -59,6 +67,9 @@ pub struct Manager {
     south_connection_status: Arc<RwLock<HashMap<NodeId, SouthConnectionState>>>,
     /// 全局采集并发上限：所有南向组的 poll_group 共用，避免同一时刻同时打向设备
     poll_permits: Arc<tokio::sync::Semaphore>,
+    /// 点位最近值缓存 `(node_id, tag_id) -> 最近一次采集值`。
+    /// 供管理台看实时值：**只读缓存，不触碰设备**（否则监控页刷新会变成对 PLC 的真实轮询）。
+    last_values: Arc<dashmap::DashMap<(NodeId, TagId), LastValue>>,
 }
 
 impl Manager {
@@ -87,6 +98,7 @@ impl Manager {
             data_flow_metrics: Arc::new(DataFlowMetrics::new()),
             south_connection_status: Arc::new(RwLock::new(HashMap::new())),
             poll_permits: Arc::new(tokio::sync::Semaphore::new(max_concurrent_polls.max(1))),
+            last_values: Arc::new(dashmap::DashMap::new()),
         }
     }
 
@@ -146,6 +158,20 @@ impl Manager {
         name: &str,
     ) -> Option<Tag> {
         self.store.tag_get_by_name(node_id, group_id, name)
+    }
+
+    /// 某节点的点位最近值（只读缓存：不发起任何设备访问）
+    pub fn last_values(&self, node_id: NodeId) -> HashMap<TagId, LastValue> {
+        self.last_values
+            .iter()
+            .filter(|e| e.key().0 == node_id)
+            .map(|e| (e.key().1, e.value().clone()))
+            .collect()
+    }
+
+    /// 节点的全部点位（供「实时值」接口按点位顺序输出）
+    pub fn tags_by_node(&self, node_id: NodeId) -> Vec<Tag> {
+        self.store.tags_by_node(node_id)
     }
 
     /// 取总线句柄（旁路订阅用：历史落库、旁路审计等）
@@ -269,6 +295,8 @@ impl Manager {
             self.data_flow_metrics.forget_south_node(id);
             // 分区通道随节点回收，避免通道与订阅者长期驻留
             self.bus.forget_node(id);
+            // 最近值缓存同样按节点回收
+            self.last_values.retain(|k, _| k.0 != id);
         } else {
             self.data_flow_metrics.forget_north_node(id);
         }
@@ -920,9 +948,18 @@ impl Manager {
         let metrics = self.data_flow_metrics.clone();
         let south_conn = self.south_connection_status.clone();
         let permits = self.poll_permits.clone();
+        let last_values = self.last_values.clone();
         tokio::spawn(async move {
             south_scheduler_loop(
-                id, plugin, store, bus, metrics, south_conn, permits, cancel_rx,
+                id,
+                plugin,
+                store,
+                bus,
+                metrics,
+                south_conn,
+                last_values,
+                permits,
+                cancel_rx,
             )
             .await;
         });
@@ -946,6 +983,7 @@ async fn south_scheduler_loop(
     bus: Bus,
     metrics: Arc<DataFlowMetrics>,
     south_conn: Arc<RwLock<HashMap<NodeId, SouthConnectionState>>>,
+    last_values: Arc<dashmap::DashMap<(NodeId, TagId), LastValue>>,
     permits: Arc<tokio::sync::Semaphore>,
     mut cancel_rx: tokio::sync::broadcast::Receiver<()>,
 ) {
@@ -1012,10 +1050,21 @@ async fn south_scheduler_loop(
             let bus = bus.clone();
             let metrics = metrics.clone();
             let south_conn = south_conn.clone();
+            let last_values = last_values.clone();
             let plugin = plugin.clone();
             set.spawn(async move {
                 let _permit = permit; // 持有到本次采集结束
-                poll_group_once(&store, &bus, &metrics, &south_conn, &plugin, id, gid).await;
+                poll_group_once(
+                    &store,
+                    &bus,
+                    &metrics,
+                    &south_conn,
+                    &last_values,
+                    &plugin,
+                    id,
+                    gid,
+                )
+                .await;
             });
         }
 
@@ -1042,11 +1091,13 @@ async fn south_scheduler_loop(
 }
 
 /// 采集一个组并发布到总线（原「每组一个任务」循环体的等价实现）。
+#[allow(clippy::too_many_arguments)]
 async fn poll_group_once(
     store: &Store,
     bus: &Bus,
     metrics: &Arc<DataFlowMetrics>,
     south_conn: &Arc<RwLock<HashMap<NodeId, SouthConnectionState>>>,
+    last_values: &Arc<dashmap::DashMap<(NodeId, TagId), LastValue>>,
     plugin: &Arc<dyn SouthPlugin>,
     id: NodeId,
     gid: gateway_sdk::GroupId,
@@ -1090,6 +1141,18 @@ async fn poll_group_once(
                 metrics
                     .rules_action_err
                     .fetch_add(failed, Ordering::Relaxed);
+            }
+
+            // 记录最近值供管理台展示（只写内存缓存，不产生额外设备访问）
+            let ts_ms = Utc::now().timestamp_millis();
+            for (tid, v) in &values {
+                last_values.insert(
+                    (id, *tid),
+                    LastValue {
+                        value: v.clone(),
+                        ts_ms,
+                    },
+                );
             }
 
             let node_name = store.node_get(id).map(|n| n.config.name);

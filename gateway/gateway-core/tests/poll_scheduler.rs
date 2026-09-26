@@ -283,6 +283,37 @@ async fn concurrency_is_bounded_and_overruns_are_counted() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn last_values_are_cached_for_the_ui() {
+    // 管理台「实时值」读的是这份缓存：必须由采集链路填充，而不是靠额外访问设备
+    let (mgr, plugin, nid) = setup(DEFAULT_MAX_CONCURRENT_POLLS, 0).await;
+    let g = Group::new("g", 30);
+    let gid = g.id;
+    mgr.group_add(nid, g).expect("add group");
+    let tag = gateway_sdk::Tag::new("t1", "dummy", gid);
+    let tid = tag.id;
+    mgr.tag_add(nid, tag);
+
+    assert!(mgr.last_values(nid).is_empty(), "采集开始前不应有缓存值");
+    mgr.node_start(nid).await.expect("start");
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let mut cached = false;
+    while std::time::Instant::now() < deadline {
+        if mgr.last_values(nid).contains_key(&tid) {
+            cached = true;
+            break;
+        }
+        tick(30).await;
+    }
+    mgr.node_stop(nid).await.ok();
+
+    assert!(cached, "采集后应有最近值缓存");
+    let lv = &mgr.last_values(nid)[&tid];
+    assert_eq!(lv.value, gateway_sdk::DataValue::Int32(1));
+    assert!(lv.ts_ms > 0, "应记录采集时刻");
+    assert!(plugin.count(gid).await > 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn node_stop_halts_polling() {
     let (mgr, plugin, nid) = setup(DEFAULT_MAX_CONCURRENT_POLLS, 0).await;
     let g = Group::new("g", 30);

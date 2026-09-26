@@ -309,6 +309,9 @@ pub fn router(state: AppState) -> Router<AppState> {
             get(handlers::get_node_setting).put(handlers::node_setting),
         )
         .route("/nodes/:id/read_tags", post(handlers::read_tags))
+        // 实时值：读采集缓存（不访问设备）。GET → Viewer+；
+        // 强制读设备仍走 POST /nodes/:id/read_tags（Operator+）
+        .route("/nodes/:id/values", get(handlers::node_values))
         .route("/nodes/:id/write_tags", post(handlers::write_tags))
         .route("/upload", post(handlers::upload_config_file))
         .with_state(state.clone())

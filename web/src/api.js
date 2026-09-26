@@ -38,8 +38,38 @@ async function parseErrorResponse(r, text) {
   return new ApiError(code, message, r.status)
 }
 
-async function req(method, path, body) {
+/**
+ * 认证失效时的统一处理：清掉本地凭据并跳登录页。
+ *
+ * 放在请求层而不是各个视图里，是为了避免「有的页面跳登录、有的页面只报错」的不一致。
+ * 用一个进程级标记避免并发请求把跳转叠加多次。
+ */
+let redirecting = false
+function handleUnauthorized() {
+  try {
+    localStorage.removeItem(TOKEN_KEY)
+    localStorage.removeItem('gateway_authenticated')
+    localStorage.removeItem('gateway_user')
+  } catch (_) {}
+  if (redirecting) return
+  redirecting = true
+  // 使用 hash 路由，避免在任意子路径下刷新导致 404
+  if (!window.location.hash.startsWith('#/login')) {
+    window.location.hash = '#/login'
+  }
+  setTimeout(() => { redirecting = false }, 1000)
+}
+
+/**
+ * 统一请求：附带凭据、解析错误体、处理 401/403、支持取消。
+ * @param {string} method
+ * @param {string} path 形如 `/nodes`
+ * @param {object} [body]
+ * @param {{signal?: AbortSignal}} [options]
+ */
+async function req(method, path, body, options = {}) {
   const opts = { method, headers: {} }
+  if (options.signal) opts.signal = options.signal
   const token = getStoredToken()
   if (token) {
     opts.headers['Authorization'] = `Bearer ${token}`
@@ -51,7 +81,15 @@ async function req(method, path, body) {
   const r = await fetch(`${BASE}${path}`, opts)
   if (r.status === 204) return null
   const text = await r.text()
-  if (!r.ok) throw await parseErrorResponse(r, text)
+  if (!r.ok) {
+    const err = await parseErrorResponse(r, text)
+    if (r.status === 401) handleUnauthorized()
+    // 权限不足要给出可理解的原因：后端返回的是「需要什么角色」这类信息
+    if (r.status === 403) {
+      err.code = err.code === 'unknown' ? 'forbidden' : err.code
+    }
+    throw err
+  }
   return text ? JSON.parse(text) : null
 }
 
@@ -158,7 +196,10 @@ export const api = {
   updateTag: (nodeId, tid, body) => req('PUT', `/nodes/${nodeId}/tags/${tid}`, body),
   deleteTag: (nodeId, tid) => req('DELETE', `/nodes/${nodeId}/tags/${tid}`),
 
-  // 读写标签
+  // 实时值：读采集缓存，不访问设备（管理台刷新用这个）
+  nodeValues: (nodeId, options) => req('GET', `/nodes/${nodeId}/values`, undefined, options),
+
+  // 读写标签（read_tags 会真实下发到设备，仅用于「立即读取」这类显式操作）
   readTags: (nodeId, tagIds) => req('POST', `/nodes/${nodeId}/read_tags`, { tag_ids: tagIds }),
   writeTags: (nodeId, values) => req('POST', `/nodes/${nodeId}/write_tags`, { values }),
 

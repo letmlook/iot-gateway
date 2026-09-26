@@ -116,7 +116,26 @@ function isValueError(val) {
 watch([selectedGroup, keywordSearch, onlyShowErrors], () => applyFilters())
 watch(tagValues, () => { if (onlyShowErrors.value) applyFilters() }, { deep: true })
 
+// 定时刷新读的是「采集缓存」（后端由采集链路填充），**不会**因此额外访问 PLC；
+// 需要立刻读一次设备时用 readFromDevice()。
 async function readValues() {
+  if (!selectedNode.value || !tags.value.length) return
+  if (document.hidden) return // 页面不可见时不刷新，避免无意义的请求
+  try {
+    const res = await api.nodeValues(selectedNode.value)
+    const newValues = { ...tagValues.value }
+    ;(res.values || []).forEach(v => {
+      if (v.available) newValues[v.tag_id] = v.value
+    })
+    tagValues.value = newValues
+    lastUpdateTime.value = new Date()
+  } catch (e) {
+    console.error('读取实时值失败', e)
+  }
+}
+
+// 显式「立即读取设备」：会真实下发到设备，只在用户主动点击时使用
+async function readFromDevice() {
   if (!selectedNode.value || !tags.value.length) return
   try {
     const ids = tags.value.map(t => t.id)
@@ -126,7 +145,7 @@ async function readValues() {
     tagValues.value = newValues
     lastUpdateTime.value = new Date()
   } catch (e) {
-    console.error('读取标签失败', e)
+    console.error('读取设备失败', e)
   }
 }
 
@@ -305,6 +324,14 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
           <el-button :icon="Refresh" :disabled="loading || !tags.length" @click="readValues">
             {{ t('monitor.manualRefresh') }}
           </el-button>
+          <el-tooltip :content="t('monitor.readDeviceTip')" placement="top">
+            <el-button
+              :disabled="loading || !tags.length"
+              @click="readFromDevice"
+            >
+              {{ t('monitor.readDevice') }}
+            </el-button>
+          </el-tooltip>
         </div>
       </div>
     </div>

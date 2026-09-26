@@ -2215,3 +2215,39 @@ pub async fn history_stats(State(state): State<AppState>) -> Json<serde_json::Va
     }
     Json(v)
 }
+
+/// 点位实时值：**来自采集缓存，不访问设备**。
+///
+/// 管理台的刷新按钮/定时刷新走这里；需要立即读取设备时用 `/values/read`（会真实下发）。
+pub async fn node_values(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let nid = parse_node_id(&id)?;
+    let node = state
+        .manager
+        .node_get(nid)
+        .ok_or_else(|| ApiError::not_found("node not found"))?;
+    let cached = state.manager.last_values(nid);
+    let tags = state.manager.tags_by_node(nid);
+    let values: Vec<serde_json::Value> = tags
+        .iter()
+        .map(|t| {
+            let lv = cached.get(&t.id);
+            serde_json::json!({
+                "tag_id": t.id,
+                "name": t.name,
+                "group_id": t.group_id,
+                "value": lv.map(|l| &l.value),
+                "ts": lv.map(|l| l.ts_ms),
+                "available": lv.is_some(),
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "node_id": nid,
+        "name": node.config.name,
+        "source": "cache",
+        "values": values,
+    })))
+}
