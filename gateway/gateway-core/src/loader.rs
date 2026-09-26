@@ -64,8 +64,8 @@ pub unsafe extern "C" fn gateway_host_log(level: u8, node_id: *const c_char, mes
     }
 }
 
-/// 南向 .so 适配器：将 FFI 调用转发为 `SouthPlugin`，阻塞调用在 `spawn_blocking` 中执行。
-/// 所有 FFI 调用均在 spawn_blocking 内串行执行，故可将 handle 视为 Send+Sync。
+/// 南向 .so 适配器：将 FFI 调用转发为 `SouthPlugin`。
+/// 每次调用都在独立线程执行（见 `run_sync`），插件内可安全 `block_on`，且 panic 被隔离。
 struct SouthSoAdapter {
     handle: *mut c_void,
     free_string: FreeStringFn,
@@ -91,22 +91,34 @@ struct SouthSoAdapter {
 }
 
 impl SouthSoAdapter {
-    /// 在当前线程执行 FFI；插件内会 block_on，故须在 tokio runtime 内调用（不可 block_in_place）。
+    /// 在**独立线程**上执行 FFI 调用（两个适配器共用同一实现）。
+    ///
+    /// 为什么不能直接在当前线程调用：插件侧为了在同步 C ABI 内驱动 async 逻辑，会在导出
+    /// 函数里新建 runtime 并 `block_on`；若宿主在 tokio worker 线程上直接调用，就会触发
+    /// `Cannot start a runtime from within a runtime` 并 panic。
+    /// 这里用作用域线程执行：该线程不在 runtime 上下文中，插件可安全 `block_on`；
+    /// 同时线程内的 panic 会被 `join()` 捕获并转成错误，不会让网关进程 abort。
     fn run_sync<F, T>(&self, f: F) -> Result<T, String>
     where
-        F: FnOnce(*mut c_void) -> Result<T, String>,
-        T: Send + 'static,
+        F: FnOnce(*mut c_void) -> Result<T, String> + Send,
+        T: Send,
     {
-        f(self.handle)
+        let handle = SendHandle(self.handle);
+        match std::thread::scope(|scope| scope.spawn(move || f(handle.as_ptr())).join()) {
+            Ok(inner) => inner,
+            Err(_) => Err("plugin call panicked".to_string()),
+        }
     }
 
     fn meta_json(&self) -> Result<String, String> {
-        let ptr = unsafe { (self.meta_fn)(self.handle) };
-        let s = unsafe { gateway_sdk::ptr_to_string(ptr) };
-        if !ptr.is_null() {
-            unsafe { (self.free_string)(ptr) };
-        }
-        s.ok_or_else(|| "meta null".to_string())
+        self.run_sync(|handle| {
+            let ptr = unsafe { (self.meta_fn)(handle) };
+            let s = unsafe { gateway_sdk::ptr_to_string(ptr) };
+            if !ptr.is_null() {
+                unsafe { (self.free_string)(ptr) };
+            }
+            s.ok_or_else(|| "meta null".to_string())
+        })
     }
 }
 
@@ -385,22 +397,34 @@ struct NorthSoAdapter {
 }
 
 impl NorthSoAdapter {
-    /// 在当前线程执行 FFI；插件内会 block_on，故须在 tokio runtime 内调用（不可 block_in_place）。
+    /// 在**独立线程**上执行 FFI 调用（两个适配器共用同一实现）。
+    ///
+    /// 为什么不能直接在当前线程调用：插件侧为了在同步 C ABI 内驱动 async 逻辑，会在导出
+    /// 函数里新建 runtime 并 `block_on`；若宿主在 tokio worker 线程上直接调用，就会触发
+    /// `Cannot start a runtime from within a runtime` 并 panic。
+    /// 这里用作用域线程执行：该线程不在 runtime 上下文中，插件可安全 `block_on`；
+    /// 同时线程内的 panic 会被 `join()` 捕获并转成错误，不会让网关进程 abort。
     fn run_sync<F, T>(&self, f: F) -> Result<T, String>
     where
-        F: FnOnce(*mut c_void) -> Result<T, String>,
-        T: Send + 'static,
+        F: FnOnce(*mut c_void) -> Result<T, String> + Send,
+        T: Send,
     {
-        f(self.handle)
+        let handle = SendHandle(self.handle);
+        match std::thread::scope(|scope| scope.spawn(move || f(handle.as_ptr())).join()) {
+            Ok(inner) => inner,
+            Err(_) => Err("plugin call panicked".to_string()),
+        }
     }
 
     fn meta_json(&self) -> Result<String, String> {
-        let ptr = unsafe { (self.meta_fn)(self.handle) };
-        let s = unsafe { gateway_sdk::ptr_to_string(ptr) };
-        if !ptr.is_null() {
-            unsafe { (self.free_string)(ptr) };
-        }
-        s.ok_or_else(|| "meta null".to_string())
+        self.run_sync(|handle| {
+            let ptr = unsafe { (self.meta_fn)(handle) };
+            let s = unsafe { gateway_sdk::ptr_to_string(ptr) };
+            if !ptr.is_null() {
+                unsafe { (self.free_string)(ptr) };
+            }
+            s.ok_or_else(|| "meta null".to_string())
+        })
     }
 }
 
@@ -600,6 +624,23 @@ impl Drop for NorthSoAdapter {
         }
     }
 }
+
+/// FFI handle 的 Send 包装。
+///
+/// 安全性依据：handle 由适配器持有并在其析构前始终有效；每次调用都在独立线程上执行，
+/// 因而插件内部状态不会被并发访问（这与适配器 `unsafe impl Send/Sync` 的前提一致）。
+#[derive(Clone, Copy)]
+struct SendHandle(*mut c_void);
+
+impl SendHandle {
+    /// 取回裸指针。注意：经过方法调用后闭包捕获的是 SendHandle 本身（Send），
+    /// 而不是裸指针字段，否则精确捕获会让闭包不满足 Send。
+    fn as_ptr(self) -> *mut c_void {
+        self.0
+    }
+}
+
+unsafe impl Send for SendHandle {}
 
 unsafe impl Send for NorthSoAdapter {}
 unsafe impl Sync for NorthSoAdapter {}
