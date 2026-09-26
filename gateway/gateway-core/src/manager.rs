@@ -204,6 +204,8 @@ impl Manager {
         if is_south {
             self.remove_subscriptions_ref_south(id).await;
             self.data_flow_metrics.forget_south_node(id);
+            // 分区通道随节点回收，避免通道与订阅者长期驻留
+            self.bus.forget_node(id);
         } else {
             self.data_flow_metrics.forget_north_node(id);
         }
@@ -246,28 +248,80 @@ impl Manager {
         }
         drop(c);
         plugin.set_subscriptions(north_node_id, &subs).await.ok();
-        let mut recv = self.bus.subscribe();
+        self.spawn_north_consumer(north_node_id, plugin, &subs).await;
+    }
+
+    /// 启动（或重启）北向节点的总线消费任务。
+    ///
+    /// 订阅集合对应的分区通道各自起一个轻量转发任务，汇总到同一条 mpsc 上统一消费：
+    /// 消费循环因此只需等待一条通道，且订阅为空时也能安全等待取消信号。
+    async fn spawn_north_consumer(
+        &self,
+        id: NodeId,
+        plugin: Arc<dyn NorthPlugin>,
+        subs: &[GroupSubscription],
+    ) {
+        let keys: Vec<(NodeId, gateway_sdk::GroupId)> = subs
+            .iter()
+            .map(|s| (s.south_node_id, s.group_id))
+            .collect();
+        let recvs = self.bus.subscribe_groups(&keys);
+
+        let (agg_tx, mut agg_rx) = tokio::sync::mpsc::channel::<
+            Result<Arc<gateway_sdk::GroupData>, tokio::sync::broadcast::error::RecvError>,
+        >((recvs.len() * 64).clamp(64, 4096));
+        for mut r in recvs {
+            let tx = agg_tx.clone();
+            tokio::spawn(async move {
+                loop {
+                    match r.recv().await {
+                        Ok(d) => {
+                            if tx.send(Ok(d)).await.is_err() {
+                                break;
+                            }
+                        }
+                        // Lagged 也要上报，调用方据此累加「谁在丢数据」的指标
+                        Err(e @ tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            if tx.send(Err(e)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+        }
+        drop(agg_tx);
+
         let (tx, mut rx) = tokio::sync::oneshot::channel();
         {
             let mut c = self.north_cancel.write().await;
-            c.insert(north_node_id, tx);
+            c.insert(id, tx);
         }
-        let sub_set = subscription_set(&subs);
-        let id = north_node_id;
+        let sub_set = subscription_set(subs);
         let metrics = self.data_flow_metrics.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = &mut rx => break,
-                    r = recv.recv() => match r {
-                        Ok(data) => {
+                    maybe = agg_rx.recv() => match maybe {
+                        // 所有分区通道都已关闭（订阅被清空）
+                        None => break,
+                        Some(Ok(data)) => {
                             metrics.north_received.fetch_add(1, Ordering::Relaxed);
                             let key = (data.node_id, data.group_id);
                             if sub_set.contains(&key) {
                                 metrics.north_forwarded.fetch_add(1, Ordering::Relaxed);
-                                metrics.record_north_forwarded_tags(id, data.node_id, data.group_id, &data.values);
+                                metrics.record_north_forwarded_tags(
+                                    id,
+                                    data.node_id,
+                                    data.group_id,
+                                    &data.values,
+                                );
                                 match plugin.on_group_data(id, data).await {
-                                    Ok(()) => { metrics.north_on_group_data_ok.fetch_add(1, Ordering::Relaxed); }
+                                    Ok(()) => {
+                                        metrics.north_on_group_data_ok.fetch_add(1, Ordering::Relaxed);
+                                    }
                                     Err(e) => {
                                         metrics.north_on_group_data_err.fetch_add(1, Ordering::Relaxed);
                                         error!(node_id = ?id, "on_group_data error: {}", e);
@@ -277,11 +331,11 @@ impl Manager {
                                 metrics.north_filtered.fetch_add(1, Ordering::Relaxed);
                             }
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        Some(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
                             metrics.record_lagged(id, n);
                             warn!(node_id = ?id, lagged = n, "north bus recv lagged, skipped messages");
                         }
-                        Err(_) => {}
+                        Some(Err(_)) => {}
                     }
                 }
             }
@@ -448,45 +502,7 @@ impl Manager {
                 plugin.start(id).await.map_err(|e| e.to_string())?;
                 let subs = self.get_north_subscriptions(id).await;
                 plugin.set_subscriptions(id, &subs).await.map_err(|e| e.to_string())?;
-                let mut recv = self.bus.subscribe();
-                let (tx, mut rx) = tokio::sync::oneshot::channel();
-                {
-                    let mut c = self.north_cancel.write().await;
-                    c.insert(id, tx);
-                }
-                let sub_set = subscription_set(&subs);
-                let metrics = self.data_flow_metrics.clone();
-                tokio::spawn(async move {
-                    loop {
-                        tokio::select! {
-                            _ = &mut rx => break,
-                            r = recv.recv() => match r {
-                                Ok(data) => {
-                                    metrics.north_received.fetch_add(1, Ordering::Relaxed);
-                                    let key = (data.node_id, data.group_id);
-                                    if sub_set.contains(&key) {
-                                        metrics.north_forwarded.fetch_add(1, Ordering::Relaxed);
-                                        metrics.record_north_forwarded_tags(id, data.node_id, data.group_id, &data.values);
-                                        match plugin.on_group_data(id, data).await {
-                                            Ok(()) => { metrics.north_on_group_data_ok.fetch_add(1, Ordering::Relaxed); }
-                                            Err(e) => {
-                                                metrics.north_on_group_data_err.fetch_add(1, Ordering::Relaxed);
-                                                error!(node_id = ?id, "on_group_data error: {}", e);
-                                            }
-                                        }
-                                    } else {
-                                        metrics.north_filtered.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                    metrics.north_lagged.fetch_add(n, Ordering::Relaxed);
-                                    warn!(node_id = ?id, lagged = n, "north bus recv lagged, skipped messages");
-                                }
-                                Err(_) => {}
-                            }
-                        }
-                    }
-                });
+                self.spawn_north_consumer(id, plugin, &subs).await;
             }
         }
         self.store.node_update_state(id, NodeState::Running);
@@ -656,6 +672,7 @@ impl Manager {
         if g.is_some() {
             self.remove_subscriptions_ref_group(node_id, group_id).await;
             self.data_flow_metrics.forget_group(node_id, group_id);
+            self.bus.forget_group(&(node_id, group_id));
         }
         g
     }
