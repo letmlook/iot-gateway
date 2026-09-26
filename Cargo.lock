@@ -656,6 +656,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "gateway-bench"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "gateway-core",
+ "gateway-sdk",
+ "plugin-modbus-tcp",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "gateway-core"
 version = "0.1.0"
 dependencies = [

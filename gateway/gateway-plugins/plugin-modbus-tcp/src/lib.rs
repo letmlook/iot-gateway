@@ -29,6 +29,25 @@ use value::{register_to_value_ext, value_to_registers};
 #[cfg(feature = "modbus-client")]
 use std::time::Duration;
 
+/// 合并规划诊断（不建立连接，纯计算）：返回 `(批量读请求数, 逐点读请求数)`。
+///
+/// 现场可用它评估一批点位地址的合并收益；性能基线压测也用它作为对照。
+pub fn merge_plan_stats(addresses: &[String], start_address: u8) -> (usize, usize) {
+    let reads: Vec<merge::TagRead> = addresses
+        .iter()
+        .enumerate()
+        .filter_map(|(i, a)| {
+            address::parse_address_full(a, start_address).map(|p| merge::TagRead::new(i, p))
+        })
+        .collect();
+    let (plans, singles) = merge::plan_merges(
+        &reads,
+        merge::DEFAULT_MERGE_GAP,
+        merge::DEFAULT_MAX_READ_REGS,
+    );
+    (plans.len(), singles.len())
+}
+
 /// 建立一条新的 Modbus TCP 连接（带连接超时）
 #[cfg(feature = "modbus-client")]
 async fn connect_ctx(s: &ModbusTcpState) -> PluginResult<tokio_modbus::client::Context> {

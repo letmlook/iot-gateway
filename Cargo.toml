@@ -4,6 +4,7 @@ members = [
     "gateway/gateway-sdk",
     "gateway/gateway-core",
     "gateway/gateway-server",
+    "gateway/gateway-bench",
     "gateway/gateway-plugins/plugin-sim",
     "gateway/gateway-plugins/plugin-mqtt",
     "gateway/gateway-plugins/plugin-modbus-tcp",

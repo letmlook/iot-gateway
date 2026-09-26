@@ -1,0 +1,15 @@
+[package]
+name = "gateway-bench"
+version = "0.1.0"
+edition = "2021"
+description = "性能基线压测：总线投递、持久化、Modbus 合并规划、FFI JSON 编解码"
+publish = false
+
+[dependencies]
+gateway-core = { path = "../gateway-core" }
+gateway-sdk = { path = "../gateway-sdk" }
+plugin-modbus-tcp = { path = "../gateway-plugins/plugin-modbus-tcp" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }

@@ -1,0 +1,35 @@
+name: Bench (nightly)
+
+# 性能基线：每晚跑一次，产物留存便于与后续改动对比。
+# 之所以放在 nightly 而不是每个 PR：压测数值受 runner 负载影响，逐 PR 比较噪声大于信号。
+
+on:
+  schedule:
+    # UTC 18:00 = 北京时间 02:00
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+
+jobs:
+  bench:
+    name: cargo run -p gateway-bench
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run benchmarks
+        run: |
+          mkdir -p docs/bench
+          cargo run --release -p gateway-bench -- --out docs/bench/baseline-$(date +%F).md
+
+      - name: Show result
+        run: cat docs/bench/baseline-*.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-baseline
+          path: docs/bench/baseline-*.md
+          retention-days: 90
