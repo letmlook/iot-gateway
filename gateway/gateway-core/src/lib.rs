@@ -14,7 +14,9 @@ mod store;
 pub use bus::{subscription_set, Bus, SubscriptionTable};
 pub use data_flow::{DataFlowMetrics, DataFlowMetricsSnapshot, TagForwardedStat, TagPublishedStat};
 pub use loader::PluginLoader;
-pub use manager::{Manager, SouthConnectionState, MIN_POLL_INTERVAL_MS};
+pub use manager::{
+    Manager, SouthConnectionState, DEFAULT_MAX_CONCURRENT_POLLS, MIN_POLL_INTERVAL_MS,
+};
 pub use node::{Node, NodeConfig};
 pub use persist::{
     apply_to_store, build_snapshot, has_plaintext_secrets as persist_has_plaintext_secrets,

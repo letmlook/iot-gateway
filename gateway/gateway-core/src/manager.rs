@@ -11,9 +11,10 @@ use gateway_sdk::{
     Group, GroupData, GroupSubscription, NodeId, NodeKind, NodeState, NorthPlugin, PluginConfig,
     PluginInfo, SouthPlugin, Tag,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{error, instrument, warn};
 
@@ -32,6 +33,9 @@ pub struct SouthConnectionState {
 /// 路由核心
 /// 南向轮询周期下限（毫秒）：低于该值的配置会被钳制，避免忙循环打满 CPU
 pub const MIN_POLL_INTERVAL_MS: u64 = 10;
+
+/// 全局采集并发上限默认值：同时进行的 poll_group 次数上限
+pub const DEFAULT_MAX_CONCURRENT_POLLS: usize = 32;
 
 /// 总线默认容量（与 `gateway_core::bus::BUS_CAPACITY` 保持一致）
 fn gateway_core_bus_default() -> usize {
@@ -53,6 +57,8 @@ pub struct Manager {
     pub data_flow_metrics: Arc<DataFlowMetrics>,
     /// 南向节点连接状态（按最近一次 poll 结果更新，供 API 与前端展示）
     south_connection_status: Arc<RwLock<HashMap<NodeId, SouthConnectionState>>>,
+    /// 全局采集并发上限：所有南向组的 poll_group 共用，避免同一时刻同时打向设备
+    poll_permits: Arc<tokio::sync::Semaphore>,
 }
 
 impl Manager {
@@ -62,6 +68,14 @@ impl Manager {
 
     /// 以指定总线容量创建（容量决定慢消费者可积压的消息数，用于规模调优）
     pub fn with_bus_capacity(capacity: usize) -> Self {
+        Self::with_limits(capacity, DEFAULT_MAX_CONCURRENT_POLLS)
+    }
+
+    /// 以指定总线容量与采集并发上限创建。
+    ///
+    /// `max_concurrent_polls` 是**全局**同时进行的 poll_group 次数上限：现场设备多为
+    /// 串行应答，无上限的并发既打不满设备、又会把网关 CPU 与连接数顶上去。
+    pub fn with_limits(capacity: usize, max_concurrent_polls: usize) -> Self {
         Self {
             bus: Bus::with_capacity(capacity.max(16)),
             store: Store::new(),
@@ -72,6 +86,7 @@ impl Manager {
             north_cancel: Arc::new(RwLock::new(HashMap::new())),
             data_flow_metrics: Arc::new(DataFlowMetrics::new()),
             south_connection_status: Arc::new(RwLock::new(HashMap::new())),
+            poll_permits: Arc::new(tokio::sync::Semaphore::new(max_concurrent_polls.max(1))),
         }
     }
 
@@ -423,122 +438,15 @@ impl Manager {
                         }
                     }
                 }
-                let groups = self.store.groups_by_node(id);
                 let (cancel_tx, _) = tokio::sync::broadcast::channel(1);
                 {
                     let mut c = self.south_cancel.write().await;
                     c.insert(id, cancel_tx.clone());
                 }
-                let metrics = self.data_flow_metrics.clone();
-                let south_conn = self.south_connection_status.clone();
-                for g in groups {
-                    let store = self.store.clone();
-                    let bus = self.bus.clone();
-                    let plugin = plugin.clone();
-                    let cancel_rx = cancel_tx.subscribe();
-                    let metrics = metrics.clone();
-                    let south_conn = south_conn.clone();
-                    let gid = g.id;
-                    tokio::spawn(async move {
-                        let mut cancel_rx = cancel_rx;
-                        loop {
-                            let tags = store.tags_by_group(id, gid);
-                            // 周期下限做服务端钳制：防止 interval_ms=0 造成忙循环打满 CPU
-                            let interval_ms = match store.group_get(id, gid) {
-                                Some(grp) => grp.interval_ms.max(MIN_POLL_INTERVAL_MS),
-                                None => break,
-                            };
-                            // 采集超时：慢设备不应挂住整个轮询任务（多数插件无内部超时）
-                            let poll_timeout_ms = interval_ms.saturating_mul(3).max(5_000);
-                            let poll_result = tokio::time::timeout(
-                                tokio::time::Duration::from_millis(poll_timeout_ms),
-                                plugin.poll_group(id, gid, &tags),
-                            )
-                            .await;
-                            match poll_result {
-                                Err(_) => {
-                                    let err_msg =
-                                        format!("poll_group timeout after {} ms", poll_timeout_ms);
-                                    metrics.south_poll_timeout.fetch_add(1, Ordering::Relaxed);
-                                    warn!(node_id = ?id, group_id = ?gid, "{}", err_msg);
-                                    let mut st = south_conn.write().await;
-                                    st.insert(
-                                        id,
-                                        SouthConnectionState {
-                                            connected: false,
-                                            last_error: Some(err_msg),
-                                        },
-                                    );
-                                }
-                                Ok(Ok(values)) => {
-                                    let _point_count = values.len();
-                                    let node_name = store.node_get(id).map(|n| n.config.name);
-                                    let group_name = store.group_get(id, gid).map(|g| g.name);
-                                    let tag_names: std::collections::HashMap<_, _> = values
-                                        .iter()
-                                        .filter_map(|(tid, _)| {
-                                            store.tag_get(*tid).map(|t| (*tid, t.name))
-                                        })
-                                        .collect();
-                                    let tag_names = if tag_names.is_empty() {
-                                        None
-                                    } else {
-                                        Some(tag_names)
-                                    };
-                                    let data = Arc::new(GroupData {
-                                        node_id: id,
-                                        group_id: gid,
-                                        ts: Utc::now(),
-                                        values,
-                                        node_name,
-                                        group_name,
-                                        tag_names,
-                                    });
-                                    metrics.record_south_published_tags(id, gid, &data.values);
-                                    match bus.publish(data) {
-                                        Ok(_) => {
-                                            metrics.south_published.fetch_add(1, Ordering::Relaxed);
-                                        }
-                                        Err(_) => {
-                                            metrics
-                                                .bus_no_subscribers
-                                                .fetch_add(1, Ordering::Relaxed);
-                                        }
-                                    }
-                                    // let grp_name = store.group_get(id, gid).map(|g| g.name).unwrap_or_else(|| gid.0.to_string());
-                                    // log::info(id, format!("采集成功 组[{}] 全点 {} 个 连接正常", grp_name, point_count));
-                                    let mut st = south_conn.write().await;
-                                    st.insert(
-                                        id,
-                                        SouthConnectionState {
-                                            connected: true,
-                                            last_error: None,
-                                        },
-                                    );
-                                }
-                                Ok(Err(e)) => {
-                                    // let grp_name = store.group_get(id, gid).map(|g| g.name).unwrap_or_else(|| gid.0.to_string());
-                                    metrics.south_poll_err.fetch_add(1, Ordering::Relaxed);
-                                    let err_msg = e.to_string();
-                                    // log::warn(id, format!("采集失败 组[{}]: {} 连接异常", grp_name, err_msg));
-                                    warn!(node_id = ?id, group_id = ?gid, "poll_group error: {}", e);
-                                    let mut st = south_conn.write().await;
-                                    st.insert(
-                                        id,
-                                        SouthConnectionState {
-                                            connected: false,
-                                            last_error: Some(err_msg),
-                                        },
-                                    );
-                                }
-                            }
-                            tokio::select! {
-                                _ = cancel_rx.recv() => break,
-                                _ = tokio::time::sleep(tokio::time::Duration::from_millis(interval_ms)) => {}
-                            }
-                        }
-                    });
-                }
+                // 采集调度：**每个运行中的南向节点一个任务**（而不是每个组一个）。
+                // 任务按各组自己的周期固定节拍触发、受全局并发上限约束，并在每个节拍
+                // 重新同步组集合 —— 因此运行中新增/修改/删除组会立刻生效，无需重启节点。
+                self.spawn_south_scheduler(id, plugin.clone(), cancel_tx.subscribe());
             }
             NodeKind::North => {
                 let plugin = self
@@ -952,6 +860,238 @@ impl Manager {
         p.write_tags(node_id, &tag_values)
             .await
             .map_err(|e| e.to_string())
+    }
+}
+
+// ---------- 采集调度 ----------
+
+impl Manager {
+    /// 启动（或重启）某南向节点的采集调度任务。
+    ///
+    /// 取消信号走 `south_cancel` 广播（`node_stop` 发送），因此每个节点只需一个
+    /// 调度任务，而不是每个组一个：千级组不再对应千个长驻 task。
+    fn spawn_south_scheduler(
+        &self,
+        id: NodeId,
+        plugin: Arc<dyn SouthPlugin>,
+        cancel_rx: tokio::sync::broadcast::Receiver<()>,
+    ) {
+        let store = self.store.clone();
+        let bus = self.bus.clone();
+        let metrics = self.data_flow_metrics.clone();
+        let south_conn = self.south_connection_status.clone();
+        let permits = self.poll_permits.clone();
+        tokio::spawn(async move {
+            south_scheduler_loop(
+                id, plugin, store, bus, metrics, south_conn, permits, cancel_rx,
+            )
+            .await;
+        });
+    }
+}
+
+/// 单个南向节点的采集调度循环。
+///
+/// 设计要点：
+/// 1. **固定节拍**：下一轮时间按 `上次到期时刻 + 周期` 推进，而不是「等采集完再 sleep」，
+///    否则 `周期 = 采集耗时 + interval`，周期会被设备延迟不断放大；
+/// 2. **可动态变组**：每个节拍都从 Store 重新读取组集合，运行中新增/删除组立即生效
+///    （旧实现只在 node_start 时为当时的组创建任务，新增组要重启节点才会被采集）；
+/// 3. **限并发**：本批到期的组并发采集，但全局同时进行的 poll 受信号量约束；
+/// 4. **超期可观测**：一批采集耗时超过其中最小周期时计入 `south_poll_overrun`。
+#[allow(clippy::too_many_arguments)]
+async fn south_scheduler_loop(
+    id: NodeId,
+    plugin: Arc<dyn SouthPlugin>,
+    store: Store,
+    bus: Bus,
+    metrics: Arc<DataFlowMetrics>,
+    south_conn: Arc<RwLock<HashMap<NodeId, SouthConnectionState>>>,
+    permits: Arc<tokio::sync::Semaphore>,
+    mut cancel_rx: tokio::sync::broadcast::Receiver<()>,
+) {
+    // group_id -> 下次到期时刻
+    let mut next_due: HashMap<gateway_sdk::GroupId, Instant> = HashMap::new();
+    // 空闲等待上限：保证新增组 / 取消信号能被及时感知
+    let idle_max = Duration::from_millis(200);
+
+    loop {
+        // 1) 同步组集合
+        let groups = store.groups_by_node(id);
+        let live: HashSet<gateway_sdk::GroupId> = groups.iter().map(|g| g.id).collect();
+        next_due.retain(|gid, _| live.contains(gid));
+        let now = Instant::now();
+        for g in &groups {
+            next_due.entry(g.id).or_insert(now); // 新组：立即采集一次
+        }
+
+        // 2) 立即处理本轮到期的组
+        let due: Vec<(gateway_sdk::GroupId, u64)> = next_due
+            .iter()
+            .filter(|(_, t)| **t <= now)
+            .map(|(gid, _)| {
+                let interval = groups
+                    .iter()
+                    .find(|g| g.id == *gid)
+                    .map(|g| g.interval_ms.max(MIN_POLL_INTERVAL_MS))
+                    .unwrap_or(MIN_POLL_INTERVAL_MS);
+                (*gid, interval)
+            })
+            .collect();
+
+        if due.is_empty() {
+            let earliest = next_due
+                .values()
+                .min()
+                .copied()
+                .unwrap_or(now + idle_max)
+                .saturating_duration_since(now)
+                .min(idle_max);
+            tokio::select! {
+                _ = cancel_rx.recv() => break,
+                _ = tokio::time::sleep(earliest.max(Duration::from_millis(1))) => {}
+            }
+            continue;
+        }
+
+        // 3) 固定节拍推进下一轮时间（不因本次耗时后移）
+        for (gid, interval) in &due {
+            next_due.insert(*gid, now + Duration::from_millis(*interval));
+        }
+        let min_interval = due.iter().map(|(_, i)| *i).min().unwrap_or(u64::MAX);
+
+        // 4) 并发采集（全局并发上限）
+        let tick_start = Instant::now();
+        let mut set = tokio::task::JoinSet::new();
+        for (gid, _) in due {
+            let permit = tokio::select! {
+                _ = cancel_rx.recv() => return,
+                p = permits.clone().acquire_owned() => p,
+            };
+            let Ok(permit) = permit else { return };
+            let store = store.clone();
+            let bus = bus.clone();
+            let metrics = metrics.clone();
+            let south_conn = south_conn.clone();
+            let plugin = plugin.clone();
+            set.spawn(async move {
+                let _permit = permit; // 持有到本次采集结束
+                poll_group_once(&store, &bus, &metrics, &south_conn, &plugin, id, gid).await;
+            });
+        }
+
+        // 5) 等待本轮结束（可被取消打断）
+        loop {
+            tokio::select! {
+                _ = cancel_rx.recv() => {
+                    set.abort_all();
+                    return;
+                }
+                joined = set.join_next() => {
+                    if joined.is_none() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 6) 超期观测：一批耗时超过最小周期，说明设备或并发是瓶颈
+        if min_interval != u64::MAX && tick_start.elapsed() > Duration::from_millis(min_interval) {
+            metrics.south_poll_overrun.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// 采集一个组并发布到总线（原「每组一个任务」循环体的等价实现）。
+async fn poll_group_once(
+    store: &Store,
+    bus: &Bus,
+    metrics: &Arc<DataFlowMetrics>,
+    south_conn: &Arc<RwLock<HashMap<NodeId, SouthConnectionState>>>,
+    plugin: &Arc<dyn SouthPlugin>,
+    id: NodeId,
+    gid: gateway_sdk::GroupId,
+) {
+    let tags = store.tags_by_group(id, gid);
+    let Some(grp) = store.group_get(id, gid) else {
+        return; // 组已被删除
+    };
+    // 周期下限做服务端钳制：防止 interval_ms=0 造成忙循环打满 CPU
+    let interval_ms = grp.interval_ms.max(MIN_POLL_INTERVAL_MS);
+    // 采集超时：慢设备不应挂住整个轮询任务（多数插件无内部超时）
+    let poll_timeout_ms = interval_ms.saturating_mul(3).max(5_000);
+    let poll_result = tokio::time::timeout(
+        Duration::from_millis(poll_timeout_ms),
+        plugin.poll_group(id, gid, &tags),
+    )
+    .await;
+
+    match poll_result {
+        Err(_) => {
+            let err_msg = format!("poll_group timeout after {} ms", poll_timeout_ms);
+            metrics.south_poll_timeout.fetch_add(1, Ordering::Relaxed);
+            warn!(node_id = ?id, group_id = ?gid, "{}", err_msg);
+            let mut st = south_conn.write().await;
+            st.insert(
+                id,
+                SouthConnectionState {
+                    connected: false,
+                    last_error: Some(err_msg),
+                },
+            );
+        }
+        Ok(Ok(values)) => {
+            let node_name = store.node_get(id).map(|n| n.config.name);
+            let group_name = store.group_get(id, gid).map(|g| g.name);
+            let tag_names: HashMap<_, _> = values
+                .iter()
+                .filter_map(|(tid, _)| store.tag_get(*tid).map(|t| (*tid, t.name)))
+                .collect();
+            let tag_names = if tag_names.is_empty() {
+                None
+            } else {
+                Some(tag_names)
+            };
+            let data = Arc::new(GroupData {
+                node_id: id,
+                group_id: gid,
+                ts: Utc::now(),
+                values,
+                node_name,
+                group_name,
+                tag_names,
+            });
+            metrics.record_south_published_tags(id, gid, &data.values);
+            match bus.publish(data) {
+                Ok(_) => {
+                    metrics.south_published.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(_) => {
+                    metrics.bus_no_subscribers.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            let mut st = south_conn.write().await;
+            st.insert(
+                id,
+                SouthConnectionState {
+                    connected: true,
+                    last_error: None,
+                },
+            );
+        }
+        Ok(Err(e)) => {
+            metrics.south_poll_err.fetch_add(1, Ordering::Relaxed);
+            let err_msg = e.to_string();
+            warn!(node_id = ?id, group_id = ?gid, "poll_group error: {}", e);
+            let mut st = south_conn.write().await;
+            st.insert(
+                id,
+                SouthConnectionState {
+                    connected: false,
+                    last_error: Some(err_msg),
+                },
+            );
+        }
     }
 }
 

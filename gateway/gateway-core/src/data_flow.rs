@@ -48,6 +48,8 @@ pub struct DataFlowMetrics {
     pub south_poll_timeout: AtomicU64,
     /// 南向 poll_group 返回错误的次数
     pub south_poll_err: AtomicU64,
+    /// 采集批次超期次数：一批采集耗时超过其中最小轮询周期（设备慢或并发不足）
+    pub south_poll_overrun: AtomicU64,
     /// 按北向节点的 Lagged 条数（用于定位「是哪个北向节点在丢数据」）
     pub lagged_by_node: Arc<dashmap::DashMap<NodeId, AtomicU64>>,
     /// 点位级：南向 (south_node_id, group_id, tag_id) -> 发布次数
@@ -69,6 +71,7 @@ impl DataFlowMetrics {
             north_lagged: AtomicU64::new(0),
             south_poll_timeout: AtomicU64::new(0),
             south_poll_err: AtomicU64::new(0),
+            south_poll_overrun: AtomicU64::new(0),
             lagged_by_node: Arc::new(dashmap::DashMap::new()),
             published_per_tag: Arc::new(dashmap::DashMap::new()),
             forwarded_per_tag: Arc::new(dashmap::DashMap::new()),
@@ -150,6 +153,7 @@ impl DataFlowMetrics {
             north_lagged: self.north_lagged.load(Ordering::Relaxed),
             south_poll_timeout: self.south_poll_timeout.load(Ordering::Relaxed),
             south_poll_err: self.south_poll_err.load(Ordering::Relaxed),
+            south_poll_overrun: self.south_poll_overrun.load(Ordering::Relaxed),
             lagged_by_node: self
                 .lagged_by_node
                 .iter()
@@ -207,6 +211,8 @@ pub struct DataFlowMetricsSnapshot {
     pub north_lagged: u64,
     pub south_poll_timeout: u64,
     pub south_poll_err: u64,
+    /// 采集批次超期次数
+    pub south_poll_overrun: u64,
     /// (北向节点, 跳过的消息条数)：定位是哪个北向节点在丢数据
     pub lagged_by_node: Vec<(NodeId, u64)>,
     pub published_per_tag: Vec<TagPublishedStat>,

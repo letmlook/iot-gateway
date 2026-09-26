@@ -44,6 +44,8 @@ pub struct Config {
     pub persist_debounce_ms: u64,
     /// 消息总线容量（条）：慢消费者可积压的消息数，规模较大时可调高
     pub bus_capacity: usize,
+    /// 全局采集并发上限：同时进行的 poll_group 次数，避免同一时刻同时打向设备
+    pub max_concurrent_polls: usize,
 }
 
 fn default_bind_str() -> String {
@@ -60,6 +62,11 @@ fn random_secret() -> String {
 /// 总线默认容量（与 gateway-core 的 BUS_CAPACITY 一致）
 fn default_bus_capacity() -> usize {
     4096
+}
+
+/// 采集并发上限默认值（与 gateway-core 的 DEFAULT_MAX_CONCURRENT_POLLS 一致）
+fn default_max_concurrent_polls() -> usize {
+    32
 }
 
 /// 持久化写合并窗口默认 300ms：足够合并一次页面上的连续操作，又不会让数据长时间只在内存里
@@ -164,6 +171,7 @@ impl Default for Config {
             enforce_roles: true,
             persist_debounce_ms: default_persist_debounce_ms(),
             bus_capacity: default_bus_capacity(),
+            max_concurrent_polls: default_max_concurrent_polls(),
         }
     }
 }
@@ -196,6 +204,7 @@ impl Config {
             enforce_roles: true,
             persist_debounce_ms: default_persist_debounce_ms(),
             bus_capacity: default_bus_capacity(),
+            max_concurrent_polls: default_max_concurrent_polls(),
         })
     }
 
@@ -306,6 +315,11 @@ impl Config {
         if let Ok(s) = std::env::var("GATEWAY_BUS_CAPACITY") {
             if let Ok(n) = s.parse::<usize>() {
                 c.bus_capacity = n;
+            }
+        }
+        if let Ok(s) = std::env::var("GATEWAY_MAX_CONCURRENT_POLLS") {
+            if let Ok(n) = s.parse::<usize>() {
+                c.max_concurrent_polls = n;
             }
         }
         if let Ok(s) = std::env::var("GATEWAY_PERSIST_DEBOUNCE_MS") {

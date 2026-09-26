@@ -693,7 +693,10 @@ pub async fn metrics(State(state): State<AppState>) -> (axum::http::StatusCode, 
          gateway_south_poll_timeout {}\n\
          # HELP gateway_south_poll_err Total south poll_group errors.\n\
          # TYPE gateway_south_poll_err counter\n\
-         gateway_south_poll_err {}\n",
+         gateway_south_poll_err {}\n\
+         # HELP gateway_south_poll_overrun Poll batches that took longer than the smallest interval.\n\
+         # TYPE gateway_south_poll_overrun counter\n\
+         gateway_south_poll_overrun {}\n",
         nodes_total,
         nodes_running,
         plugins_south,
@@ -708,6 +711,7 @@ pub async fn metrics(State(state): State<AppState>) -> (axum::http::StatusCode, 
         df.north_lagged,
         df.south_poll_timeout,
         df.south_poll_err,
+        df.south_poll_overrun,
     );
     // 维度化指标：定位「是哪个北向节点在丢数据」
     let mut body = body;
@@ -793,6 +797,7 @@ pub async fn data_flow(State(state): State<AppState>) -> Json<serde_json::Value>
             "north_lagged": m.north_lagged,
             "south_poll_timeout": m.south_poll_timeout,
             "south_poll_err": m.south_poll_err,
+            "south_poll_overrun": m.south_poll_overrun,
         },
         "lagged_by_node": m.lagged_by_node.iter().map(|(nid, n)| {
             serde_json::json!({
