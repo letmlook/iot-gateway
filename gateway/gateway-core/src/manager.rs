@@ -871,15 +871,41 @@ impl Manager {
         let was_running = node.state == NodeState::Running;
         let plugin_south = self.south_plugin(&plugin_name);
         let plugin_north = self.north_plugin(&plugin_name);
+
+        // 热改配置与创建走同一套 Schema 校验：否则「运行期修改」就成了绕过校验的后门。
+        // 必须在任何状态变更（停节点 / 写配置）之前完成，失败时节点保持原状。
+        match node.kind() {
+            gateway_sdk::NodeKind::South => {
+                if let Some(schema) = plugin_south.as_ref().and_then(|p| p.config_schema()) {
+                    schema.validate_config(&config).map_err(|e| e.to_string())?;
+                }
+            }
+            gateway_sdk::NodeKind::North => {
+                if let Some(schema) = plugin_north.as_ref().and_then(|p| p.config_schema()) {
+                    schema.validate_config(&config).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+
         match node.kind() {
             gateway_sdk::NodeKind::South => {
                 let p = plugin_south.ok_or("south plugin not found")?;
                 if was_running {
                     let _ = self.node_stop(id).await;
                 }
-                p.setting(id, config.clone())
-                    .await
-                    .map_err(|e| e.to_string())?;
+                if let Err(e) = p.setting(id, config.clone()).await {
+                    // setting 失败不能把一个原本在运行的节点留在停止态
+                    if was_running {
+                        if let Err(start_err) = self.node_start(id).await {
+                            tracing::warn!(
+                                node_id = ?id,
+                                "restore node after failed setting also failed: {}",
+                                start_err
+                            );
+                        }
+                    }
+                    return Err(e.to_string());
+                }
                 self.store.node_update_config(id, config.clone());
                 if was_running {
                     self.node_start(id).await?;
