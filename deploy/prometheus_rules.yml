@@ -1,0 +1,106 @@
+# IoT 网关 Prometheus 告警规则
+#
+# 使用方法（三种任选）：
+#   1) 直接挂载：prometheus.yml 中 `rule_files: ["deploy/prometheus_rules.yml"]`
+#   2) 复制到已有 Prometheus 的 rules 目录
+#   3) 与 Grafana 配合：告警规则在 Prometheus，看板自行搭建（指标清单见文件末尾）
+#
+# 抓取配置示例：
+#   scrape_configs:
+#     - job_name: iot-gateway
+#       metrics_path: /api/metrics
+#       static_configs:
+#         - targets: ["gateway-host:4000"]
+#
+# 指标说明（覆盖本文件用到的全部指标）：
+#   gateway_nodes_total / gateway_nodes_running        节点总数与运行数
+#   gateway_plugins_south / gateway_plugins_north      插件数量
+#   gateway_data_flow_south_published                  南向发布到总线的 GroupData 次数
+#   gateway_data_flow_bus_no_subscribers               发布时无北向订阅者（数据被丢弃）次数
+#   gateway_data_flow_north_received/filtered/forwarded 北向接收/过滤/转发次数
+#   gateway_data_flow_north_on_group_data_ok/err       转发成功/失败次数
+#   gateway_data_flow_north_lagged                     跳过的消息总条数（全局）
+#   gateway_north_lagged_by_node{north_node}           按北向节点维度的跳过条数（定位丢数据方）
+#   gateway_south_poll_timeout                         南向采集超时次数
+#   gateway_south_poll_err                             南向采集错误次数
+#   gateway_license_expiry_days                        授权剩余天数（未授权时无此指标）
+
+groups:
+  - name: iot-gateway
+    rules:
+      # 北向节点丢数据：消费速度跟不上采集，或下游阻塞
+      - alert: GatewayNorthNodeLagged
+        expr: increase(gateway_north_lagged_by_node[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "北向节点 {{ $labels.north_node }} 正在丢数据"
+          description: >-
+            最近 5 分钟该北向节点因消费落后跳过了消息（累计 {{ $value }} 条）。
+            常见原因：北向网络或 broker 变慢、QoS 过高、订阅组合过多、采集周期过短。
+            可考虑调高 GATEWAY_BUS_CAPACITY、降低采集频率，或检查该节点的连接状态。
+
+      # 采集超时：设备响应慢或网络异常
+      - alert: GatewaySouthPollTimeout
+        expr: increase(gateway_south_poll_timeout[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "南向采集出现超时"
+          description: >-
+            最近 5 分钟有 {{ $value }} 次 poll_group 超时（阈值 max(3×interval, 5s)）。
+            检查设备连通性与响应时间，必要时上调该组 interval_ms。
+
+      # 采集持续报错：设备离线或配置错误
+      - alert: GatewaySouthPollErrors
+        expr: rate(gateway_south_poll_err[5m]) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "南向采集错误率偏高"
+          description: "最近 5 分钟平均每秒 {{ $value }} 次采集失败，检查设备连接与点位配置是否有效。"
+
+      # 北向转发失败：broker 拒收、topic 权限或连接中断
+      - alert: GatewayNorthForwardErrors
+        expr: increase(gateway_data_flow_north_on_group_data_err[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "北向 on_group_data 返回错误"
+          description: "最近 5 分钟失败 {{ $value }} 次，检查北向连接状态与上报格式配置。"
+
+      # 无订阅者：采了但没人要，属于配置问题（数据被直接丢弃）
+      - alert: GatewayNoNorthSubscribers
+        expr: increase(gateway_data_flow_bus_no_subscribers[5m]) > 0
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: "存在采集数据但无北向订阅"
+          description: >-
+            最近 5 分钟有 {{ $value }} 次发布找不到订阅者，说明南向组未被任何北向节点订阅，
+            数据会被丢弃。请检查订阅配置。
+
+      # 授权即将到期（提前 30 天提醒）
+      - alert: GatewayLicenseExpiringSoon
+        expr: gateway_license_expiry_days < 30
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "网关授权即将到期"
+          description: "授权剩余 {{ $value }} 天，请提前联系供应商续期，避免到期后受限。"
+
+      # 授权已过期
+      - alert: GatewayLicenseExpired
+        expr: gateway_license_expiry_days < 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "网关授权已过期 {{ $value }} 天"
+          description: "请立即续期；过期后授权插件与点位上限将不再生效。"

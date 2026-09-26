@@ -47,6 +47,16 @@ impl FeatureManager {
         }
     }
 
+    /// 授权剩余天数：无授权返回 None；已过期返回负数。
+    /// 用于 `/api/metrics` 的 `gateway_license_expiry_days`，便于提前告警续期。
+    pub fn expiry_days_left(&self) -> Option<i64> {
+        let guard = self.inner.read().ok()?;
+        let payload = guard.as_ref()?;
+        let expiry =
+            chrono::NaiveDate::parse_from_str(payload.expiry_date.trim(), "%Y-%m-%d").ok()?;
+        Some((expiry - chrono::Utc::now().date_naive()).num_days())
+    }
+
     /// 判断当前授权是否允许访问指定功能。
     /// 通过解析授权文件中的 features 数组：若包含 feature_name 则返回 true。
     /// 无授权或未包含该功能名时返回 false（免费版不可用）。
@@ -165,5 +175,43 @@ impl FeatureManager {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn payload_with_expiry(date: &str) -> LicensePayload {
+        LicensePayload {
+            machine_id: "test".to_string(),
+            expiry_date: date.to_string(),
+            features: vec![],
+            max_tags: None,
+        }
+    }
+
+    #[test]
+    fn expiry_days_is_absent_without_license() {
+        assert_eq!(FeatureManager::without_license().expiry_days_left(), None);
+    }
+
+    #[test]
+    fn expiry_days_counts_down_and_goes_negative() {
+        let today = chrono::Utc::now().date_naive();
+        let future = (today + chrono::Duration::days(30)).format("%Y-%m-%d").to_string();
+        let past = (today - chrono::Duration::days(3)).format("%Y-%m-%d").to_string();
+
+        let fm = FeatureManager::with_license(payload_with_expiry(&future));
+        assert_eq!(fm.expiry_days_left(), Some(30));
+
+        let expired = FeatureManager::with_license(payload_with_expiry(&past));
+        assert_eq!(expired.expiry_days_left(), Some(-3));
+    }
+
+    #[test]
+    fn invalid_expiry_date_is_surfaced_as_unknown() {
+        let fm = FeatureManager::with_license(payload_with_expiry("not-a-date"));
+        assert_eq!(fm.expiry_days_left(), None);
     }
 }

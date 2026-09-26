@@ -658,6 +658,14 @@ pub async fn metrics(State(state): State<AppState>) -> (axum::http::StatusCode, 
     );
     // 维度化指标：定位「是哪个北向节点在丢数据」
     let mut body = body;
+    // 授权到期天数：未授权时不输出该指标（避免 0 造成误判）
+    if let Some(days) = state.feature_manager.expiry_days_left() {
+        body.push_str(
+            "# HELP gateway_license_expiry_days Days until license expiry (negative when expired).\n\
+             # TYPE gateway_license_expiry_days gauge\n",
+        );
+        body.push_str(&format!("gateway_license_expiry_days {}\n", days));
+    }
     if !df.lagged_by_node.is_empty() {
         body.push_str(
             "# HELP gateway_north_lagged_by_node Messages skipped due to lag, per north node.\n\
