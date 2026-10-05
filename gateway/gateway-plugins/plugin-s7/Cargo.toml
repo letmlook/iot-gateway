@@ -2,11 +2,27 @@
 name = "plugin-s7"
 version = "0.1.0"
 edition = "2021"
-description = "南向 Siemens S7 插件（占位桩，待实现）"
+description = "南向 Siemens S7 插件（ISO-on-TCP / S7Comm / S7CommPlus）"
 
 [lib]
 crate-type = ["lib", "cdylib"]
 
+[features]
+default = ["s7-client"]
+s7-client = ["dep:snap7-client"]
+ffi = []
+
 [dependencies]
 gateway-sdk = { path = "../../gateway-sdk" }
 async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "net"] }
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+snap7-client = { version = "0.1.7", optional = true }
+bytes = "1"
+
+[dev-dependencies]
+snap7-server = "0.1.7"
+tokio-test = "0.4"

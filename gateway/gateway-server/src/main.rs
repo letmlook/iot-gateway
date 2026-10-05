@@ -66,9 +66,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use plugin_modbus_rtu::ModbusRtuPlugin;
         use plugin_modbus_tcp::ModbusTcpPlugin;
         use plugin_mqtt::MqttPlugin;
+        use plugin_s7::S7Plugin;
         use plugin_sim::SimPlugin;
         mgr.register_south("sim", Arc::new(SimPlugin::new()));
-        // mgr.register_south("s7", Arc::new(S7Plugin::new()));
+        mgr.register_south("s7", Arc::new(S7Plugin::new()));
         // mgr.register_south("bacnet", Arc::new(BacnetPlugin::new()));
         // mgr.register_south("ethernet-ip", Arc::new(EthernetIpPlugin::new()));
         // mgr.register_south("iec104", Arc::new(Iec104Plugin::new()));
