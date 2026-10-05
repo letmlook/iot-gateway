@@ -12,6 +12,11 @@ members = [
     "gateway/gateway-plugins/plugin-modbus-rtu",
     "gateway/gateway-plugins/plugin-opcua",
     "gateway/gateway-plugins/plugin-virb",
+    # 南向新插件
+    "gateway/gateway-plugins/plugin-s7",
+    # plugin-bacnet 临时不在 workspace：上一轮对话遗留了 25+ 编译错误的半截实现，本轮已由 south-ethernet-ip actor 暴露并按计划从成员中移除；目录与文件保留，等正式实现时再加回
+    "gateway/gateway-plugins/plugin-ethernet-ip",
+    "gateway/gateway-plugins/plugin-iec104",
     # 测试夹具：故障注入 / ABI 不匹配（不参与发布）
     "gateway/gateway-plugins/plugin-faulty",
     "gateway/gateway-plugins/plugin-abi-mismatch",

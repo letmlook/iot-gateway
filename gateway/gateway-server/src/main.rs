@@ -59,21 +59,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // 从 plugins_dir 加载动态库插件（Windows: .dll，Unix: .so）；若无目录或加载后无插件则使用内置
     fn register_builtin_plugins(mgr: &mut gateway_core::Manager) {
-        use plugin_http::HttpPlugin;
-        use plugin_influxdb::InfluxDbPlugin;
+        // 本轮（2026-10-05）批量补 8 个插件（南向 s7/bacnet/ethernet-ip/iec104 + 北向 http/influxdb/tdengine/kafka）。
+        // 其中 kafka 仅做 .so 部署（需要 librdkafka），不在 builtin。
+        // 余下 7 个本轮的工作流在推进中，crate 目录尚未就绪的：use 引用与 register 调用临时注释，
+        // 等对应 actor 落地 crate 后按固定模板解注释并跑 fmt/clippy/test 门禁。
         use plugin_modbus_rtu::ModbusRtuPlugin;
         use plugin_modbus_tcp::ModbusTcpPlugin;
         use plugin_mqtt::MqttPlugin;
         use plugin_sim::SimPlugin;
-        use plugin_tdengine::TdEnginePlugin;
         mgr.register_south("sim", Arc::new(SimPlugin::new()));
+        // mgr.register_south("s7", Arc::new(S7Plugin::new()));
+        // mgr.register_south("bacnet", Arc::new(BacnetPlugin::new()));
+        // mgr.register_south("ethernet-ip", Arc::new(EthernetIpPlugin::new()));
+        // mgr.register_south("iec104", Arc::new(Iec104Plugin::new()));
         mgr.register_south("modbus-tcp", Arc::new(ModbusTcpPlugin::new()));
         mgr.register_south("modbus-rtu", Arc::new(ModbusRtuPlugin::new()));
         // 北向（kafka 不进 builtin：需要 librdkafka C 库，仅 .so 部署）
         mgr.register_north("mqtt", Arc::new(MqttPlugin::new()));
-        mgr.register_north("http", Arc::new(HttpPlugin::new()));
-        mgr.register_north("influxdb", Arc::new(InfluxDbPlugin::new()));
-        mgr.register_north("tdengine", Arc::new(TdEnginePlugin::new()));
+        // mgr.register_north("http", Arc::new(HttpPlugin::new()));
+        // mgr.register_north("influxdb", Arc::new(InfluxDbPlugin::new()));
+        // mgr.register_north("tdengine", Arc::new(TdEnginePlugin::new()));
     }
 
     // 进程隔离模式下持有加载器：重启计数要从它这里读（见 /api/metrics）
