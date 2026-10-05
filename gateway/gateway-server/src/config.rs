@@ -58,6 +58,8 @@ pub struct Config {
     pub history_flush_ms: u64,
     /// 历史行数上限（超过后从最旧开始删除）
     pub history_max_rows: u64,
+    /// 会话绝对过期秒数（GATEWAY_SESSION_TTL_SECS）：自登录签发起算，不因活动续期；0 表示永不过期
+    pub session_ttl_secs: u64,
 }
 
 fn default_bind_str() -> String {
@@ -92,6 +94,11 @@ fn default_plugin_isolation() -> String {
 /// 持久化写合并窗口默认 300ms：足够合并一次页面上的连续操作，又不会让数据长时间只在内存里
 fn default_persist_debounce_ms() -> u64 {
     300
+}
+
+/// 会话绝对过期默认 12 小时：自登录起算，到点失效；0 = 永不过期（完全恢复旧行为）
+fn default_session_ttl_secs() -> u64 {
+    43_200
 }
 
 fn parse_origins(s: &str) -> Vec<String> {
@@ -130,6 +137,8 @@ struct ConfigFile {
     allowed_origins: Vec<String>,
     #[serde(default = "default_bind_str")]
     bind: String,
+    #[serde(default = "default_session_ttl_secs")]
+    session_ttl_secs: u64,
 }
 
 fn default_data_dir_str() -> String {
@@ -198,6 +207,7 @@ impl Default for Config {
             history_retention_hours: 72,
             history_flush_ms: 1000,
             history_max_rows: 5_000_000,
+            session_ttl_secs: default_session_ttl_secs(),
         }
     }
 }
@@ -237,6 +247,7 @@ impl Config {
             history_retention_hours: 72,
             history_flush_ms: 1000,
             history_max_rows: 5_000_000,
+            session_ttl_secs: cf.session_ttl_secs,
         })
     }
 
@@ -263,6 +274,7 @@ impl Config {
             backup_secret: String::new(),
             allowed_origins: Vec::new(),
             bind: default_bind_str(),
+            session_ttl_secs: default_session_ttl_secs(),
         };
         if let Ok(json) = serde_json::to_string_pretty(&default_cfg) {
             let _ = std::fs::write(&path, json);
@@ -387,6 +399,11 @@ impl Config {
                 c.persist_debounce_ms = ms;
             }
         }
+        if let Ok(s) = std::env::var("GATEWAY_SESSION_TTL_SECS") {
+            if let Ok(n) = s.parse::<u64>() {
+                c.session_ttl_secs = n;
+            }
+        }
         // 未提供备份密钥时随机生成：保证不再有「写死在仓库中的默认密钥」
         if c.backup_secret.is_empty() {
             c.backup_secret = random_secret();
@@ -441,5 +458,30 @@ impl Config {
     /// 离线授权文件路径（license.dat，置于数据目录）
     pub fn license_path(&self) -> PathBuf {
         self.data_dir.join(crate::license::LICENSE_FILENAME)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// from_file 逐字段硬拷贝：新字段必须显式带出（防漏配回归），缺省时回退默认 12 小时
+    #[test]
+    fn from_file_loads_session_ttl_and_defaults_apply() {
+        let dir = std::env::temp_dir().join(format!("gw-cfg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let explicit = dir.join("explicit.json");
+        std::fs::write(&explicit, r#"{"port": 3000, "session_ttl_secs": 3600}"#).unwrap();
+        let c = Config::from_file(&explicit).expect("parse explicit");
+        assert_eq!(c.session_ttl_secs, 3_600);
+
+        let implicit = dir.join("implicit.json");
+        std::fs::write(&implicit, r#"{"port": 3000}"#).unwrap();
+        let c = Config::from_file(&implicit).expect("parse implicit");
+        assert_eq!(c.session_ttl_secs, default_session_ttl_secs());
+        assert_eq!(c.session_ttl_secs, 43_200);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

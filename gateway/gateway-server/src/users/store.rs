@@ -1,4 +1,4 @@
-//! 用户存储：SQLite 表 users（每次操作在 spawn_blocking 中打开连接，保证 AppState: Send），密码 argon2，登录 token 内存缓存。
+//! 用户存储：SQLite 表 users（每次操作在 spawn_blocking 中打开连接，保证 AppState: Send），密码 argon2，登录 token 内存缓存（含绝对过期时刻）。
 
 use argon2::password_hash::{
     rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
@@ -88,6 +88,24 @@ pub struct User {
     pub updated_at: String,
 }
 
+/// 内存会话条目：角色 + 绝对过期时刻（自登录签发起算，不因活动续期）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Session {
+    pub role: UserRole,
+    /// 绝对过期时刻（UNIX 秒）；None = 永不过期（仅 ttl=0 时出现）
+    pub expires_at: Option<i64>,
+}
+
+impl Session {
+    /// 过期判定：`now == expires_at` 即视为过期；`expires_at = None` 永不过期
+    pub fn is_expired(&self, now: i64) -> bool {
+        match self.expires_at {
+            Some(e) => now >= e,
+            None => false,
+        }
+    }
+}
+
 /// 内部行
 struct UserRow {
     id: String,
@@ -127,11 +145,13 @@ fn verify_password(password: &str, hash: &str) -> Result<bool, String> {
         .is_ok())
 }
 
-/// 用户存储：仅保存 DB 路径与 token 缓存，DB 操作在 spawn_blocking 中执行，保证 Send。
+/// 用户存储：仅保存 DB 路径、会话 TTL 与 token 缓存，DB 操作在 spawn_blocking 中执行，保证 Send。
 /// 当 open 失败时使用 empty()，此时所有接口返回空/假/错误，不阻塞启动。
 pub struct UserStore {
     db_path: Option<Arc<std::path::PathBuf>>,
-    tokens: RwLock<std::collections::HashMap<String, UserRole>>,
+    tokens: RwLock<std::collections::HashMap<String, Session>>,
+    /// 会话绝对过期秒数；0 = 永不过期
+    session_ttl_secs: u64,
     /// 首次初始化时生成的随机管理员口令（供启动日志/文件输出，取走后清空）
     initial_password: std::sync::OnceLock<String>,
     /// 登录失败计数：username -> (失败次数, 最近失败时间戳秒)
@@ -144,6 +164,7 @@ impl UserStore {
         Self {
             db_path: None,
             tokens: RwLock::new(std::collections::HashMap::new()),
+            session_ttl_secs: 0,
             initial_password: std::sync::OnceLock::new(),
             failed_logins: RwLock::new(std::collections::HashMap::new()),
         }
@@ -179,12 +200,23 @@ impl UserStore {
 
     /// 打开或创建数据库并确保 users 表存在；若不存在 admin 用户则创建，**口令为随机生成**
     /// （写入数据目录 `.admin_initial_password`，权限 0600，首次登录后应删除并修改口令）。
-    pub fn open(db_path: &Path) -> Result<Self, String> {
+    ///
+    /// `session_ttl_secs` 为会话绝对过期秒数（自登录起算）；0 表示永不过期（完全恢复旧行为）。
+    pub fn open(db_path: &Path, session_ttl_secs: u64) -> Result<Self, String> {
         let path = db_path.to_path_buf();
         let (tokens, generated) = tokio::task::block_in_place(|| {
             let conn = rusqlite::Connection::open(&path).map_err(|e| e.to_string())?;
             conn.execute_batch(USERS_SCHEMA)
                 .map_err(|e| e.to_string())?;
+            // 增量迁移：users 表加 token_expiry 列（UNIX 秒；NULL = 未记录，如升级前签发的旧 token）。
+            // 已有列时 ALTER 必然失败——「执行失败即视为列已存在」，不做脆弱的字符串精确匹配。
+            if let Err(e) = conn.execute_batch("ALTER TABLE users ADD COLUMN token_expiry INTEGER;")
+            {
+                tracing::warn!(
+                    "users: token_expiry column migration skipped (already applied?): {}",
+                    e
+                );
+            }
             let mut stmt = conn
                 .prepare("SELECT 1 FROM users WHERE username = ?1 LIMIT 1")
                 .map_err(|e| e.to_string())?;
@@ -213,7 +245,7 @@ impl UserStore {
                 let hash = hash_password(&pwd)?;
                 let now = now_iso();
                 let n = conn.execute(
-                    "UPDATE users SET password_hash = ?1, token = NULL, updated_at = ?2 WHERE username = ?3",
+                    "UPDATE users SET password_hash = ?1, token = NULL, token_expiry = NULL, updated_at = ?2 WHERE username = ?3",
                     params![&hash, &now, DEFAULT_ADMIN_USERNAME],
                 ).map_err(|e| e.to_string())?;
                 if n > 0 {
@@ -222,15 +254,56 @@ impl UserStore {
                     generated = Some(pwd);
                 }
             }
-            let mut stmt = conn
-                .prepare("SELECT token, role FROM users WHERE token IS NOT NULL AND token != ''")
-                .map_err(|e| e.to_string())?;
-            let rows = stmt
-                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-                .map_err(|e| e.to_string())?;
             let mut map = std::collections::HashMap::new();
-            for (t, role) in rows.flatten() {
-                map.insert(t, UserRole::from_str(&role));
+            if session_ttl_secs == 0 {
+                // ttl=0：永不过期，与旧行为一致——全部灌内存，expires_at = None
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT token, role FROM users WHERE token IS NOT NULL AND token != ''",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                    .map_err(|e| e.to_string())?;
+                for (t, role) in rows.flatten() {
+                    map.insert(
+                        t,
+                        Session {
+                            role: UserRole::from_str(&role),
+                            expires_at: None,
+                        },
+                    );
+                }
+            } else {
+                // ttl>0：只加载尚未过期的会话；token_expiry 为 NULL 的存量旧 token（升级前签发）
+                // 一律视为已过期、不灌内存——升级后一次性强制重登录，安全优先。
+                // 内存 expires_at 直接沿用 DB 值，不是「再加一次 ttl」。
+                let now = now_secs();
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT token, role, token_expiry FROM users \
+                         WHERE token IS NOT NULL AND token != '' \
+                           AND token_expiry IS NOT NULL AND token_expiry > ?1",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let rows = stmt
+                    .query_map([now], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, i64>(2)?,
+                        ))
+                    })
+                    .map_err(|e| e.to_string())?;
+                for (t, role, expiry) in rows.flatten() {
+                    map.insert(
+                        t,
+                        Session {
+                            role: UserRole::from_str(&role),
+                            expires_at: Some(expiry),
+                        },
+                    );
+                }
             }
             Ok::<_, String>((map, generated))
         })?;
@@ -241,6 +314,7 @@ impl UserStore {
         Ok(Self {
             db_path: Some(Arc::new(path)),
             tokens: RwLock::new(tokens),
+            session_ttl_secs,
             initial_password,
             failed_logins: RwLock::new(std::collections::HashMap::new()),
         })
@@ -256,8 +330,12 @@ impl UserStore {
         }
     }
 
-    /// 登录：校验用户名密码，若成功则更新 token 并返回 (token, user)
-    pub async fn login(&self, username: &str, password: &str) -> Result<(String, User), String> {
+    /// 登录：校验用户名密码，若成功则更新 token 与绝对过期时刻并返回 (token, expires_at, user)
+    pub async fn login(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<(String, Option<i64>, User), String> {
         let path = match self.path() {
             Some(p) => p,
             None => {
@@ -287,6 +365,7 @@ impl UserStore {
             }
         }
         let password = password.to_string();
+        let self_ttl = self.session_ttl_secs;
         tracing::info!("login attempt: username={}", username);
         let user_key = username.clone();
         let result = tokio::task::spawn_blocking(move || {
@@ -332,29 +411,42 @@ impl UserStore {
             }
             let token = Uuid::new_v4().to_string();
             let now = now_iso();
+            // 绝对过期时刻自签发起算：ttl=0 表示永不过期（DB 落 NULL）
+            let expires_at = if self_ttl == 0 {
+                None
+            } else {
+                Some(now_secs() + self_ttl as i64)
+            };
             conn.execute(
-                "UPDATE users SET token = ?1, updated_at = ?2 WHERE id = ?3",
-                params![&token, &now, &row.id],
+                "UPDATE users SET token = ?1, token_expiry = ?2, updated_at = ?3 WHERE id = ?4",
+                params![&token, &expires_at, &now, &row.id],
             ).map_err(|e| e.to_string())?;
             let old_token = row.token.clone();
             let user = Self::row_to_user(&row);
             tracing::info!("login success: user '{}' (id={})", username, row.id);
-            Ok::<_, String>((token, user, old_token))
+            Ok::<_, String>((token, expires_at, user, old_token))
         })
         .await
         .map_err(|e| e.to_string())?;
         match result {
-            Ok((token, user, old_token)) => {
+            Ok((token, expires_at, user, old_token)) => {
                 let mut tokens = self.tokens.write().await;
                 if let Some(t) = old_token {
                     if !t.is_empty() {
                         tokens.remove(&t);
                     }
                 }
-                tokens.insert(token.clone(), user.role);
+                // 顶号：旧 token 已移除；新 token 按登录时刻签发绝对过期
+                tokens.insert(
+                    token.clone(),
+                    Session {
+                        role: user.role,
+                        expires_at,
+                    },
+                );
                 drop(tokens);
                 self.failed_logins.write().await.remove(&user_key);
-                Ok((token, user))
+                Ok((token, expires_at, user))
             }
             Err(e) => {
                 let now = now_secs();
@@ -384,7 +476,7 @@ impl UserStore {
         tokio::task::spawn_blocking(move || {
             let conn = rusqlite::Connection::open(path.as_path()).map_err(|e| e.to_string())?;
             conn.execute(
-                "UPDATE users SET token = NULL WHERE token = ?1",
+                "UPDATE users SET token = NULL, token_expiry = NULL WHERE token = ?1",
                 params![&token],
             )
             .map_err(|e| e.to_string())?;
@@ -395,12 +487,18 @@ impl UserStore {
         Ok(())
     }
 
-    /// 取 token 对应用户的角色，供授权（RBAC）判定使用
+    /// 取 token 对应用户的角色，供授权（RBAC）判定使用。
+    /// 过期判定收敛在此处：过期会话按未知 token 处理（认证中间件据此返回 401），
+    /// 过期条目不在此处删除（需要写锁；条目数 = 用户数，每用户单 token，由下次登录顶号时惰性清出）。
     pub fn role_of(&self, token: &str) -> Option<UserRole> {
-        self.tokens
-            .try_read()
-            .ok()
-            .and_then(|t| t.get(token).copied())
+        self.tokens.try_read().ok().and_then(|t| {
+            let s = t.get(token)?;
+            if s.is_expired(now_secs()) {
+                None
+            } else {
+                Some(s.role)
+            }
+        })
     }
 
     pub async fn list(&self) -> Result<Vec<User>, String> {
@@ -606,7 +704,7 @@ impl UserStore {
                     .ok()
                     .flatten();
                 let n = conn.execute(
-                    "UPDATE users SET password_hash = ?1, token = NULL, updated_at = ?2 WHERE id = ?3",
+                    "UPDATE users SET password_hash = ?1, token = NULL, token_expiry = NULL, updated_at = ?2 WHERE id = ?3",
                     params![&hash, &now, &id],
                 ).map_err(|e| e.to_string())?;
                 if n == 0 {
@@ -639,5 +737,212 @@ impl UserStore {
         })
         .await
         .map_err(|e| e.to_string())?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("gw-users-{}-{}", tag, Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // ---------- Session::is_expired 边界 ----------
+
+    #[test]
+    fn session_expiry_predicate_boundaries() {
+        let never = Session {
+            role: UserRole::Viewer,
+            expires_at: None,
+        };
+        assert!(!never.is_expired(0), "expires_at=None 永不过期");
+        assert!(!never.is_expired(i64::MAX));
+
+        let s = Session {
+            role: UserRole::Operator,
+            expires_at: Some(1_000),
+        };
+        assert!(!s.is_expired(999), "now < expires_at 未过期");
+        assert!(s.is_expired(1_000), "now == expires_at 视为过期");
+        assert!(s.is_expired(1_001));
+    }
+
+    // ---------- 登录签发：DB token_expiry 与内存 expires_at 一致 ----------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn login_issues_absolute_expiry_in_db_and_memory() {
+        let dir = tmp_dir("ttl-login");
+        let path = dir.join("data.db");
+        let store = UserStore::open(&path, 3_600).expect("open");
+        store
+            .create("alice", "pw-123456", UserRole::Viewer)
+            .await
+            .expect("create");
+
+        let before = now_secs();
+        let (token, expires_at, user) = store.login("alice", "pw-123456").await.expect("login");
+        let after = now_secs();
+        assert_eq!(user.username, "alice");
+        let exp = expires_at.expect("ttl>0 必须产生过期时刻");
+        assert!(
+            exp >= before + 3_600 && exp <= after + 3_600,
+            "expires_at 应自签发起算 3600s，实际 {}（now ∈ [{}, {}]）",
+            exp,
+            before,
+            after
+        );
+
+        // 内存条目与 DB 列一致
+        let mem = *store
+            .tokens
+            .read()
+            .await
+            .get(&token)
+            .expect("session cached");
+        assert_eq!(mem.role, UserRole::Viewer);
+        assert_eq!(mem.expires_at, Some(exp));
+        let db: Option<i64> = Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT token_expiry FROM users WHERE username = 'alice'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(db, Some(exp), "DB token_expiry 与内存 expires_at 一致");
+        assert_eq!(store.role_of(&token), Some(UserRole::Viewer));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn login_with_zero_ttl_never_expires() {
+        let dir = tmp_dir("ttl-zero");
+        let path = dir.join("data.db");
+        let store = UserStore::open(&path, 0).expect("open");
+        store
+            .create("bob", "pw-123456", UserRole::Operator)
+            .await
+            .expect("create");
+
+        let (token, expires_at, _) = store.login("bob", "pw-123456").await.expect("login");
+        assert_eq!(expires_at, None, "ttl=0 永不过期");
+        let db: Option<i64> = Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT token_expiry FROM users WHERE username = 'bob'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(db, None, "ttl=0 时 DB 落 NULL");
+        assert_eq!(store.role_of(&token), Some(UserRole::Operator));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------- 启动加载过滤：过期与 NULL（存量旧 token）不灌内存 ----------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn open_loads_only_unexpired_sessions() {
+        let dir = tmp_dir("ttl-load");
+        let path = dir.join("data.db");
+        let now = now_secs();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(USERS_SCHEMA).unwrap();
+            let _ = conn.execute_batch("ALTER TABLE users ADD COLUMN token_expiry INTEGER;");
+            for (name, token, expiry) in [
+                ("old", "tok-past", Some(now - 100)),
+                ("cur", "tok-future", Some(now + 3_600)),
+                ("legacy", "tok-null", None),
+            ] {
+                conn.execute(
+                    "INSERT INTO users (id, username, password_hash, role, token, created_at, updated_at, token_expiry) \
+                     VALUES (?1, ?2, 'x', 'viewer', ?3, '0', '0', ?4)",
+                    params![Uuid::new_v4().to_string(), name, token, expiry],
+                )
+                .unwrap();
+            }
+        }
+
+        // ttl>0：仅加载未过期会话；token_expiry 为 NULL 的存量旧 token 视为已过期不灌内存
+        //（open 未发现 admin 用户会创建默认 admin，随机口令写入临时目录，不影响断言）
+        let store = UserStore::open(&path, 3_600).expect("open");
+        assert_eq!(store.role_of("tok-future"), Some(UserRole::Viewer));
+        assert_eq!(store.role_of("tok-past"), None, "过期 token 不灌内存");
+        assert_eq!(
+            store.role_of("tok-null"),
+            None,
+            "token_expiry 为 NULL 的存量旧 token 视为已过期（安全优先）"
+        );
+        let mem = *store.tokens.read().await.get("tok-future").expect("loaded");
+        assert_eq!(
+            mem.expires_at,
+            Some(now + 3_600),
+            "内存沿用 DB 值，不再叠加 ttl"
+        );
+
+        // ttl=0：与旧行为一致，全部加载且永不过期
+        let store0 = UserStore::open(&path, 0).expect("open ttl=0");
+        assert_eq!(store0.role_of("tok-future"), Some(UserRole::Viewer));
+        assert_eq!(store0.role_of("tok-past"), Some(UserRole::Viewer));
+        assert_eq!(store0.role_of("tok-null"), Some(UserRole::Viewer));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------- 顶号 / 登出 / 改密 / 删除用户与过期共存（回归） ----------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn logout_password_change_relogin_and_delete_invalidate_sessions() {
+        let dir = tmp_dir("ttl-invalidate");
+        let path = dir.join("data.db");
+        let store = UserStore::open(&path, 3_600).expect("open");
+        let user = store
+            .create("bob", "pw-old-123", UserRole::Operator)
+            .await
+            .expect("create");
+
+        // 顶号：同用户新登录使旧 token 失效（过期条目由此惰性清出内存）
+        let (t1, e1, _) = store.login("bob", "pw-old-123").await.expect("login1");
+        assert!(e1.is_some(), "ttl>0 登录必须产生过期时刻");
+        let (t2, _, _) = store.login("bob", "pw-old-123").await.expect("login2");
+        assert_eq!(store.role_of(&t2), Some(UserRole::Operator));
+        assert_eq!(store.role_of(&t1), None, "顶号后旧 token 立即失效");
+
+        // 登出：内存 + DB（token 与 token_expiry 一并置空）
+        store.logout(&t2).await.expect("logout");
+        assert_eq!(store.role_of(&t2), None);
+        let (db_token, db_expiry): (Option<String>, Option<i64>) = Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT token, token_expiry FROM users WHERE username = 'bob'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(db_token, None);
+        assert_eq!(db_expiry, None);
+
+        // 改密：原有会话立即失效
+        let (t3, _, _) = store.login("bob", "pw-old-123").await.expect("login3");
+        store
+            .set_password(&user.id, "pw-new-456")
+            .await
+            .expect("set_password");
+        assert_eq!(store.role_of(&t3), None, "改密后旧会话立即失效");
+        let (t4, _, _) = store.login("bob", "pw-new-456").await.expect("login4");
+        assert_eq!(store.role_of(&t4), Some(UserRole::Operator));
+
+        // 删除用户：会话随之消失
+        store.delete(&user.id).await.expect("delete");
+        assert_eq!(store.role_of(&t4), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

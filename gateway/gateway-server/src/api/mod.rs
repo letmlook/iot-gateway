@@ -550,8 +550,9 @@ mod tests {
     async fn rbac_env() -> RbacEnv {
         let dir = std::env::temp_dir().join(format!("gw-rbac-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let store =
-            Arc::new(crate::users::UserStore::open(&dir.join("data.db")).expect("open user store"));
+        let store = Arc::new(
+            crate::users::UserStore::open(&dir.join("data.db"), 0).expect("open user store"),
+        );
         let mut cfg = crate::config::Config::default();
         cfg.disable_auth = false;
         cfg.token = None;
@@ -571,6 +572,53 @@ mod tests {
         let pw = "pw-for-test-123";
         env.store.create(user, pw, role).await.expect("create user");
         env.store.login(user, pw).await.expect("login").0
+    }
+
+    /// 带真实用户库 + 可配会话 TTL / 静态 token 的测试环境（用于会话过期验证）
+    async fn session_env(ttl_secs: u64, static_token: Option<&str>) -> RbacEnv {
+        let dir = std::env::temp_dir().join(format!("gw-sess-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(
+            crate::users::UserStore::open(&dir.join("data.db"), ttl_secs).expect("open user store"),
+        );
+        let mut cfg = crate::config::Config::default();
+        cfg.disable_auth = false;
+        cfg.token = static_token.map(|s| s.to_string());
+        cfg.static_dir = dir.clone();
+        let state = AppState::new(
+            Arc::new(Manager::new()),
+            cfg,
+            None,
+            crate::license::FeatureManager::without_license(),
+            store.clone(),
+            None,
+        );
+        RbacEnv { state, store, dir }
+    }
+
+    async fn post_json(st: &AppState, uri: &str, body: &str) -> (u16, String) {
+        let app = super::router(st.clone())
+            .with_state(st.clone())
+            .into_service();
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let res = ServiceExt::oneshot(app, req).await.unwrap();
+        let status = res.status().as_u16();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    fn unix_now() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
     }
 
     async fn status_of(env: &RbacEnv, method: &str, uri: &str, token: Option<&str>) -> u16 {
@@ -850,5 +898,101 @@ mod tests {
             validate_interval_ms(0).is_err(),
             "interval_ms=0 must be rejected"
         );
+    }
+
+    // ---------- 会话绝对过期（session-expiry） ----------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn login_response_contains_expires_at() {
+        let env = session_env(3_600, None).await;
+        env.store
+            .create(
+                "exp-user",
+                "pw-for-test-123",
+                crate::users::UserRole::Viewer,
+            )
+            .await
+            .expect("create user");
+        let (status, body) = post_json(
+            &env.state,
+            "/auth/login",
+            r#"{"username":"exp-user","password":"pw-for-test-123"}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "body: {}", body);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let exp = v["expires_at"].as_i64().expect("expires_at 必须是数值");
+        assert!(exp > unix_now(), "ttl=3600 时 expires_at 应在未来");
+        assert!(
+            v["token"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+            "响应体应包含非空 token"
+        );
+        let _ = std::fs::remove_dir_all(&env.dir);
+    }
+
+    #[tokio::test]
+    async fn legacy_login_returns_null_expires_at() {
+        // 无用户库 + 静态 token：遗留 admin 登录换发静态 token，永不过期
+        let st = state_with(false);
+        let (status, body) = post_json(
+            &st,
+            "/auth/login",
+            r#"{"username":"admin","password":"test-token"}"#,
+        )
+        .await;
+        assert_eq!(status, 200, "body: {}", body);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            v["expires_at"].is_null(),
+            "静态 token 永不过期，expires_at 应为 null"
+        );
+    }
+
+    /// 唯一带真实等待的用例（约 1.1s）：ttl=1s 会话过期后返回 401；
+    /// 静态 token 不受会话过期影响；重新登录恢复 200。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn expired_session_returns_401_but_static_token_and_relogin_survive() {
+        let env = session_env(1, Some("static-tok")).await;
+        env.store
+            .create(
+                "sess-user",
+                "pw-for-test-123",
+                crate::users::UserRole::Viewer,
+            )
+            .await
+            .expect("create user");
+        let (token, expires_at, _) = env
+            .store
+            .login("sess-user", "pw-for-test-123")
+            .await
+            .expect("login");
+        assert!(expires_at.is_some(), "ttl=1s 必须产生过期时刻");
+
+        // 未过期：正常访问
+        assert_eq!(status_of(&env, "GET", "/nodes", Some(&token)).await, 200);
+
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+
+        // 过期：按未知 token 处理 → 401（判定收敛在 UserStore::role_of）
+        assert_eq!(
+            status_of(&env, "GET", "/nodes", Some(&token)).await,
+            401,
+            "过期会话必须被拒绝"
+        );
+        // 静态 token 是机器级 API 密钥，不经过 Session，永不过期
+        assert_eq!(
+            status_of(&env, "GET", "/nodes", Some("static-tok")).await,
+            200,
+            "静态 token 不受会话过期影响"
+        );
+        // 重新登录恢复 200
+        let (t2, _, _) = env
+            .store
+            .login("sess-user", "pw-for-test-123")
+            .await
+            .expect("relogin");
+        assert_eq!(status_of(&env, "GET", "/nodes", Some(&t2)).await, 200);
+
+        let _ = std::fs::remove_dir_all(&env.dir);
     }
 }

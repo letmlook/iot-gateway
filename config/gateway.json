@@ -11,5 +11,6 @@
   "token": null,
   "backup_secret": "",
   "allowed_origins": [],
-  "bind": "0.0.0.0"
+  "bind": "0.0.0.0",
+  "session_ttl_secs": 43200
 }

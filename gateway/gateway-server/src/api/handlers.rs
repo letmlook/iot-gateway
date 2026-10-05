@@ -71,7 +71,9 @@ pub async fn login(
     tracing::info!("login request: username={:?}", body.username);
     if state.config.disable_auth {
         tracing::info!("login: auth disabled, returning null token");
-        return Ok(Json(serde_json::json!({ "token": null, "user": null })));
+        return Ok(Json(
+            serde_json::json!({ "token": null, "expires_at": null, "user": null }),
+        ));
     }
     let username = body.username.as_deref().unwrap_or("").trim().to_string();
     let password = body.password.as_deref().unwrap_or("").trim().to_string();
@@ -89,10 +91,11 @@ pub async fn login(
 
     if has_users {
         match state.user_store.login(&username, &password).await {
-            Ok((token, user)) => {
+            Ok((token, expires_at, user)) => {
                 tracing::info!("login success: user={}", user.username);
                 return Ok(Json(serde_json::json!({
                     "token": token,
+                    "expires_at": expires_at,
                     "user": {
                         "id": user.id,
                         "username": user.username,
@@ -116,8 +119,10 @@ pub async fn login(
     })?;
     if username == "admin" && password == token.as_str() {
         tracing::info!("login success via legacy token: admin");
+        // 遗留登录签发的是静态 token，永不过期（expires_at = null）
         Ok(Json(serde_json::json!({
             "token": token,
+            "expires_at": null,
             "user": { "id": "admin", "username": "admin", "role": "admin", "created_at": "", "updated_at": "" }
         })))
     } else {

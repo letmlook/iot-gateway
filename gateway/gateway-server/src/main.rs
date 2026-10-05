@@ -195,7 +195,7 @@ node credentials such as MQTT passwords will be stored in PLAINTEXT in data.db. 
         }
     };
 
-    let user_store = match UserStore::open(&db_path) {
+    let user_store = match UserStore::open(&db_path, config.session_ttl_secs) {
         Ok(s) => Arc::new(s),
         Err(e) => {
             tracing::warn!("user store open failed: {}, user management disabled", e);
