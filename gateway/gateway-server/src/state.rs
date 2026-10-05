@@ -5,6 +5,7 @@ use crate::license::FeatureManager;
 use crate::logging::NodeLogNameMap;
 use crate::users::UserStore;
 use gateway_core::proc_plugin::ProcessPluginLoader;
+use gateway_core::Db;
 use gateway_core::{persist_save_secret, Manager, PluginLoader};
 use std::sync::Arc;
 use tracing::warn;
@@ -19,6 +20,9 @@ pub struct AppState {
     pub user_store: Arc<UserStore>,
     /// 节点 ID -> 节点名称，用于节点日志文件名（按名称生成）
     pub node_log_names: Option<NodeLogNameMap>,
+    /// data.db 的进程内共享长连接（配置快照与 users 表共用）；
+    /// None = 测试环境或启动时 Db::open 失败的降级路径（退回按次开连接的自由函数）
+    pub db: Option<Arc<Db>>,
     /// 持久化脏标记：true 表示内存中已有尚未落盘的变更
     persist_dirty: Arc<std::sync::atomic::AtomicBool>,
     _loader: Option<Arc<PluginLoader>>,
@@ -34,6 +38,7 @@ impl AppState {
         feature_manager: FeatureManager,
         user_store: Arc<UserStore>,
         node_log_names: Option<NodeLogNameMap>,
+        db: Option<Arc<Db>>,
     ) -> Self {
         Self {
             manager,
@@ -41,6 +46,7 @@ impl AppState {
             feature_manager,
             user_store,
             node_log_names,
+            db,
             persist_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             _loader: loader.map(Arc::new),
             plugin_processes: None,
@@ -87,10 +93,30 @@ impl AppState {
         }
         let path = self.config.data_db();
         let snap = self.manager.build_snapshot().await;
-        let secret = self.config.master_secret.as_deref();
-        if let Err(e) = persist_save_secret(&path, &snap, secret).await {
+        let secret = self.config.master_secret.clone();
+        // 共享长连接可用时经 Db::save_snapshot（spawn_blocking 由调用方负责）；
+        // 否则退回按次开连接的兼容路径（测试环境 / Db::open 失败降级）。
+        let result = match &self.db {
+            Some(db) => {
+                let db = Arc::clone(db);
+                tokio::task::spawn_blocking(move || db.save_snapshot(secret.as_deref(), &snap))
+                    .await
+                    .map_err(|e| gateway_core::PersistError::Io(std::io::Error::other(e)))
+                    .and_then(|r| r)
+            }
+            None => persist_save_secret(&path, &snap, secret.as_deref()).await,
+        };
+        if let Err(e) = result {
             self.persist_dirty.store(true, Ordering::Relaxed);
             warn!(path = %path.display(), "persist failed: {}", e);
+        }
+    }
+
+    /// 优雅退出时调用：在共享连接上执行 `PRAGMA optimize`（幂等、廉价，维护统计信息）。
+    pub async fn optimize_db(&self) {
+        if let Some(db) = self.db.as_ref() {
+            let db = Arc::clone(db);
+            let _ = tokio::task::spawn_blocking(move || db.optimize()).await;
         }
     }
 }

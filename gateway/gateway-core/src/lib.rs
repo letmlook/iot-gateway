@@ -24,7 +24,8 @@ pub use persist::{
     apply_to_store, build_snapshot, has_plaintext_secrets as persist_has_plaintext_secrets,
     load as persist_load, load_json as persist_load_json, load_secret as persist_load_secret,
     save as persist_save, save_secret as persist_save_secret,
-    save_with_backup as persist_save_with_backup, PersistError, Snapshot, SNAPSHOT_VERSION,
+    save_with_backup as persist_save_with_backup, Db, IntegrityMode, PersistError, Snapshot,
+    SNAPSHOT_VERSION,
 };
 pub use rules::{
     engine as rule_engine, CompareOp, Firing, Rule, RuleAction, RuleCondition, RuleEngine,

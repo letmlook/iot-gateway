@@ -1,9 +1,11 @@
-//! 用户存储：SQLite 表 users（每次操作在 spawn_blocking 中打开连接，保证 AppState: Send），密码 argon2，登录 token 内存缓存（含绝对过期时刻）。
+//! 用户存储：SQLite 表 users（与配置快照共用 data.db 的进程内单长连接，操作在 spawn_blocking 中经
+//! `persist::Db::with` 串行执行，保证 AppState: Send），密码 argon2，登录 token 内存缓存（含绝对过期时刻）。
 
 use argon2::password_hash::{
     rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
 };
 use argon2::{Algorithm, Argon2, Params, Version};
+use gateway_core::{Db, PersistError};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -145,10 +147,18 @@ fn verify_password(password: &str, hash: &str) -> Result<bool, String> {
         .is_ok())
 }
 
-/// 用户存储：仅保存 DB 路径、会话 TTL 与 token 缓存，DB 操作在 spawn_blocking 中执行，保证 Send。
-/// 当 open 失败时使用 empty()，此时所有接口返回空/假/错误，不阻塞启动。
+/// users 层错误统一为 String：业务错误（Validation）保留原文，其余透传 Display
+fn err_string(e: PersistError) -> String {
+    match e {
+        PersistError::Validation(m) => m,
+        other => other.to_string(),
+    }
+}
+
+/// 用户存储：持有与配置快照共享的 data.db 长连接（persist::Db），DB 操作在 spawn_blocking 中
+/// 经 `Db::with` 串行执行，保证 Send。当 open 失败时使用 empty()，此时所有接口返回空/假/错误，不阻塞启动。
 pub struct UserStore {
-    db_path: Option<Arc<std::path::PathBuf>>,
+    db: Option<Arc<Db>>,
     tokens: RwLock<std::collections::HashMap<String, Session>>,
     /// 会话绝对过期秒数；0 = 永不过期
     session_ttl_secs: u64,
@@ -162,7 +172,7 @@ impl UserStore {
     /// 禁用态：无 DB，用于 open 失败时保证服务仍能启动。
     pub fn empty() -> Self {
         Self {
-            db_path: None,
+            db: None,
             tokens: RwLock::new(std::collections::HashMap::new()),
             session_ttl_secs: 0,
             initial_password: std::sync::OnceLock::new(),
@@ -175,8 +185,8 @@ impl UserStore {
         self.initial_password.get().cloned()
     }
 
-    fn path(&self) -> Option<Arc<std::path::PathBuf>> {
-        self.db_path.clone()
+    fn db(&self) -> Option<Arc<Db>> {
+        self.db.clone()
     }
 
     /// 把随机初始口令写入数据目录下的 `.admin_initial_password`（0600），失败仅告警不影响启动。
@@ -198,121 +208,114 @@ impl UserStore {
         }
     }
 
-    /// 打开或创建数据库并确保 users 表存在；若不存在 admin 用户则创建，**口令为随机生成**
+    /// 挂接到与配置快照共享的 data.db 长连接；若不存在 admin 用户则创建，**口令为随机生成**
     /// （写入数据目录 `.admin_initial_password`，权限 0600，首次登录后应删除并修改口令）。
     ///
     /// `session_ttl_secs` 为会话绝对过期秒数（自登录起算）；0 表示永不过期（完全恢复旧行为）。
-    pub fn open(db_path: &Path, session_ttl_secs: u64) -> Result<Self, String> {
-        let path = db_path.to_path_buf();
+    pub fn open(db: Arc<Db>, session_ttl_secs: u64) -> Result<Self, String> {
+        let db_path = db.path().to_path_buf();
         let (tokens, generated) = tokio::task::block_in_place(|| {
-            let conn = rusqlite::Connection::open(&path).map_err(|e| e.to_string())?;
-            conn.execute_batch(USERS_SCHEMA)
-                .map_err(|e| e.to_string())?;
-            // 增量迁移：users 表加 token_expiry 列（UNIX 秒；NULL = 未记录，如升级前签发的旧 token）。
-            // 已有列时 ALTER 必然失败——「执行失败即视为列已存在」，不做脆弱的字符串精确匹配。
-            if let Err(e) = conn.execute_batch("ALTER TABLE users ADD COLUMN token_expiry INTEGER;")
-            {
-                tracing::warn!(
-                    "users: token_expiry column migration skipped (already applied?): {}",
-                    e
-                );
-            }
-            let mut stmt = conn
-                .prepare("SELECT 1 FROM users WHERE username = ?1 LIMIT 1")
-                .map_err(|e| e.to_string())?;
-            let has_admin = stmt
-                .exists([DEFAULT_ADMIN_USERNAME])
-                .map_err(|e| e.to_string())?;
-            drop(stmt);
-            let mut generated: Option<String> = None;
-            if !has_admin {
-                let pwd = generate_random_password();
-                let id = Uuid::new_v4().to_string();
-                let hash = hash_password(&pwd)?;
-                let now = now_iso();
-                conn.execute(
-                    "INSERT INTO users (id, username, password_hash, role, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![&id, DEFAULT_ADMIN_USERNAME, &hash, "admin", &now, &now],
-                ).map_err(|e| e.to_string())?;
-                Self::write_initial_password_file(&path, &pwd);
-                tracing::info!("default admin created with a RANDOM password (see .admin_initial_password in data dir); change it after first login");
-                generated = Some(pwd);
-            } else if std::env::var("GATEWAY_RESET_ADMIN_PASSWORD")
-                .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
-                .unwrap_or(false)
-            {
-                let pwd = generate_random_password();
-                let hash = hash_password(&pwd)?;
-                let now = now_iso();
-                let n = conn.execute(
-                    "UPDATE users SET password_hash = ?1, token = NULL, token_expiry = NULL, updated_at = ?2 WHERE username = ?3",
-                    params![&hash, &now, DEFAULT_ADMIN_USERNAME],
-                ).map_err(|e| e.to_string())?;
-                if n > 0 {
-                    Self::write_initial_password_file(&path, &pwd);
-                    tracing::info!("admin password reset to a RANDOM value (unset GATEWAY_RESET_ADMIN_PASSWORD after login)");
-                    generated = Some(pwd);
-                }
-            }
-            let mut map = std::collections::HashMap::new();
-            if session_ttl_secs == 0 {
-                // ttl=0：永不过期，与旧行为一致——全部灌内存，expires_at = None
-                let mut stmt = conn
-                    .prepare(
-                        "SELECT token, role FROM users WHERE token IS NOT NULL AND token != ''",
-                    )
-                    .map_err(|e| e.to_string())?;
-                let rows = stmt
-                    .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-                    .map_err(|e| e.to_string())?;
-                for (t, role) in rows.flatten() {
-                    map.insert(
-                        t,
-                        Session {
-                            role: UserRole::from_str(&role),
-                            expires_at: None,
-                        },
+            db.with(|conn| {
+                conn.execute_batch(USERS_SCHEMA)?;
+                // 增量迁移：users 表加 token_expiry 列（UNIX 秒；NULL = 未记录，如升级前签发的旧 token）。
+                // 已有列时 ALTER 必然失败——「执行失败即视为列已存在」，不做脆弱的字符串精确匹配。
+                if let Err(e) =
+                    conn.execute_batch("ALTER TABLE users ADD COLUMN token_expiry INTEGER;")
+                {
+                    tracing::warn!(
+                        "users: token_expiry column migration skipped (already applied?): {}",
+                        e
                     );
                 }
-            } else {
-                // ttl>0：只加载尚未过期的会话；token_expiry 为 NULL 的存量旧 token（升级前签发）
-                // 一律视为已过期、不灌内存——升级后一次性强制重登录，安全优先。
-                // 内存 expires_at 直接沿用 DB 值，不是「再加一次 ttl」。
-                let now = now_secs();
-                let mut stmt = conn
-                    .prepare(
+                let mut stmt =
+                    conn.prepare("SELECT 1 FROM users WHERE username = ?1 LIMIT 1")?;
+                let has_admin = stmt.exists([DEFAULT_ADMIN_USERNAME])?;
+                drop(stmt);
+                let mut generated: Option<String> = None;
+                if !has_admin {
+                    let pwd = generate_random_password();
+                    let id = Uuid::new_v4().to_string();
+                    let hash =
+                        hash_password(&pwd).map_err(PersistError::Validation)?;
+                    let now = now_iso();
+                    conn.execute(
+                        "INSERT INTO users (id, username, password_hash, role, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![&id, DEFAULT_ADMIN_USERNAME, &hash, "admin", &now, &now],
+                    )?;
+                    Self::write_initial_password_file(&db_path, &pwd);
+                    tracing::info!("default admin created with a RANDOM password (see .admin_initial_password in data dir); change it after first login");
+                    generated = Some(pwd);
+                } else if std::env::var("GATEWAY_RESET_ADMIN_PASSWORD")
+                    .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false)
+                {
+                    let pwd = generate_random_password();
+                    let hash =
+                        hash_password(&pwd).map_err(PersistError::Validation)?;
+                    let now = now_iso();
+                    let n = conn.execute(
+                        "UPDATE users SET password_hash = ?1, token = NULL, token_expiry = NULL, updated_at = ?2 WHERE username = ?3",
+                        params![&hash, &now, DEFAULT_ADMIN_USERNAME],
+                    )?;
+                    if n > 0 {
+                        Self::write_initial_password_file(&db_path, &pwd);
+                        tracing::info!("admin password reset to a RANDOM value (unset GATEWAY_RESET_ADMIN_PASSWORD after login)");
+                        generated = Some(pwd);
+                    }
+                }
+                let mut map = std::collections::HashMap::new();
+                if session_ttl_secs == 0 {
+                    // ttl=0：永不过期，与旧行为一致——全部灌内存，expires_at = None
+                    let mut stmt = conn
+                        .prepare(
+                            "SELECT token, role FROM users WHERE token IS NOT NULL AND token != ''",
+                        )?;
+                    let rows = stmt.query_map([], |r| -> rusqlite::Result<(String, String)> {
+                        Ok((r.get(0)?, r.get(1)?))
+                    })?;
+                    for (t, role) in rows.flatten() {
+                        map.insert(
+                            t,
+                            Session {
+                                role: UserRole::from_str(&role),
+                                expires_at: None,
+                            },
+                        );
+                    }
+                } else {
+                    // ttl>0：只加载尚未过期的会话；token_expiry 为 NULL 的存量旧 token（升级前签发）
+                    // 一律视为已过期、不灌内存——升级后一次性强制重登录，安全优先。
+                    // 内存 expires_at 直接沿用 DB 值，不是「再加一次 ttl」。
+                    let now = now_secs();
+                    let mut stmt = conn.prepare(
                         "SELECT token, role, token_expiry FROM users \
                          WHERE token IS NOT NULL AND token != '' \
                            AND token_expiry IS NOT NULL AND token_expiry > ?1",
-                    )
-                    .map_err(|e| e.to_string())?;
-                let rows = stmt
-                    .query_map([now], |r| {
-                        Ok((
-                            r.get::<_, String>(0)?,
-                            r.get::<_, String>(1)?,
-                            r.get::<_, i64>(2)?,
-                        ))
-                    })
-                    .map_err(|e| e.to_string())?;
-                for (t, role, expiry) in rows.flatten() {
-                    map.insert(
-                        t,
-                        Session {
-                            role: UserRole::from_str(&role),
-                            expires_at: Some(expiry),
-                        },
-                    );
+                    )?;
+                    let rows = stmt
+                        .query_map([now], |r| -> rusqlite::Result<(String, String, i64)> {
+                            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                        })?;
+                    for (t, role, expiry) in rows.flatten() {
+                        map.insert(
+                            t,
+                            Session {
+                                role: UserRole::from_str(&role),
+                                expires_at: Some(expiry),
+                            },
+                        );
+                    }
                 }
-            }
-            Ok::<_, String>((map, generated))
+                Ok((map, generated))
+            })
+            .map_err(err_string)
         })?;
         let initial_password = std::sync::OnceLock::new();
         if let Some(p) = generated {
             let _ = initial_password.set(p);
         }
         Ok(Self {
-            db_path: Some(Arc::new(path)),
+            db: Some(db),
             tokens: RwLock::new(tokens),
             session_ttl_secs,
             initial_password,
@@ -336,8 +339,8 @@ impl UserStore {
         username: &str,
         password: &str,
     ) -> Result<(String, Option<i64>, User), String> {
-        let path = match self.path() {
-            Some(p) => p,
+        let db = match self.db() {
+            Some(d) => d,
             None => {
                 tracing::warn!("login failed: user management disabled (no db path)");
                 return Err("user management disabled".into());
@@ -369,62 +372,66 @@ impl UserStore {
         tracing::info!("login attempt: username={}", username);
         let user_key = username.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let conn = rusqlite::Connection::open(path.as_path()).map_err(|e| {
-                tracing::error!("login: db open failed: {}", e);
-                e.to_string()
-            })?;
-            let mut stmt = conn.prepare(
-                "SELECT id, username, password_hash, role, token, created_at, updated_at FROM users WHERE username = ?1",
-            ).map_err(|e| {
-                tracing::error!("login: prepare failed: {}", e);
-                e.to_string()
-            })?;
-            let row = stmt.query_row([username.as_str()], |r| {
-                Ok(UserRow {
-                    id: r.get(0)?,
-                    username: r.get(1)?,
-                    password_hash: r.get(2)?,
-                    role: r.get(3)?,
-                    token: r.get(4)?,
-                    created_at: r.get(5)?,
-                    updated_at: r.get(6)?,
-                })
-            });
-            let row: UserRow = match row {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!("login failed: user '{}' not found: {}", username, e);
-                    return Err("invalid username or password".into());
+            db.with(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, username, password_hash, role, token, created_at, updated_at FROM users WHERE username = ?1",
+                )?;
+                let row = stmt.query_row([username.as_str()], |r| {
+                    Ok(UserRow {
+                        id: r.get(0)?,
+                        username: r.get(1)?,
+                        password_hash: r.get(2)?,
+                        role: r.get(3)?,
+                        token: r.get(4)?,
+                        created_at: r.get(5)?,
+                        updated_at: r.get(6)?,
+                    })
+                });
+                let row: UserRow = match row {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!("login failed: user '{}' not found: {}", username, e);
+                        return Err(PersistError::Validation(
+                            "invalid username or password".into(),
+                        ));
+                    }
+                };
+                tracing::info!("login: found user id={}, verifying password", row.id);
+                let ok = match verify_password(&password, &row.password_hash) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!(
+                            "login: password verify error for user '{}': {}",
+                            username,
+                            e
+                        );
+                        return Err(PersistError::Validation(format!("verify: {}", e)));
+                    }
+                };
+                if !ok {
+                    tracing::warn!("login failed: wrong password for user '{}'", username);
+                    return Err(PersistError::Validation(
+                        "invalid username or password".into(),
+                    ));
                 }
-            };
-            tracing::info!("login: found user id={}, verifying password", row.id);
-            let ok = match verify_password(&password, &row.password_hash) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::error!("login: password verify error for user '{}': {}", username, e);
-                    return Err(format!("verify: {}", e));
-                }
-            };
-            if !ok {
-                tracing::warn!("login failed: wrong password for user '{}'", username);
-                return Err("invalid username or password".into());
-            }
-            let token = Uuid::new_v4().to_string();
-            let now = now_iso();
-            // 绝对过期时刻自签发起算：ttl=0 表示永不过期（DB 落 NULL）
-            let expires_at = if self_ttl == 0 {
-                None
-            } else {
-                Some(now_secs() + self_ttl as i64)
-            };
-            conn.execute(
-                "UPDATE users SET token = ?1, token_expiry = ?2, updated_at = ?3 WHERE id = ?4",
-                params![&token, &expires_at, &now, &row.id],
-            ).map_err(|e| e.to_string())?;
-            let old_token = row.token.clone();
-            let user = Self::row_to_user(&row);
-            tracing::info!("login success: user '{}' (id={})", username, row.id);
-            Ok::<_, String>((token, expires_at, user, old_token))
+                let token = Uuid::new_v4().to_string();
+                let now = now_iso();
+                // 绝对过期时刻自签发起算：ttl=0 表示永不过期（DB 落 NULL）
+                let expires_at = if self_ttl == 0 {
+                    None
+                } else {
+                    Some(now_secs() + self_ttl as i64)
+                };
+                conn.execute(
+                    "UPDATE users SET token = ?1, token_expiry = ?2, updated_at = ?3 WHERE id = ?4",
+                    params![&token, &expires_at, &now, &row.id],
+                )?;
+                let old_token = row.token.clone();
+                let user = Self::row_to_user(&row);
+                tracing::info!("login success: user '{}' (id={})", username, row.id);
+                Ok((token, expires_at, user, old_token))
+            })
+            .map_err(err_string)
         })
         .await
         .map_err(|e| e.to_string())?;
@@ -468,19 +475,20 @@ impl UserStore {
     /// 登出：使该 token 立即失效（清空 DB 中的 token 并移出内存缓存）
     pub async fn logout(&self, token: &str) -> Result<(), String> {
         self.tokens.write().await.remove(token);
-        let path = match self.path() {
-            Some(p) => p,
+        let db = match self.db() {
+            Some(d) => d,
             None => return Ok(()),
         };
         let token = token.to_string();
         tokio::task::spawn_blocking(move || {
-            let conn = rusqlite::Connection::open(path.as_path()).map_err(|e| e.to_string())?;
-            conn.execute(
-                "UPDATE users SET token = NULL, token_expiry = NULL WHERE token = ?1",
-                params![&token],
-            )
-            .map_err(|e| e.to_string())?;
-            Ok::<_, String>(())
+            db.with(|conn| {
+                conn.execute(
+                    "UPDATE users SET token = NULL, token_expiry = NULL WHERE token = ?1",
+                    params![&token],
+                )?;
+                Ok(())
+            })
+            .map_err(err_string)
         })
         .await
         .map_err(|e| e.to_string())??;
@@ -502,63 +510,67 @@ impl UserStore {
     }
 
     pub async fn list(&self) -> Result<Vec<User>, String> {
-        let path = match self.path() {
-            Some(p) => p,
+        let db = match self.db() {
+            Some(d) => d,
             None => return Ok(Vec::new()),
         };
         tokio::task::spawn_blocking(move || {
-            let conn = rusqlite::Connection::open(path.as_path()).map_err(|e| e.to_string())?;
-            let mut stmt = conn.prepare(
-                "SELECT id, username, password_hash, role, token, created_at, updated_at FROM users ORDER BY created_at",
-            ).map_err(|e| e.to_string())?;
-            let rows = stmt.query_map([], |r| {
-                Ok(UserRow {
-                    id: r.get(0)?,
-                    username: r.get(1)?,
-                    password_hash: r.get(2)?,
-                    role: r.get(3)?,
-                    token: r.get(4)?,
-                    created_at: r.get(5)?,
-                    updated_at: r.get(6)?,
-                })
-            }).map_err(|e| e.to_string())?;
-            let mut list = Vec::new();
-            for row in rows {
-                list.push(Self::row_to_user(&row.map_err(|e| e.to_string())?));
-            }
-            Ok(list)
+            db.with(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, username, password_hash, role, token, created_at, updated_at FROM users ORDER BY created_at",
+                )?;
+                let rows = stmt.query_map([], |r| {
+                    Ok(UserRow {
+                        id: r.get(0)?,
+                        username: r.get(1)?,
+                        password_hash: r.get(2)?,
+                        role: r.get(3)?,
+                        token: r.get(4)?,
+                        created_at: r.get(5)?,
+                        updated_at: r.get(6)?,
+                    })
+                })?;
+                let mut list = Vec::new();
+                for row in rows {
+                    list.push(Self::row_to_user(&row?));
+                }
+                Ok(list)
+            })
+            .map_err(err_string)
         })
         .await
         .map_err(|e| e.to_string())?
     }
 
     pub async fn get(&self, id: &str) -> Result<Option<User>, String> {
-        let path = match self.path() {
-            Some(p) => p,
+        let db = match self.db() {
+            Some(d) => d,
             None => return Ok(None),
         };
         let id = id.to_string();
         tokio::task::spawn_blocking(move || {
-            let conn = rusqlite::Connection::open(path.as_path()).map_err(|e| e.to_string())?;
-            let mut stmt = conn.prepare(
-                "SELECT id, username, password_hash, role, token, created_at, updated_at FROM users WHERE id = ?1",
-            ).map_err(|e| e.to_string())?;
-            let row = stmt.query_row([id.as_str()], |r| {
-                Ok(UserRow {
-                    id: r.get(0)?,
-                    username: r.get(1)?,
-                    password_hash: r.get(2)?,
-                    role: r.get(3)?,
-                    token: r.get(4)?,
-                    created_at: r.get(5)?,
-                    updated_at: r.get(6)?,
-                })
-            });
-            match row {
-                Ok(r) => Ok(Some(Self::row_to_user(&r))),
-                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                Err(e) => Err(e.to_string()),
-            }
+            db.with(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, username, password_hash, role, token, created_at, updated_at FROM users WHERE id = ?1",
+                )?;
+                let row = stmt.query_row([id.as_str()], |r| {
+                    Ok(UserRow {
+                        id: r.get(0)?,
+                        username: r.get(1)?,
+                        password_hash: r.get(2)?,
+                        role: r.get(3)?,
+                        token: r.get(4)?,
+                        created_at: r.get(5)?,
+                        updated_at: r.get(6)?,
+                    })
+                });
+                match row {
+                    Ok(r) => Ok(Some(Self::row_to_user(&r))),
+                    Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                    Err(e) => Err(PersistError::from(e)),
+                }
+            })
+            .map_err(err_string)
         })
         .await
         .map_err(|e| e.to_string())?
@@ -570,8 +582,8 @@ impl UserStore {
         password: &str,
         role: UserRole,
     ) -> Result<User, String> {
-        let path = match self.path() {
-            Some(p) => p,
+        let db = match self.db() {
+            Some(d) => d,
             None => return Err("user management disabled".into()),
         };
         let username = username.trim().to_string();
@@ -584,15 +596,17 @@ impl UserStore {
         let password = password.to_string();
         let role_str = role.as_str().to_string();
         let id = tokio::task::spawn_blocking(move || {
-            let conn = rusqlite::Connection::open(path.as_path()).map_err(|e| e.to_string())?;
-            let id = Uuid::new_v4().to_string();
-            let hash = hash_password(&password)?;
-            let now = now_iso();
-            conn.execute(
-                "INSERT INTO users (id, username, password_hash, role, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![&id, &username, &hash, &role_str, &now, &now],
-            ).map_err(|e| e.to_string())?;
-            Ok::<_, String>(id)
+            db.with(move |conn| {
+                let id = Uuid::new_v4().to_string();
+                let hash = hash_password(&password).map_err(PersistError::Validation)?;
+                let now = now_iso();
+                conn.execute(
+                    "INSERT INTO users (id, username, password_hash, role, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![&id, &username, &hash, &role_str, &now, &now],
+                )?;
+                Ok(id)
+            })
+            .map_err(err_string)
         })
         .await
         .map_err(|e| e.to_string())??;
@@ -607,8 +621,8 @@ impl UserStore {
         username: Option<&str>,
         role: Option<UserRole>,
     ) -> Result<User, String> {
-        let path = match self.path() {
-            Some(p) => p,
+        let db = match self.db() {
+            Some(d) => d,
             None => return Err("user management disabled".into()),
         };
         let id = id.to_string();
@@ -618,29 +632,33 @@ impl UserStore {
             .filter(|s| !s.is_empty());
         let role_str = role.map(|r| r.as_str().to_string());
         tokio::task::spawn_blocking(move || {
-            let conn = rusqlite::Connection::open(path.as_path()).map_err(|e| e.to_string())?;
-            let mut stmt = conn.prepare(
-                "SELECT id, username, password_hash, role, token, created_at, updated_at FROM users WHERE id = ?1",
-            ).map_err(|e| e.to_string())?;
-            let current: UserRow = stmt.query_row([id_clone.as_str()], |r| {
-                Ok(UserRow {
-                    id: r.get(0)?,
-                    username: r.get(1)?,
-                    password_hash: r.get(2)?,
-                    role: r.get(3)?,
-                    token: r.get(4)?,
-                    created_at: r.get(5)?,
-                    updated_at: r.get(6)?,
-                })
-            }).map_err(|_| "user not found".to_string())?;
-            let new_username = username.as_deref().unwrap_or(current.username.as_str());
-            let new_role = role_str.as_deref().unwrap_or(current.role.as_str());
-            let now = now_iso();
-            conn.execute(
-                "UPDATE users SET username = ?1, role = ?2, updated_at = ?3 WHERE id = ?4",
-                params![new_username, new_role, &now, &id_clone],
-            ).map_err(|e| e.to_string())?;
-            Ok::<_, String>(())
+            db.with(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, username, password_hash, role, token, created_at, updated_at FROM users WHERE id = ?1",
+                )?;
+                let current: UserRow = stmt.query_row([id_clone.as_str()], |r| {
+                    Ok(UserRow {
+                        id: r.get(0)?,
+                        username: r.get(1)?,
+                        password_hash: r.get(2)?,
+                        role: r.get(3)?,
+                        token: r.get(4)?,
+                        created_at: r.get(5)?,
+                        updated_at: r.get(6)?,
+                    })
+                }).map_err(|_| {
+                    PersistError::Validation("user not found".into())
+                })?;
+                let new_username = username.as_deref().unwrap_or(current.username.as_str());
+                let new_role = role_str.as_deref().unwrap_or(current.role.as_str());
+                let now = now_iso();
+                conn.execute(
+                    "UPDATE users SET username = ?1, role = ?2, updated_at = ?3 WHERE id = ?4",
+                    params![new_username, new_role, &now, &id_clone],
+                )?;
+                Ok(())
+            })
+            .map_err(err_string)
         })
         .await
         .map_err(|e| e.to_string())??;
@@ -650,15 +668,13 @@ impl UserStore {
     }
 
     pub async fn delete(&self, id: &str) -> Result<bool, String> {
-        let path = match self.path() {
-            Some(p) => p,
+        let db = match self.db() {
+            Some(d) => d,
             None => return Ok(false),
         };
         let id = id.to_string();
-        let (old_token, deleted) = tokio::task::spawn_blocking({
-            let path = Arc::clone(&path);
-            move || {
-                let conn = rusqlite::Connection::open(path.as_path()).map_err(|e| e.to_string())?;
+        let (old_token, deleted) = tokio::task::spawn_blocking(move || {
+            db.with(move |conn| {
                 let old_token: Option<String> = conn
                     .query_row(
                         "SELECT token FROM users WHERE id = ?1",
@@ -666,11 +682,10 @@ impl UserStore {
                         |r| r.get(0),
                     )
                     .ok();
-                let n = conn
-                    .execute("DELETE FROM users WHERE id = ?1", [id.as_str()])
-                    .map_err(|e| e.to_string())?;
-                Ok::<_, String>((old_token, n > 0))
-            }
+                let n = conn.execute("DELETE FROM users WHERE id = ?1", [id.as_str()])?;
+                Ok((old_token, n > 0))
+            })
+            .map_err(err_string)
         })
         .await
         .map_err(|e| e.to_string())??;
@@ -683,8 +698,8 @@ impl UserStore {
     }
 
     pub async fn set_password(&self, id: &str, new_password: &str) -> Result<(), String> {
-        let path = match self.path() {
-            Some(p) => p,
+        let db = match self.db() {
+            Some(d) => d,
             None => return Err("user management disabled".into()),
         };
         if new_password.is_empty() {
@@ -694,24 +709,24 @@ impl UserStore {
         let hash = hash_password(new_password)?;
         let now = now_iso();
         // 改密后原有会话必须立即失效：清空该用户的 token
-        let old_token = tokio::task::spawn_blocking({
-            let path = Arc::clone(&path);
-            let id = id.clone();
-            move || {
-                let conn = rusqlite::Connection::open(path.as_path()).map_err(|e| e.to_string())?;
+        let old_token = tokio::task::spawn_blocking(move || {
+            db.with(move |conn| {
                 let old: Option<String> = conn
-                    .query_row("SELECT token FROM users WHERE id = ?1", [id.as_str()], |r| r.get(0))
+                    .query_row("SELECT token FROM users WHERE id = ?1", [id.as_str()], |r| {
+                        r.get(0)
+                    })
                     .ok()
                     .flatten();
                 let n = conn.execute(
                     "UPDATE users SET password_hash = ?1, token = NULL, token_expiry = NULL, updated_at = ?2 WHERE id = ?3",
                     params![&hash, &now, &id],
-                ).map_err(|e| e.to_string())?;
+                )?;
                 if n == 0 {
-                    return Err::<Option<String>, String>("user not found".into());
+                    return Err(PersistError::Validation("user not found".into()));
                 }
                 Ok(old)
-            }
+            })
+            .map_err(err_string)
         })
         .await
         .map_err(|e| e.to_string())??;
@@ -724,16 +739,16 @@ impl UserStore {
     }
 
     pub async fn has_any_user(&self) -> Result<bool, String> {
-        let path = match self.path() {
-            Some(p) => p,
+        let db = match self.db() {
+            Some(d) => d,
             None => return Ok(false),
         };
         tokio::task::spawn_blocking(move || {
-            let conn = rusqlite::Connection::open(path.as_path()).map_err(|e| e.to_string())?;
-            let n: i64 = conn
-                .query_row("SELECT COUNT(1) FROM users", [], |r| r.get(0))
-                .map_err(|e| e.to_string())?;
-            Ok(n > 0)
+            db.with(|conn| {
+                let n: i64 = conn.query_row("SELECT COUNT(1) FROM users", [], |r| r.get(0))?;
+                Ok(n > 0)
+            })
+            .map_err(err_string)
         })
         .await
         .map_err(|e| e.to_string())?
@@ -743,12 +758,18 @@ impl UserStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gateway_core::IntegrityMode;
     use rusqlite::Connection;
 
     fn tmp_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("gw-users-{}-{}", tag, Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// 打开与 data.db 共享的长连接（Off：users 测试不关心 integrity 门禁）
+    fn open_db(path: &Path) -> Arc<Db> {
+        Db::open(path, IntegrityMode::Off).expect("db open")
     }
 
     // ---------- Session::is_expired 边界 ----------
@@ -777,7 +798,7 @@ mod tests {
     async fn login_issues_absolute_expiry_in_db_and_memory() {
         let dir = tmp_dir("ttl-login");
         let path = dir.join("data.db");
-        let store = UserStore::open(&path, 3_600).expect("open");
+        let store = UserStore::open(open_db(&path), 3_600).expect("open");
         store
             .create("alice", "pw-123456", UserRole::Viewer)
             .await
@@ -816,6 +837,7 @@ mod tests {
         assert_eq!(db, Some(exp), "DB token_expiry 与内存 expires_at 一致");
         assert_eq!(store.role_of(&token), Some(UserRole::Viewer));
 
+        drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -823,7 +845,7 @@ mod tests {
     async fn login_with_zero_ttl_never_expires() {
         let dir = tmp_dir("ttl-zero");
         let path = dir.join("data.db");
-        let store = UserStore::open(&path, 0).expect("open");
+        let store = UserStore::open(open_db(&path), 0).expect("open");
         store
             .create("bob", "pw-123456", UserRole::Operator)
             .await
@@ -842,6 +864,7 @@ mod tests {
         assert_eq!(db, None, "ttl=0 时 DB 落 NULL");
         assert_eq!(store.role_of(&token), Some(UserRole::Operator));
 
+        drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -852,27 +875,31 @@ mod tests {
         let dir = tmp_dir("ttl-load");
         let path = dir.join("data.db");
         let now = now_secs();
-        {
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(USERS_SCHEMA).unwrap();
-            let _ = conn.execute_batch("ALTER TABLE users ADD COLUMN token_expiry INTEGER;");
-            for (name, token, expiry) in [
-                ("old", "tok-past", Some(now - 100)),
-                ("cur", "tok-future", Some(now + 3_600)),
-                ("legacy", "tok-null", None),
-            ] {
-                conn.execute(
-                    "INSERT INTO users (id, username, password_hash, role, token, created_at, updated_at, token_expiry) \
-                     VALUES (?1, ?2, 'x', 'viewer', ?3, '0', '0', ?4)",
-                    params![Uuid::new_v4().to_string(), name, token, expiry],
-                )
-                .unwrap();
-            }
-        }
+        // 先用共享连接建库并预置三种会话行（过去 / 未来 / NULL = 升级前旧 token）
+        let seed_db = open_db(&path);
+        seed_db
+            .with(|conn| {
+                conn.execute_batch(USERS_SCHEMA)?;
+                let _ = conn.execute_batch("ALTER TABLE users ADD COLUMN token_expiry INTEGER;");
+                for (name, token, expiry) in [
+                    ("old", "tok-past", Some(now - 100)),
+                    ("cur", "tok-future", Some(now + 3_600)),
+                    ("legacy", "tok-null", None),
+                ] {
+                    conn.execute(
+                        "INSERT INTO users (id, username, password_hash, role, token, created_at, updated_at, token_expiry) \
+                         VALUES (?1, ?2, 'x', 'viewer', ?3, '0', '0', ?4)",
+                        params![Uuid::new_v4().to_string(), name, token, expiry],
+                    )?;
+                }
+                Ok(())
+            })
+            .expect("seed");
+        drop(seed_db);
 
         // ttl>0：仅加载未过期会话；token_expiry 为 NULL 的存量旧 token 视为已过期不灌内存
         //（open 未发现 admin 用户会创建默认 admin，随机口令写入临时目录，不影响断言）
-        let store = UserStore::open(&path, 3_600).expect("open");
+        let store = UserStore::open(open_db(&path), 3_600).expect("open");
         assert_eq!(store.role_of("tok-future"), Some(UserRole::Viewer));
         assert_eq!(store.role_of("tok-past"), None, "过期 token 不灌内存");
         assert_eq!(
@@ -888,11 +915,13 @@ mod tests {
         );
 
         // ttl=0：与旧行为一致，全部加载且永不过期
-        let store0 = UserStore::open(&path, 0).expect("open ttl=0");
+        let store0 = UserStore::open(open_db(&path), 0).expect("open ttl=0");
         assert_eq!(store0.role_of("tok-future"), Some(UserRole::Viewer));
         assert_eq!(store0.role_of("tok-past"), Some(UserRole::Viewer));
         assert_eq!(store0.role_of("tok-null"), Some(UserRole::Viewer));
 
+        drop(store0);
+        drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -902,7 +931,7 @@ mod tests {
     async fn logout_password_change_relogin_and_delete_invalidate_sessions() {
         let dir = tmp_dir("ttl-invalidate");
         let path = dir.join("data.db");
-        let store = UserStore::open(&path, 3_600).expect("open");
+        let store = UserStore::open(open_db(&path), 3_600).expect("open");
         let user = store
             .create("bob", "pw-old-123", UserRole::Operator)
             .await
@@ -943,6 +972,7 @@ mod tests {
         store.delete(&user.id).await.expect("delete");
         assert_eq!(store.role_of(&t4), None);
 
+        drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -419,6 +419,7 @@ mod tests {
             crate::license::FeatureManager::without_license(),
             Arc::new(crate::users::UserStore::empty()),
             None,
+            None,
         )
     }
 
@@ -546,13 +547,21 @@ mod tests {
         dir: std::path::PathBuf,
     }
 
+    /// 释放环境（关闭共享连接）后再删临时目录：Windows 上打开中的 db 文件无法删除
+    fn cleanup_env(env: RbacEnv) {
+        let dir = env.dir.clone();
+        drop(env);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 构造带真实用户库的测试环境（用于验证角色授权）
     async fn rbac_env() -> RbacEnv {
         let dir = std::env::temp_dir().join(format!("gw-rbac-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let store = Arc::new(
-            crate::users::UserStore::open(&dir.join("data.db"), 0).expect("open user store"),
-        );
+        // Db::open 已返回 Arc<Db>
+        let db = gateway_core::Db::open(&dir.join("data.db"), gateway_core::IntegrityMode::Off)
+            .expect("open data.db");
+        let store = Arc::new(crate::users::UserStore::open(db, 0).expect("open user store"));
         let mut cfg = crate::config::Config::default();
         cfg.disable_auth = false;
         cfg.token = None;
@@ -563,6 +572,7 @@ mod tests {
             None,
             crate::license::FeatureManager::without_license(),
             store.clone(),
+            None,
             None,
         );
         RbacEnv { state, store, dir }
@@ -578,9 +588,10 @@ mod tests {
     async fn session_env(ttl_secs: u64, static_token: Option<&str>) -> RbacEnv {
         let dir = std::env::temp_dir().join(format!("gw-sess-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let store = Arc::new(
-            crate::users::UserStore::open(&dir.join("data.db"), ttl_secs).expect("open user store"),
-        );
+        // Db::open 已返回 Arc<Db>
+        let db = gateway_core::Db::open(&dir.join("data.db"), gateway_core::IntegrityMode::Off)
+            .expect("open data.db");
+        let store = Arc::new(crate::users::UserStore::open(db, ttl_secs).expect("open user store"));
         let mut cfg = crate::config::Config::default();
         cfg.disable_auth = false;
         cfg.token = static_token.map(|s| s.to_string());
@@ -591,6 +602,7 @@ mod tests {
             None,
             crate::license::FeatureManager::without_license(),
             store.clone(),
+            None,
             None,
         );
         RbacEnv { state, store, dir }
@@ -720,7 +732,7 @@ mod tests {
             200
         );
 
-        let _ = std::fs::remove_dir_all(&env.dir);
+        cleanup_env(env);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -741,7 +753,7 @@ mod tests {
         assert_eq!(status_of(&env, "GET", "/users", Some(&token)).await, 403);
         assert_eq!(status_of(&env, "POST", "/restore", Some(&token)).await, 403);
 
-        let _ = std::fs::remove_dir_all(&env.dir);
+        cleanup_env(env);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -771,7 +783,7 @@ mod tests {
         let code = status_of(&env, "POST", "/rules", Some(&admin)).await;
         assert_ne!(code, 403, "admin 应通过授权层，实际 {}", code);
 
-        let _ = std::fs::remove_dir_all(&env.dir);
+        cleanup_env(env);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -780,7 +792,7 @@ mod tests {
         let token = login_as(&env, "boss", crate::users::UserRole::Admin).await;
         assert_eq!(status_of(&env, "GET", "/users", Some(&token)).await, 200);
         assert_eq!(status_of(&env, "GET", "/nodes", Some(&token)).await, 200);
-        let _ = std::fs::remove_dir_all(&env.dir);
+        cleanup_env(env);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -788,7 +800,7 @@ mod tests {
         let env = rbac_env().await;
         assert_eq!(status_of(&env, "GET", "/nodes", Some("garbage")).await, 401);
         assert_eq!(status_of(&env, "GET", "/nodes", None).await, 401);
-        let _ = std::fs::remove_dir_all(&env.dir);
+        cleanup_env(env);
     }
 
     #[tokio::test]
@@ -803,6 +815,7 @@ mod tests {
             None,
             crate::license::FeatureManager::without_license(),
             Arc::new(crate::users::UserStore::empty()),
+            None,
             None,
         );
         // 灰度开关关闭时，静态 token 可访问管理员接口
@@ -835,6 +848,7 @@ mod tests {
             None,
             crate::license::FeatureManager::without_license(),
             Arc::new(crate::users::UserStore::empty()),
+            None,
             None,
         )
     }
@@ -927,7 +941,7 @@ mod tests {
             v["token"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
             "响应体应包含非空 token"
         );
-        let _ = std::fs::remove_dir_all(&env.dir);
+        cleanup_env(env);
     }
 
     #[tokio::test]
@@ -993,6 +1007,6 @@ mod tests {
             .expect("relogin");
         assert_eq!(status_of(&env, "GET", "/nodes", Some(&t2)).await, 200);
 
-        let _ = std::fs::remove_dir_all(&env.dir);
+        cleanup_env(env);
     }
 }

@@ -15,6 +15,7 @@ use gateway_sdk::{Group, GroupSubscription, NodeId, Tag};
 use rusqlite::{params, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::info;
 
 /// 当前快照/schema 版本。大于此版本需升级程序。
@@ -82,6 +83,8 @@ pub enum PersistError {
     VersionUnsupported(u32, u32),
     #[error("validation failed: {0}")]
     Validation(String),
+    #[error("database recovery failed: {0}")]
+    Recovery(String),
 }
 
 /// 持久化快照（节点/组/标签/北向订阅）
@@ -822,6 +825,390 @@ fn maybe_backup(conn: &Connection, path: &Path) -> Result<(), PersistError> {
     Ok(())
 }
 
+// ---------- 共享连接（Db）：data.db 的进程内单长连接 ----------
+
+/// 启动完整性检查模式（`GATEWAY_DB_INTEGRITY=full|quick|off`，默认 `full`）。
+/// `data.db` 是配置库（点位规模千级、库体积 MB 级以下），全量检查只在启动时执行一次，
+/// 耗时毫秒级；`quick` 与 `off` 供超大库或特殊场景降级。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntegrityMode {
+    /// 逐行全量校验（默认）
+    Full,
+    /// 只查结构完整性
+    Quick,
+    /// 整体跳过检查（对坏文件不检查、不恢复；后续加载按既有错误路径失败）
+    Off,
+}
+
+impl IntegrityMode {
+    /// 解析配置字符串；无法识别的值按 `full` 处理（安全默认）
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "quick" => IntegrityMode::Quick,
+            "off" => IntegrityMode::Off,
+            _ => IntegrityMode::Full,
+        }
+    }
+}
+
+/// data.db 的进程内共享连接：单连接 + 互斥，全部 SQLite 访问经 [`Db::with`] 串行执行。
+///
+/// `rusqlite::Connection` 是 `Send` 非 `Sync`，`Mutex` 包裹后满足跨任务共享；
+/// 所有调用方应运行在 `spawn_blocking` 里（持锁阻塞的是 blocking 线程池而非 tokio worker）。
+/// 写负载已被去抖合并为 ≥300ms 一次、users 操作为低频短事务，单连接串行不会成为瓶颈。
+pub struct Db {
+    path: PathBuf,
+    conn: std::sync::Mutex<Connection>,
+}
+
+impl Db {
+    /// 打开（或修复后打开）库文件：integrity_check 门禁 → PRAGMA → ensure_schema，各只做一次。
+    ///
+    /// 顺序与错误分类是硬性要求（SQLite 默认 `busy_timeout=0`，若把检查放在 PRAGMA 之前，
+    /// 启动时残留 `-wal` 恢复的短暂锁竞争、另一实例运行/备份、Windows 上杀毒软件占用等
+    /// 都会误触发破坏性恢复）：
+    /// 1. `PRAGMA busy_timeout = 5000` 先于检查设置；
+    /// 2. `PRAGMA integrity_check|quick_check`：Busy/Locked 退避重试后仍失败 → 告警跳过继续启动；
+    ///    NotADatabase 或「检查成功执行但结果 ≠ ok」→ 恢复序列；其他错误记录后跳过检查继续启动；
+    /// 3. 检查通过（或被跳过）后才执行 journal_mode/synchronous/foreign_keys 与 ensure_schema。
+    pub fn open(path: &Path, integrity: IntegrityMode) -> Result<Arc<Db>, PersistError> {
+        Self::open_inner(path, integrity, 0)
+    }
+
+    fn open_inner(
+        path: &Path,
+        integrity: IntegrityMode,
+        depth: u32,
+    ) -> Result<Arc<Db>, PersistError> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let conn = Connection::open(path)?;
+        // 硬性顺序第 1 步：busy_timeout 先于检查设置
+        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+        // 硬性顺序第 2 步：完整性检查 + 按错误码分类
+        let mut busy_retries = 0usize;
+        loop {
+            match run_integrity_check_once(&conn, integrity) {
+                Ok(()) => break,
+                Err(CheckProblem::Busy(e)) if busy_retries < BUSY_RETRY_DELAYS_MS.len() => {
+                    let delay_ms = BUSY_RETRY_DELAYS_MS[busy_retries];
+                    busy_retries += 1;
+                    tracing::warn!(
+                        path = %path.display(),
+                        retry = busy_retries,
+                        delay_ms,
+                        "integrity check busy, retrying: {}",
+                        e
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                }
+                Err(CheckProblem::Busy(e)) => {
+                    // 常见于另一实例在运行/备份：绝不进入恢复序列，正常继续启动
+                    tracing::warn!(
+                        path = %path.display(),
+                        "integrity check skipped (busy): {}; continuing startup, file untouched",
+                        e
+                    );
+                    break;
+                }
+                Err(CheckProblem::NotADatabase(e)) => {
+                    // 破坏性恢复仅由「检查成功执行但结果 ≠ ok」与 NotADatabase 两类信号触发
+                    drop(conn);
+                    let reason = format!("file is not a database: {}", e);
+                    return Self::recover(path, integrity, depth, &reason);
+                }
+                Err(CheckProblem::Failed(first)) => {
+                    drop(conn);
+                    return Self::recover(path, integrity, depth, &first);
+                }
+                Err(CheckProblem::Other(e)) => {
+                    // 磁盘 I/O 错误、文件被第三方软件占用等：记录后跳过检查继续启动，绝不改名/覆盖/删除
+                    tracing::error!(
+                        path = %path.display(),
+                        "integrity check errored (non-corruption), skipping check and continuing: {}",
+                        e
+                    );
+                    break;
+                }
+            }
+        }
+        // 硬性顺序第 3 步：检查通过（或被跳过）后才配置 PRAGMA 并建 schema
+        ensure_schema(&conn)?;
+        tracing::info!(path = %path.display(), "database connection ready (single shared connection)");
+        Ok(Arc::new(Db {
+            path: path.to_path_buf(),
+            conn: std::sync::Mutex::new(conn),
+        }))
+    }
+
+    /// 库文件路径（供备份命名与日志使用）
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// 在共享连接上执行一段同步 SQLite 操作（内部 spawn_blocking 由调用方负责）。
+    /// 锁中毒视为可恢复（panic 时 SQLite 在下次 reset 自动回滚未完成事务），取回内层数据继续。
+    pub fn with<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T, PersistError>,
+    ) -> Result<T, PersistError> {
+        let conn = self.lock();
+        f(&conn)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// 在共享连接上加载快照，并对敏感配置解密。`secret` 为 `None` 时不解密（保留密文）。
+    /// schema 与 PRAGMA 已在 `open` 时完成，这里只做读取。
+    pub fn load_snapshot(&self, secret: Option<&str>) -> Result<Option<Snapshot>, PersistError> {
+        let s = self.with(|conn| {
+            let mut s = load_from_db(conn)?;
+            decrypt_snapshot(&mut s, secret);
+            Ok(s)
+        })?;
+        info!(path = %self.path.display(), version = s.version, "persist loaded");
+        Ok(Some(s))
+    }
+
+    /// 将快照写入共享连接（可选地先对敏感配置加密）。
+    /// 备份节流（`maybe_backup`）与单事务 UPSERT/差集删除语义保持不变。
+    pub fn save_snapshot(&self, secret: Option<&str>, s: &Snapshot) -> Result<(), PersistError> {
+        let snap = match secret {
+            Some(k) => encrypt_snapshot(s, k),
+            None => s.clone(),
+        };
+        self.with(|conn| {
+            if let Err(e) = maybe_backup(conn, &self.path) {
+                tracing::warn!(path = %self.path.display(), "backup before save failed: {}", e);
+            }
+            save_to_db(conn, &snap)
+        })?;
+        info!(
+            path = %self.path.display(),
+            version = s.version,
+            encrypted = secret.is_some(),
+            "persist saved"
+        );
+        Ok(())
+    }
+
+    /// 优雅退出时调用：`PRAGMA optimize`（幂等、廉价，维护统计信息）
+    pub fn optimize(&self) -> Result<(), PersistError> {
+        self.with(|conn| Ok(conn.execute_batch("PRAGMA optimize;")?))
+    }
+
+    /// 恢复序列：仅由「检查成功执行但结果 ≠ ok」与 `NotADatabase` 触发。
+    ///
+    /// 1. 把坏库（连同 `-wal`/`-shm`）隔离为 `.corrupt-<unix秒>` 留证；改名失败（如 Windows
+    ///    句柄被占用）→ 停止恢复、文件不动、告警后由上层走既有兜底继续启动，不做删除与循环重试；
+    /// 2. 若 `{db}.bak` 存在则复制回 `data.db` 并重新走同一套检查；复制失败同样「不动文件、告警继续」；
+    /// 3. 备份不存在或恢复后仍未通过：当前 data.db 再次隔离留证后，删除并按空库重建（配置丢失）。
+    fn recover(
+        path: &Path,
+        integrity: IntegrityMode,
+        depth: u32,
+        reason: &str,
+    ) -> Result<Arc<Db>, PersistError> {
+        tracing::error!(
+            path = %path.display(),
+            reason,
+            "database integrity check FAILED; starting recovery"
+        );
+        if depth >= RECOVERY_MAX_DEPTH {
+            return Err(PersistError::Recovery(format!(
+                "recovery depth limit reached at {}",
+                path.display()
+            )));
+        }
+        // 1. 隔离坏库留证
+        match isolate_corrupt(path) {
+            Ok(corrupt) => tracing::warn!(
+                path = %path.display(),
+                corrupt = %corrupt.display(),
+                "corrupt database isolated for forensics"
+            ),
+            Err(e) => {
+                tracing::error!(
+                    path = %path.display(),
+                    "recovery aborted: cannot move corrupt database, FILE LEFT UNTOUCHED; \
+                     manual intervention required: {}",
+                    e
+                );
+                return Err(PersistError::Recovery(format!(
+                    "cannot isolate corrupt database {}: {}",
+                    path.display(),
+                    e
+                )));
+            }
+        }
+        // 2. 从 .bak 恢复（VACUUM INTO 产出的事务一致快照）
+        let bak = backup_path_for(path);
+        if bak.exists() {
+            match std::fs::copy(&bak, path) {
+                Err(e) => {
+                    tracing::error!(
+                        backup = %bak.display(),
+                        "restore from backup failed, no file deleted and no retry; \
+                         continuing startup with existing fallbacks: {}",
+                        e
+                    );
+                    return Err(PersistError::Recovery(format!(
+                        "cannot restore backup {}: {}",
+                        bak.display(),
+                        e
+                    )));
+                }
+                Ok(_) => match Self::open_inner(path, integrity, depth + 1) {
+                    Ok(db) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            backup = %bak.display(),
+                            "recovered database from backup"
+                        );
+                        return Ok(db);
+                    }
+                    Err(e) => tracing::error!(
+                        path = %path.display(),
+                        "restored backup still failed integrity checks: {}; rebuilding empty database",
+                        e
+                    ),
+                },
+            }
+        }
+        // 3. 空库重建：坏库（含恢复失败的副本）此时均已隔离为 .corrupt-* 留证
+        if path.exists() {
+            match isolate_corrupt(path) {
+                Ok(corrupt) => {
+                    tracing::warn!(corrupt = %corrupt.display(), "isolated failed restore")
+                }
+                Err(e) => {
+                    tracing::error!(
+                        path = %path.display(),
+                        "recovery aborted before rebuild, FILE LEFT UNTOUCHED: {}",
+                        e
+                    );
+                    return Err(PersistError::Recovery(format!(
+                        "cannot isolate failed restore {}: {}",
+                        path.display(),
+                        e
+                    )));
+                }
+            }
+        }
+        tracing::error!(
+            path = %path.display(),
+            "starting with an EMPTY database; previous configuration is lost \
+             (corrupt files kept as .corrupt-*)"
+        );
+        Self::open_inner(path, integrity, depth + 1)
+    }
+}
+
+/// Busy/Locked 退避重试间隔（毫秒）：仍失败则告警跳过检查继续启动
+const BUSY_RETRY_DELAYS_MS: [u64; 3] = [200, 500, 1000];
+/// 恢复序列最大递归深度（恢复 bak 失败 → 空库重建，最多两层）
+const RECOVERY_MAX_DEPTH: u32 = 2;
+
+/// `{db}.bak` 路径（与 `maybe_backup` 保持一致）
+fn backup_path_for(path: &Path) -> PathBuf {
+    path.parent()
+        .map(|p| {
+            p.join(
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+                    + ".bak",
+            )
+        })
+        .unwrap_or_else(|| PathBuf::from(path.to_string_lossy().to_string() + ".bak"))
+}
+
+/// 把坏库（连同 `-wal`/`-shm`）改名为 `.corrupt-<unix秒>` 留证，不直接删除。
+/// 任何一步失败都返回 Err，由调用方停止恢复（Windows 上句柄被占用时 rename 会失败）。
+fn isolate_corrupt(path: &Path) -> std::io::Result<PathBuf> {
+    let ts = now_epoch_secs();
+    let mut corrupt = PathBuf::from(format!("{}.corrupt-{}", path.display(), ts));
+    while corrupt.exists() {
+        // 同一秒内多次恢复时避免覆盖留证文件
+        corrupt = PathBuf::from(format!(
+            "{}.corrupt-{}-{}",
+            path.display(),
+            ts,
+            uuid::Uuid::new_v4().simple()
+        ));
+    }
+    std::fs::rename(path, &corrupt)?;
+    for suffix in ["-wal", "-shm"] {
+        let side = PathBuf::from(format!("{}{}", path.display(), suffix));
+        if side.exists() {
+            let side_corrupt =
+                PathBuf::from(format!("{}{}.corrupt-{}", path.display(), suffix, ts));
+            std::fs::rename(&side, &side_corrupt)?;
+        }
+    }
+    Ok(corrupt)
+}
+
+/// integrity_check / quick_check 的一次检查结果分类。
+/// 实现者必须按错误码分类，不得把一切 `Err` 当损坏。
+enum CheckProblem {
+    /// `DatabaseBusy`/`DatabaseLocked`（含 -wal 恢复竞争、另一实例运行/备份）
+    Busy(rusqlite::Error),
+    /// 检查成功执行但首行结果 ≠ ok（多行结果 = 多条错误，同样进入恢复序列）
+    Failed(String),
+    /// `NotADatabase`：文件内容损坏的典型信号
+    NotADatabase(rusqlite::Error),
+    /// 其他错误（磁盘 I/O、文件被第三方软件占用等）
+    Other(rusqlite::Error),
+}
+
+fn classify_check_err(e: rusqlite::Error) -> CheckProblem {
+    match &e {
+        rusqlite::Error::SqliteFailure(ffi, _) => match ffi.code {
+            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked => {
+                CheckProblem::Busy(e)
+            }
+            rusqlite::ErrorCode::NotADatabase => CheckProblem::NotADatabase(e),
+            _ => CheckProblem::Other(e),
+        },
+        _ => CheckProblem::Other(e),
+    }
+}
+
+/// 执行一次完整性检查；`IntegrityMode::Off` 直接通过（不打开检查语句）。
+fn run_integrity_check_once(
+    conn: &Connection,
+    integrity: IntegrityMode,
+) -> Result<(), CheckProblem> {
+    let sql = match integrity {
+        IntegrityMode::Off => return Ok(()),
+        IntegrityMode::Full => "PRAGMA integrity_check",
+        IntegrityMode::Quick => "PRAGMA quick_check",
+    };
+    let mut stmt = conn.prepare(sql).map_err(classify_check_err)?;
+    let mut rows = stmt.query([]).map_err(classify_check_err)?;
+    let first: Option<String> = match rows.next() {
+        Ok(row) => match row {
+            Some(row) => Some(row.get(0).map_err(classify_check_err)?),
+            None => None,
+        },
+        Err(e) => return Err(classify_check_err(e)),
+    };
+    match first {
+        Some(ref s) if s.eq_ignore_ascii_case("ok") => Ok(()),
+        Some(s) => Err(CheckProblem::Failed(s)),
+        None => Err(CheckProblem::Failed("no result rows".into())),
+    }
+}
+
 /// 快照中是否存在仍以明文保存的敏感配置项（用于首次启用加密时回写）
 pub fn has_plaintext_secrets(s: &Snapshot) -> bool {
     s.nodes.iter().any(|n| {
@@ -896,6 +1283,11 @@ mod tests {
     use crate::node::Node;
     use gateway_sdk::types::NodeKind;
 
+    /// 串行化所有会触碰 maybe_backup 全局节流状态（LAST_BACKUP_SECS）的测试：
+    /// 该计数器是进程级全局，并行测试中的 save 会在彼此的「重置 -> CAS」窗口内
+    /// 抢走备份机会，导致节流断言偶发失败。异步测试需要跨 .await 持有守卫，用 tokio Mutex。
+    static BACKUP_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     fn temp_db(name: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("gw-test-{}-{}.db", name, uuid::Uuid::new_v4()));
         let _ = std::fs::remove_file(&p);
@@ -929,6 +1321,7 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_roundtrip_preserves_nodes() {
+        let _backup_guard = BACKUP_TEST_LOCK.lock().await;
         let path = temp_db("roundtrip");
         let snap = snapshot_with_mqtt_password();
         let node_id = snap.nodes[0].config.id;
@@ -947,6 +1340,7 @@ mod tests {
 
     #[tokio::test]
     async fn secret_is_encrypted_at_rest_and_decrypted_on_load() {
+        let _backup_guard = BACKUP_TEST_LOCK.lock().await;
         let path = temp_db("enc");
         let snap = snapshot_with_mqtt_password();
         save_secret(&path, &snap, Some("unit-test-secret"))
@@ -984,6 +1378,7 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_secret_keeps_ciphertext_without_panic() {
+        let _backup_guard = BACKUP_TEST_LOCK.lock().await;
         let path = temp_db("wrongkey");
         let snap = snapshot_with_mqtt_password();
         save_secret(&path, &snap, Some("right-secret"))
@@ -1065,6 +1460,7 @@ mod tests {
 
     #[tokio::test]
     async fn wal_mode_is_enabled() {
+        let _backup_guard = BACKUP_TEST_LOCK.lock().await;
         let path = temp_db("wal");
         save(&path, &snapshot_with_mqtt_password())
             .await
@@ -1088,6 +1484,7 @@ mod tests {
 
     #[tokio::test]
     async fn incremental_save_updates_and_removes_rows() {
+        let _backup_guard = BACKUP_TEST_LOCK.lock().await;
         let path = temp_db("upsert");
         let mut snap = snapshot_with_mqtt_password();
         let keep_id = snap.nodes[0].config.id;
@@ -1122,6 +1519,7 @@ mod tests {
 
     #[tokio::test]
     async fn throttled_backup_creates_consistent_snapshot() {
+        let _backup_guard = BACKUP_TEST_LOCK.lock().await;
         let path = temp_db("bak");
         save(&path, &snapshot_with_mqtt_password())
             .await
@@ -1155,5 +1553,342 @@ mod tests {
         drop(conn);
         cleanup_db(&path);
         let _ = std::fs::remove_file(&bak);
+    }
+
+    // ---------- 共享连接 Db ----------
+
+    fn cleanup_all(path: &Path) {
+        for suffix in ["", "-wal", "-shm", ".bak"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
+        // 隔离留证文件（.corrupt-*）
+        let prefix = format!("{}.", path.display());
+        if let Ok(entries) = std::fs::read_dir(path.parent().unwrap_or(Path::new("."))) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.to_string_lossy().starts_with(&prefix)
+                    && p.to_string_lossy().contains(".corrupt-")
+                {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
+        }
+    }
+
+    fn corrupt_artifacts(path: &Path) -> Vec<PathBuf> {
+        let prefix = format!("{}.", path.display());
+        std::fs::read_dir(path.parent().unwrap_or(Path::new(".")))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                let s = p.to_string_lossy();
+                s.starts_with(&prefix) && s.contains(".corrupt-")
+            })
+            .collect()
+    }
+
+    /// 破坏文件头（抹掉 "SQLite format 3\0" 魔数）→ 典型的 NotADatabase 信号
+    fn corrupt_file_header(path: &Path) {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open db for corruption");
+        f.seek(SeekFrom::Start(0)).unwrap();
+        f.write_all(&[0u8; 32]).unwrap();
+    }
+
+    #[tokio::test]
+    async fn db_open_is_idempotent_and_pragmas_apply() {
+        let path = temp_db("db-open");
+        let db = Db::open(&path, IntegrityMode::Full).expect("first open");
+        // 第二次 open 同一文件不得报错（schema 只建一次、WAL 重复设置无害）
+        let db2 = Db::open(&path, IntegrityMode::Full).expect("second open");
+        drop(db2);
+        db.with(|conn| {
+            let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
+            assert_eq!(mode.to_lowercase(), "wal");
+            let busy: i64 = conn.query_row("PRAGMA busy_timeout", [], |r| r.get(0))?;
+            assert_eq!(busy, 5000, "busy_timeout should be configured");
+            let version: i64 =
+                conn.query_row("SELECT version FROM meta LIMIT 1", [], |r| r.get(0))?;
+            assert_eq!(version, SNAPSHOT_VERSION as i64);
+            Ok(())
+        })
+        .expect("pragma checks");
+        drop(db);
+        cleanup_all(&path);
+    }
+
+    #[tokio::test]
+    async fn db_snapshot_roundtrip_with_secret() {
+        let _backup_guard = BACKUP_TEST_LOCK.lock().await;
+        let path = temp_db("db-roundtrip");
+        let db = Db::open(&path, IntegrityMode::Off).expect("open");
+        let snap = snapshot_with_mqtt_password();
+        let node_id = snap.nodes[0].config.id;
+        db.save_snapshot(Some("unit-test-secret"), &snap)
+            .expect("save");
+        // 库中不落明文
+        db.with(|conn| {
+            let cfg: String =
+                conn.query_row("SELECT config FROM nodes LIMIT 1", [], |r| r.get(0))?;
+            assert!(!cfg.contains("p@ssw0rd"));
+            assert!(cfg.contains(ENC_PREFIX));
+            Ok(())
+        })
+        .expect("ciphertext check");
+        let loaded = db
+            .load_snapshot(Some("unit-test-secret"))
+            .expect("load")
+            .expect("some snapshot");
+        assert_eq!(loaded.nodes.len(), 1);
+        assert_eq!(loaded.nodes[0].config.id, node_id);
+        assert_eq!(
+            loaded.nodes[0].config.config.get("password").unwrap(),
+            "p@ssw0rd"
+        );
+        drop(db);
+        cleanup_all(&path);
+    }
+
+    /// 破损检测：文件头被破坏（NotADatabase）→ 原文件隔离为 .corrupt-* → 从 .bak 自动恢复
+    #[tokio::test]
+    async fn integrity_recovery_restores_from_bak() {
+        let _backup_guard = BACKUP_TEST_LOCK.lock().await;
+        let path = temp_db("db-bak");
+        save(&path, &snapshot_with_mqtt_password())
+            .await
+            .expect("seed save");
+        // 直接 VACUUM INTO 造备份：绕开 LAST_BACKUP_SECS 全局节流，避免与其他并行测试互相干扰
+        let bak = PathBuf::from(format!("{}.bak", path.display()));
+        {
+            let conn = Connection::open(&path).unwrap();
+            let _ = std::fs::remove_file(&bak);
+            conn.execute("VACUUM INTO ?1", [bak.to_string_lossy().to_string()])
+                .unwrap();
+        }
+        corrupt_file_header(&path);
+        let db = Db::open(&path, IntegrityMode::Full).expect("open must recover from backup");
+        let loaded = db
+            .load_snapshot(None)
+            .expect("load after recovery")
+            .unwrap();
+        assert_eq!(loaded.nodes.len(), 1, "data must be restored from .bak");
+        assert_eq!(loaded.nodes[0].config.name, "mqtt-app");
+        assert_eq!(
+            corrupt_artifacts(&path).len(),
+            1,
+            "corrupt file kept for forensics"
+        );
+        drop(db);
+        cleanup_all(&path);
+    }
+
+    /// 破损且无备份：坏库隔离留证后按空库启动（不 panic、不阻塞启动）
+    #[tokio::test]
+    async fn integrity_recovery_without_bak_starts_empty() {
+        let _backup_guard = BACKUP_TEST_LOCK.lock().await;
+        let path = temp_db("db-nobak");
+        save(&path, &snapshot_with_mqtt_password())
+            .await
+            .expect("seed save");
+        corrupt_file_header(&path);
+        let db = Db::open(&path, IntegrityMode::Full).expect("open must rebuild empty");
+        let loaded = db.load_snapshot(None).expect("load empty").unwrap();
+        assert!(loaded.nodes.is_empty(), "rebuilt database must be empty");
+        assert_eq!(
+            corrupt_artifacts(&path).len(),
+            1,
+            "corrupt file kept for forensics"
+        );
+        drop(db);
+        cleanup_all(&path);
+    }
+
+    /// 检查「成功执行但结果 ≠ ok」（非 NotADatabase 信号）同样触发恢复序列
+    #[tokio::test]
+    async fn integrity_failed_result_triggers_recovery() {
+        let _backup_guard = BACKUP_TEST_LOCK.lock().await;
+        let path = temp_db("db-page");
+        save(&path, &snapshot_with_mqtt_password())
+            .await
+            .expect("seed save");
+        // 破坏第 2 页内容（魔数完好，integrity_check 报告页级错误 → 首行 ≠ ok）
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("open db for corruption");
+            f.seek(SeekFrom::Start(4096)).unwrap();
+            f.write_all(&[0xFFu8; 1024]).unwrap();
+        }
+        let db = Db::open(&path, IntegrityMode::Full).expect("open must recover");
+        let loaded = db.load_snapshot(None).expect("load").unwrap();
+        assert!(
+            loaded.nodes.is_empty(),
+            "no .bak present: rebuilt database must be empty"
+        );
+        assert_eq!(
+            corrupt_artifacts(&path).len(),
+            1,
+            "recovery must isolate the damaged file"
+        );
+        drop(db);
+        cleanup_all(&path);
+    }
+
+    /// Off 模式：不做检查、不做恢复——坏文件原样保留（无 .corrupt-*），
+    /// 打开按既有错误路径失败（PRAGMA/schema 触碰文件时报 NotADatabase），
+    /// 由上层「加载失败 → 空配置启动」兜底，绝不静默重建。
+    #[tokio::test]
+    async fn integrity_off_skips_check_and_keeps_file() {
+        let _backup_guard = BACKUP_TEST_LOCK.lock().await;
+        let path = temp_db("db-off");
+        save(&path, &snapshot_with_mqtt_password())
+            .await
+            .expect("seed save");
+        corrupt_file_header(&path);
+        assert!(
+            Db::open(&path, IntegrityMode::Off).is_err(),
+            "off mode must not check/recover: corrupt file fails at open via existing error path"
+        );
+        assert!(
+            corrupt_artifacts(&path).is_empty(),
+            "off mode must not touch the file"
+        );
+        cleanup_all(&path);
+    }
+
+    /// 错误码分类：Busy/Locked → 退避重试（仍失败跳过检查）；NotADatabase → 恢复；
+    /// 其他 → 跳过检查继续启动。破坏性恢复只允许由前两类之外的明确信号触发。
+    #[test]
+    fn check_error_classification() {
+        use rusqlite::ffi;
+        fn sqlite_err(raw: i32) -> rusqlite::Error {
+            rusqlite::Error::SqliteFailure(ffi::Error::new(raw), Some("db".into()))
+        }
+        assert!(matches!(
+            classify_check_err(sqlite_err(ffi::SQLITE_BUSY)),
+            CheckProblem::Busy(_)
+        ));
+        assert!(matches!(
+            classify_check_err(sqlite_err(ffi::SQLITE_LOCKED)),
+            CheckProblem::Busy(_)
+        ));
+        assert!(matches!(
+            classify_check_err(sqlite_err(ffi::SQLITE_NOTADB)),
+            CheckProblem::NotADatabase(_)
+        ));
+        // 磁盘 I/O 类（SQLITE_IOERR）与其他非 SqliteFailure 错误都不得触发恢复
+        assert!(matches!(
+            classify_check_err(sqlite_err(ffi::SQLITE_IOERR)),
+            CheckProblem::Other(_)
+        ));
+        assert!(matches!(
+            classify_check_err(rusqlite::Error::InvalidQuery),
+            CheckProblem::Other(_)
+        ));
+    }
+
+    /// 短暂锁竞争（另一实例运行/备份残留的写锁）不得误触发破坏性恢复：
+    /// busy_timeout=5000 先于检查设置，检查会等待锁释放后正常通过，文件不动。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn busy_lock_waits_out_transient_contention() {
+        let path = temp_db("db-busy");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE t (x)").unwrap();
+        }
+        let holder = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let conn = Connection::open(&path).unwrap();
+                conn.execute_batch("BEGIN EXCLUSIVE").unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                conn.execute_batch("COMMIT").unwrap();
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let db = Db::open(&path, IntegrityMode::Full)
+            .expect("transient lock contention must wait out, not recover");
+        holder.join().unwrap();
+        assert!(
+            corrupt_artifacts(&path).is_empty(),
+            "transient contention must not trigger recovery"
+        );
+        drop(db);
+        cleanup_all(&path);
+    }
+
+    /// 共享连接串行正确性：多任务并发混合读写快照与草稿表（模拟 users 共库短事务），
+    /// 最终数据一致——快照整体等于某一次保存的完整状态，计数器恰好等于全部增量之和。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_tasks_serialize_on_shared_connection() {
+        let _backup_guard = BACKUP_TEST_LOCK.lock().await;
+        let path = temp_db("db-conc");
+        let db = Db::open(&path, IntegrityMode::Off).expect("open");
+        db.with(|conn| {
+            conn.execute_batch("CREATE TABLE IF NOT EXISTS t_ops (n INTEGER NOT NULL)")?;
+            conn.execute("INSERT INTO t_ops (n) VALUES (0)", [])?;
+            Ok(())
+        })
+        .expect("seed scratch table");
+
+        const TASKS: usize = 4;
+        const ITERS: usize = 5;
+        let mut handles = Vec::new();
+        for t in 0..TASKS {
+            let db = Arc::clone(&db);
+            handles.push(tokio::task::spawn_blocking(move || {
+                for _ in 0..ITERS {
+                    // 快照保存：每个任务维护自己的节点集（最终数量互不相同，便于识别）
+                    let mut snap = Snapshot::default();
+                    for k in 0..=t {
+                        snap.nodes.push(node_with(
+                            &format!("node-t{t}-{k}"),
+                            serde_json::json!({ "poll_base_ms": 1000 }),
+                        ));
+                    }
+                    db.save_snapshot(None, &snap).expect("save");
+                    // 共库短事务写（模拟 users 操作）
+                    db.with(|conn| {
+                        conn.execute("UPDATE t_ops SET n = n + 1", [])?;
+                        Ok(())
+                    })
+                    .expect("op");
+                }
+            }));
+        }
+        for h in handles {
+            h.await.expect("task join");
+        }
+        let loaded = db.load_snapshot(None).expect("final load").unwrap();
+        assert!(
+            (1..=TASKS).contains(&loaded.nodes.len()),
+            "loaded snapshot must be one complete saved state, got {} nodes",
+            loaded.nodes.len()
+        );
+        let t = loaded.nodes.len() - 1;
+        for k in 0..loaded.nodes.len() {
+            assert_eq!(
+                loaded.nodes[k].config.name,
+                format!("node-t{t}-{k}"),
+                "no torn state: node names must match exactly one save"
+            );
+        }
+        let ops: i64 = db
+            .with(|conn| Ok(conn.query_row("SELECT n FROM t_ops", [], |r| r.get(0))?))
+            .expect("ops count");
+        assert_eq!(
+            ops,
+            (TASKS * ITERS) as i64,
+            "every short transaction must land"
+        );
+        drop(db);
+        cleanup_all(&path);
     }
 }

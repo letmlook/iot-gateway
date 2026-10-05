@@ -12,7 +12,8 @@ mod users;
 use axum::Router;
 use gateway_core::proc_plugin::ProcessPluginLoader;
 use gateway_core::{
-    persist_load_json, persist_load_secret, persist_save_secret, Manager, PluginLoader,
+    persist_load_json, persist_load_secret, persist_save_secret, Db, IntegrityMode, Manager,
+    PersistError, PluginLoader,
 };
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
@@ -21,6 +22,11 @@ use tower_http::trace::TraceLayer;
 use config::Config;
 use state::AppState;
 use users::UserStore;
+
+/// 把 spawn_blocking 的 JoinError 归一为 PersistError（与 persist 自由函数的包装一致）
+fn join_err_to_persist(e: tokio::task::JoinError) -> PersistError {
+    PersistError::Io(std::io::Error::other(e))
+}
 
 /// 定位进程隔离所需的 `gateway-plugin-host`：优先环境变量，其次与网关可执行文件同级目录。
 fn plugin_host_bin(config: &crate::config::Config) -> std::path::PathBuf {
@@ -151,11 +157,62 @@ node credentials such as MQTT passwords will be stored in PLAINTEXT in data.db. 
             }
         }
     }
-    match persist_load_secret(&db_path, secret).await {
+
+    // data.db 进程内共享长连接：integrity_check 门禁 → PRAGMA → ensure_schema 只在启动时做一次；
+    // 快照与 users 表从此共用这一个连接。打开失败时降级为按次开连接的旧路径（自由函数），
+    // 用户管理停用，不阻塞启动。
+    let integrity = IntegrityMode::parse(&config.db_integrity);
+    let db = match tokio::task::spawn_blocking({
+        let db_path = db_path.clone();
+        move || Db::open(&db_path, integrity)
+    })
+    .await
+    {
+        Ok(Ok(db)) => Some(db),
+        Ok(Err(e)) => {
+            tracing::error!(
+                "data.db open failed: {}; falling back to per-operation connections",
+                e
+            );
+            None
+        }
+        Err(e) => {
+            tracing::error!(
+                "data.db open task failed: {}; falling back to per-operation connections",
+                e
+            );
+            None
+        }
+    };
+
+    let loaded = match &db {
+        Some(db) => {
+            let db = Arc::clone(db);
+            let secret_owned = secret.map(|s| s.to_string());
+            tokio::task::spawn_blocking(move || db.load_snapshot(secret_owned.as_deref()))
+                .await
+                .unwrap_or_else(|e| Err(join_err_to_persist(e)))
+        }
+        None => persist_load_secret(&db_path, secret).await,
+    };
+    match loaded {
         Ok(Some(snap)) => {
             // 历史数据可能仍是明文口令：启用密钥后首次启动把它们加密回写
             if secret.is_some() && gateway_core::persist_has_plaintext_secrets(&snap) {
-                let _ = persist_save_secret(&db_path, &snap, secret).await;
+                let res = match &db {
+                    Some(db) => {
+                        let db = Arc::clone(db);
+                        let snap = snap.clone();
+                        let secret_owned = secret.map(|s| s.to_string());
+                        tokio::task::spawn_blocking(move || {
+                            db.save_snapshot(secret_owned.as_deref(), &snap)
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(join_err_to_persist(e)))
+                    }
+                    None => persist_save_secret(&db_path, &snap, secret).await,
+                };
+                let _ = res;
                 tracing::info!(
                     "encrypted existing plaintext credentials in {}",
                     db_path.display()
@@ -195,10 +252,16 @@ node credentials such as MQTT passwords will be stored in PLAINTEXT in data.db. 
         }
     };
 
-    let user_store = match UserStore::open(&db_path, config.session_ttl_secs) {
-        Ok(s) => Arc::new(s),
-        Err(e) => {
-            tracing::warn!("user store open failed: {}, user management disabled", e);
+    let user_store = match &db {
+        Some(db) => match UserStore::open(Arc::clone(db), config.session_ttl_secs) {
+            Ok(s) => Arc::new(s),
+            Err(e) => {
+                tracing::warn!("user store open failed: {}, user management disabled", e);
+                Arc::new(UserStore::empty())
+            }
+        },
+        None => {
+            tracing::warn!("data.db unavailable, user management disabled");
             Arc::new(UserStore::empty())
         }
     };
@@ -233,6 +296,7 @@ Backups created now can only be restored by this running instance. Set a fixed s
         feature_manager,
         user_store,
         node_log_names,
+        db,
     );
     state.plugin_processes = isolated_loader;
     state.sync_node_log_names();
@@ -357,5 +421,7 @@ async fn shutdown_signal(state: AppState) {
     }
     // 退出前强制落盘：去抖窗口内可能仍有未写入的变更
     state.flush().await;
+    // 共享连接上做一次 PRAGMA optimize（幂等、廉价，维护统计信息）
+    state.optimize_db().await;
     tracing::info!("gateway stopped");
 }

@@ -60,6 +60,8 @@ pub struct Config {
     pub history_max_rows: u64,
     /// 会话绝对过期秒数（GATEWAY_SESSION_TTL_SECS）：自登录签发起算，不因活动续期；0 表示永不过期
     pub session_ttl_secs: u64,
+    /// 启动完整性检查模式（GATEWAY_DB_INTEGRITY=full|quick|off）：data.db 损坏时自动从 .bak 恢复
+    pub db_integrity: String,
 }
 
 fn default_bind_str() -> String {
@@ -101,6 +103,11 @@ fn default_session_ttl_secs() -> u64 {
     43_200
 }
 
+/// 启动完整性检查默认 full：配置库体量小（MB 级以下），全量检查只在启动时执行一次
+fn default_db_integrity() -> String {
+    "full".into()
+}
+
 fn parse_origins(s: &str) -> Vec<String> {
     s.split(',')
         .map(|x| x.trim().to_string())
@@ -139,6 +146,8 @@ struct ConfigFile {
     bind: String,
     #[serde(default = "default_session_ttl_secs")]
     session_ttl_secs: u64,
+    #[serde(default = "default_db_integrity")]
+    db_integrity: String,
 }
 
 fn default_data_dir_str() -> String {
@@ -208,6 +217,7 @@ impl Default for Config {
             history_flush_ms: 1000,
             history_max_rows: 5_000_000,
             session_ttl_secs: default_session_ttl_secs(),
+            db_integrity: default_db_integrity(),
         }
     }
 }
@@ -248,6 +258,7 @@ impl Config {
             history_flush_ms: 1000,
             history_max_rows: 5_000_000,
             session_ttl_secs: cf.session_ttl_secs,
+            db_integrity: cf.db_integrity,
         })
     }
 
@@ -275,6 +286,7 @@ impl Config {
             allowed_origins: Vec::new(),
             bind: default_bind_str(),
             session_ttl_secs: default_session_ttl_secs(),
+            db_integrity: default_db_integrity(),
         };
         if let Ok(json) = serde_json::to_string_pretty(&default_cfg) {
             let _ = std::fs::write(&path, json);
@@ -404,6 +416,11 @@ impl Config {
                 c.session_ttl_secs = n;
             }
         }
+        if let Ok(s) = std::env::var("GATEWAY_DB_INTEGRITY") {
+            if !s.is_empty() {
+                c.db_integrity = s;
+            }
+        }
         // 未提供备份密钥时随机生成：保证不再有「写死在仓库中的默认密钥」
         if c.backup_secret.is_empty() {
             c.backup_secret = random_secret();
@@ -481,6 +498,14 @@ mod tests {
         let c = Config::from_file(&implicit).expect("parse implicit");
         assert_eq!(c.session_ttl_secs, default_session_ttl_secs());
         assert_eq!(c.session_ttl_secs, 43_200);
+
+        // db_integrity 同样必须被 from_file 显式带出（防漏配回归）
+        let integrity = dir.join("integrity.json");
+        std::fs::write(&integrity, r#"{"port": 3000, "db_integrity": "quick"}"#).unwrap();
+        let c = Config::from_file(&integrity).expect("parse integrity");
+        assert_eq!(c.db_integrity, "quick");
+        let c = Config::from_file(&implicit).expect("parse implicit");
+        assert_eq!(c.db_integrity, "full");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
