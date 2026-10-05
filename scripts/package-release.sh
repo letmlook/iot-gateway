@@ -41,6 +41,7 @@ if [ "${SKIP_BUILD:-0}" != "1" ]; then
     -p plugin-sim -p plugin-mqtt -p plugin-modbus-tcp \
     -p plugin-modbus-rtu -p plugin-opcua -p plugin-virb \
     -p plugin-http -p plugin-influxdb -p plugin-tdengine \
+    -p plugin-s7 -p plugin-bacnet -p plugin-ethernet-ip -p plugin-iec104 \
     --features ffi
 
   echo "==> 构建 Kafka 插件（可选，需要 CMake + rdkafka 依赖；构建失败不中断打包）"
@@ -62,7 +63,7 @@ mkdir -p "$OUT/plugins"
 cp target/release/gateway "$OUT/"
 cp target/release/gateway-plugin-host "$OUT/"
 # 只打包真正对外提供的插件；测试夹具（faulty/abi-mismatch）不进发布包
-for p in sim mqtt modbus_tcp modbus_rtu opcua virb http influxdb tdengine; do
+for p in sim mqtt modbus_tcp modbus_rtu opcua virb http influxdb tdengine s7 bacnet ethernet_ip iec104; do
   src="target/release/libplugin_${p}.${PLUGIN_EXT}"
   [ -f "$src" ] && cp "$src" "$OUT/plugins/"
 done

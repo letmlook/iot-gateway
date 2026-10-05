@@ -1,0 +1,12 @@
+[package]
+name = "plugin-iec104"
+version = "0.1.0"
+edition = "2021"
+description = "南向 IEC 60870-5-104 插件（占位桩，待实现）"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+gateway-sdk = { path = "../../gateway-sdk" }
+async-trait = "0.1"

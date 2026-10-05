@@ -1,0 +1,26 @@
+[package]
+name = "plugin-bacnet"
+version = "0.1.0"
+edition = "2021"
+description = "南向 BACnet/IP 插件：通过 UDP 47808 连接 BACnet 设备"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+default = ["bacnet-client"]
+bacnet-client = ["dep:bacnet-rs"]
+ffi = []
+
+[dependencies]
+gateway-sdk = { path = "../../gateway-sdk" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "net"] }
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+bacnet-rs = { version = "0.3.2", optional = true }
+
+[dev-dependencies]
+mabi-bacnet = "1.7.1"

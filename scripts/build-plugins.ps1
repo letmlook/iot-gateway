@@ -10,7 +10,7 @@ if (-not (Test-Path plugins)) {
     New-Item -ItemType Directory -Path plugins | Out-Null
 }
 
-cargo build -p plugin-sim -p plugin-mqtt -p plugin-modbus-tcp -p plugin-modbus-rtu -p plugin-opcua -p plugin-virb -p plugin-http -p plugin-influxdb -p plugin-tdengine --features ffi
+cargo build -p plugin-sim -p plugin-s7 -p plugin-bacnet -p plugin-ethernet-ip -p plugin-iec104 -p plugin-mqtt -p plugin-modbus-tcp -p plugin-modbus-rtu -p plugin-opcua -p plugin-virb -p plugin-http -p plugin-influxdb -p plugin-tdengine --features ffi
 
 # Kafka 需要 CMake + rdkafka，单独构建（失败不中断）
 try {
@@ -21,6 +21,10 @@ try {
 }
 
 Copy-Item target\debug\plugin_sim.dll plugins\
+Copy-Item target\debug\plugin_s7.dll plugins\
+Copy-Item target\debug\plugin_bacnet.dll plugins\
+Copy-Item target\debug\plugin_ethernet_ip.dll plugins\
+Copy-Item target\debug\plugin_iec104.dll plugins\
 Copy-Item target\debug\plugin_mqtt.dll plugins\
 Copy-Item target\debug\plugin_modbus_tcp.dll plugins\
 Copy-Item target\debug\plugin_modbus_rtu.dll plugins\

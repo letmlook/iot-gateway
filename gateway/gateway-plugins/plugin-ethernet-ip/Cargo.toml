@@ -1,0 +1,21 @@
+[package]
+name = "plugin-ethernet-ip"
+version = "0.1.0"
+edition = "2021"
+description = "南向 EtherNet/IP 插件（ODVA CIP 协议，支持 CIP 标签读写）"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+default = []
+ffi = []  # 构建 .so/.dll 时启用
+
+[dependencies]
+gateway-sdk = { path = "../../gateway-sdk" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "net"] }
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }

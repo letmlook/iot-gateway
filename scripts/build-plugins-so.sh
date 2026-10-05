@@ -4,8 +4,10 @@
 set -e
 cd "$(dirname "$0")/.."
 mkdir -p plugins
-cargo build -p plugin-sim -p plugin-mqtt -p plugin-modbus-tcp -p plugin-modbus-rtu -p plugin-opcua -p plugin-virb -p plugin-http -p plugin-influxdb -p plugin-tdengine --features ffi
-cp target/debug/libplugin_sim.so target/debug/libplugin_mqtt.so \
+cargo build -p plugin-sim -p plugin-s7 -p plugin-bacnet -p plugin-ethernet-ip -p plugin-iec104 -p plugin-mqtt -p plugin-modbus-tcp -p plugin-modbus-rtu -p plugin-opcua -p plugin-virb -p plugin-http -p plugin-influxdb -p plugin-tdengine --features ffi
+cp target/debug/libplugin_sim.so target/debug/libplugin_s7.so \
+   target/debug/libplugin_bacnet.so target/debug/libplugin_ethernet_ip.so \
+   target/debug/libplugin_iec104.so target/debug/libplugin_mqtt.so \
    target/debug/libplugin_modbus_tcp.so target/debug/libplugin_modbus_rtu.so \
    target/debug/libplugin_opcua.so target/debug/libplugin_virb.so \
    target/debug/libplugin_http.so target/debug/libplugin_influxdb.so \
