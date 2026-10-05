@@ -313,6 +313,13 @@ pub fn router(state: AppState) -> Router<AppState> {
         // 强制读设备仍走 POST /nodes/:id/read_tags（Operator+）
         .route("/nodes/:id/values", get(handlers::node_values))
         .route("/nodes/:id/write_tags", post(handlers::write_tags))
+        // 组数据策略：死区/变化上报/滑动窗口聚合（GET → Viewer+，PUT/DELETE → Operator+）
+        .route(
+            "/nodes/:id/groups/:gid/policy",
+            get(handlers::get_policy)
+                .put(handlers::put_policy)
+                .delete(handlers::delete_policy),
+        )
         .route("/upload", post(handlers::upload_config_file))
         .with_state(state.clone())
         .route_layer(middleware::from_fn_with_state(state, auth_middleware))

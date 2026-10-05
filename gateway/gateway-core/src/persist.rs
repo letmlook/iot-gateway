@@ -68,6 +68,12 @@ CREATE TABLE IF NOT EXISTS rules (
   clear_ms INTEGER NOT NULL,
   action TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS policies (
+  south_node_id TEXT NOT NULL,
+  group_id      TEXT NOT NULL,
+  config        TEXT NOT NULL,
+  PRIMARY KEY (south_node_id, group_id)
+);
 "#;
 
 /// 持久化错误
@@ -99,6 +105,9 @@ pub struct Snapshot {
     /// 规则。带 `#[serde(default)]`：旧版本库/快照没有该字段也能正常加载
     #[serde(default)]
     pub rules: Vec<crate::rules::Rule>,
+    /// 组数据策略。带 `#[serde(default)]`：旧版本库/快照没有该字段也能正常加载
+    #[serde(default)]
+    pub policies: Vec<crate::filters::GroupPolicy>,
 }
 
 impl Default for Snapshot {
@@ -110,6 +119,7 @@ impl Default for Snapshot {
             tags: Vec::new(),
             subscriptions: Vec::new(),
             rules: Vec::new(),
+            policies: Vec::new(),
         }
     }
 }
@@ -152,6 +162,7 @@ pub fn build_snapshot(
     tags: Vec<(NodeId, Tag)>,
     subscriptions: Vec<(NodeId, Vec<GroupSubscription>)>,
     rules: Vec<crate::rules::Rule>,
+    policies: Vec<crate::filters::GroupPolicy>,
 ) -> Snapshot {
     Snapshot {
         version: SNAPSHOT_VERSION,
@@ -160,6 +171,7 @@ pub fn build_snapshot(
         tags,
         subscriptions,
         rules,
+        policies,
     }
 }
 
@@ -463,6 +475,33 @@ fn load_from_db(conn: &Connection) -> Result<Snapshot, PersistError> {
         });
     }
 
+    // 策略
+    let mut policies = Vec::new();
+    let mut stmt = conn.prepare("SELECT south_node_id, group_id, config FROM policies")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (south_id, gid, config) = row?;
+        let south_node_id = parse_node_id(&south_id)?;
+        let group_id = parse_group_id(&gid)?;
+        let policy: crate::filters::GroupPolicy = serde_json::from_str(&config).map_err(|e| {
+            PersistError::Validation(format!(
+                "policy ({},{}): bad config JSON: {}",
+                south_id, gid, e
+            ))
+        })?;
+        // 覆盖路径参数（外部传入的 south_node_id/group_id 优先级更高）
+        let mut policy = policy;
+        policy.south_node_id = south_node_id;
+        policy.group_id = group_id;
+        policies.push(policy);
+    }
+
     Ok(Snapshot {
         version,
         nodes,
@@ -470,6 +509,7 @@ fn load_from_db(conn: &Connection) -> Result<Snapshot, PersistError> {
         tags,
         subscriptions,
         rules,
+        policies,
     })
 }
 
@@ -719,6 +759,32 @@ fn save_to_db(conn: &Connection, s: &Snapshot) -> Result<(), PersistError> {
     }
     let rule_keys: Vec<String> = s.rules.iter().map(|r| r.id.clone()).collect();
     delete_missing(&tx, "rules", "id", &rule_keys)?;
+
+    // 策略（south_node_id || '|' || group_id 作为复合主键的 key）
+    {
+        let mut stmt = tx.prepare_cached(
+            "INSERT INTO policies (south_node_id, group_id, config) VALUES (?1, ?2, ?3)
+             ON CONFLICT(south_node_id, group_id) DO UPDATE SET config = excluded.config",
+        )?;
+        for p in &s.policies {
+            stmt.execute(params![
+                p.south_node_id.0.to_string(),
+                p.group_id.0.to_string(),
+                serde_json::to_string(p)?,
+            ])?;
+        }
+    }
+    let policy_keys: Vec<String> = s
+        .policies
+        .iter()
+        .map(|p| format!("{}|{}", p.south_node_id.0, p.group_id.0))
+        .collect();
+    delete_missing(
+        &tx,
+        "policies",
+        "south_node_id || '|' || group_id",
+        &policy_keys,
+    )?;
 
     tx.commit()?;
     Ok(())
@@ -1274,6 +1340,9 @@ pub fn apply_to_store(store: &Store, s: &Snapshot) {
     }
     for r in &s.rules {
         store.rule_insert(r.clone());
+    }
+    for p in &s.policies {
+        store.policy_insert(p.clone());
     }
 }
 

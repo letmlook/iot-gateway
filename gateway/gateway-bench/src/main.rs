@@ -201,6 +201,7 @@ fn snapshot(nodes: usize, tags_per_node: usize) -> Snapshot {
         subscriptions: Vec::new(),
         // 规则不参与本压测的持久化路径（保存耗时主要由节点/组/点位决定）
         rules: Vec::new(),
+        policies: Vec::new(),
     };
     for n in 0..nodes {
         let node = Node::new(

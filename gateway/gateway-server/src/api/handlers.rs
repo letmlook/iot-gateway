@@ -2275,3 +2275,99 @@ pub async fn node_values(
         "values": values,
     })))
 }
+
+// ---------------------------------------------------------------------------
+// 组数据策略：死区/变化上报/滑动窗口聚合
+// ---------------------------------------------------------------------------
+
+/// GET /nodes/:id/groups/:gid/policy
+pub async fn get_policy(
+    State(state): State<AppState>,
+    Path((id, gid)): Path<(String, String)>,
+) -> Result<Json<Option<gateway_core::GroupPolicy>>, ApiError> {
+    let nid = parse_node_id(&id)?;
+    let gid = parse_group_id(&gid)?;
+    ensure_node_south(&state, nid)?;
+    let policy = state.manager.store.policy_get(nid, gid);
+    Ok(Json(policy))
+}
+
+/// 校验策略中的 tag_name 是否都在该组内
+fn validate_policy_tags(
+    store: &gateway_core::Store,
+    nid: gateway_sdk::NodeId,
+    gid: gateway_sdk::GroupId,
+    policy: &gateway_core::GroupPolicy,
+) -> Result<(), String> {
+    let group_tags = store.tags_by_group(nid, gid);
+    let tag_names: std::collections::HashSet<_> =
+        group_tags.iter().map(|t| t.name.as_str()).collect();
+    for td in &policy.tags {
+        if !tag_names.contains(td.tag_name.as_str()) {
+            return Err(format!(
+                "tag '{}' not found in group '{}'",
+                td.tag_name, gid.0
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// PUT /nodes/:id/groups/:gid/policy
+pub async fn put_policy(
+    State(state): State<AppState>,
+    Path((id, gid)): Path<(String, String)>,
+    Json(policy): Json<gateway_core::GroupPolicy>,
+) -> Result<Json<gateway_core::GroupPolicy>, ApiError> {
+    let nid = parse_node_id(&id)?;
+    let gid = parse_group_id(&gid)?;
+    ensure_node_south(&state, nid)?;
+
+    // 路径参数覆盖 body 中的 id
+    let mut policy = policy;
+    policy.south_node_id = nid;
+    policy.group_id = gid;
+
+    // 校验
+    gateway_core::validate_policy(&policy).map_err(ApiError::bad_request)?;
+
+    // 校验 tag_name 存在于该组
+    validate_policy_tags(&state.manager.store, nid, gid, &policy).map_err(ApiError::bad_request)?;
+
+    // emit_ms < 组 interval_ms 时 warn（合法但有效输出周期受采集节拍限制）
+    if let Some(ref win) = policy.window {
+        if let Some(grp) = state.manager.store.group_get(nid, gid) {
+            if win.emit_ms < grp.interval_ms {
+                tracing::warn!(
+                    "policy emit_ms ({}) < group interval_ms ({}); \
+                     effective output period will be limited by interval_ms",
+                    win.emit_ms,
+                    grp.interval_ms
+                );
+            }
+        }
+    }
+
+    // 写入存储 + 重建过滤基线（首采必报规则）
+    state.manager.store.policy_insert(policy.clone());
+    gateway_core::filters_forget_group(nid, gid);
+    state.persist().await;
+    Ok(Json(policy))
+}
+
+/// DELETE /nodes/:id/groups/:gid/policy
+pub async fn delete_policy(
+    State(state): State<AppState>,
+    Path((id, gid)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let nid = parse_node_id(&id)?;
+    let gid = parse_group_id(&gid)?;
+    ensure_node_south(&state, nid)?;
+    if state.manager.store.policy_remove(nid, gid).is_none() {
+        return Err(ApiError::not_found("policy not found"));
+    }
+    // 清除过滤运行态
+    gateway_core::filters_forget_group(nid, gid);
+    state.persist().await;
+    Ok(StatusCode::NO_CONTENT)
+}

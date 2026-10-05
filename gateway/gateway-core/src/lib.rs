@@ -5,6 +5,7 @@
 
 mod bus;
 mod data_flow;
+pub mod filters;
 mod loader;
 mod manager;
 mod node;
@@ -15,6 +16,11 @@ mod store;
 
 pub use bus::{subscription_set, Bus, SubscriptionTable};
 pub use data_flow::{DataFlowMetrics, DataFlowMetricsSnapshot, TagForwardedStat, TagPublishedStat};
+pub use filters::{
+    apply as apply_filters, clear_all as filters_clear_all, forget_group as filters_forget_group,
+    forget_node as filters_forget_node, validate_policy, FilterMode, FilterOutcome, GroupPolicy,
+    TagDeadband, WindowAgg, WindowPolicy,
+};
 pub use loader::{LoadedPlugin, PluginLoader};
 pub use manager::{
     LastValue, Manager, SouthConnectionState, DEFAULT_MAX_CONCURRENT_POLLS, MIN_POLL_INTERVAL_MS,

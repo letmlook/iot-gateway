@@ -297,6 +297,8 @@ impl Manager {
             self.bus.forget_node(id);
             // 最近值缓存同样按节点回收
             self.last_values.retain(|k, _| k.0 != id);
+            // 过滤状态与窗口状态按节点清零
+            crate::filters::forget_node(id);
         } else {
             self.data_flow_metrics.forget_north_node(id);
         }
@@ -594,7 +596,8 @@ impl Manager {
             }
         }
         let rules = self.store.rules_list();
-        crate::persist::build_snapshot(nodes, groups, tags, subscriptions, rules)
+        let policies = self.store.policies_list();
+        crate::persist::build_snapshot(nodes, groups, tags, subscriptions, rules, policies)
     }
 
     /// 应用持久化快照（清空后填入），并对每个节点调用插件 open、init。
@@ -707,6 +710,8 @@ impl Manager {
             self.remove_subscriptions_ref_group(node_id, group_id).await;
             self.data_flow_metrics.forget_group(node_id, group_id);
             self.bus.forget_group(&(node_id, group_id));
+            // 过滤状态与窗口状态按组清零
+            crate::filters::forget_group(node_id, group_id);
         }
         g
     }
@@ -743,6 +748,7 @@ impl Manager {
     }
 
     /// 更新标签字段。同组内标签名唯一；南向节点可先校验点位再更新。
+    #[allow(clippy::too_many_arguments)]
     pub async fn tag_update_validated(
         &self,
         node_id: NodeId,
@@ -1181,22 +1187,64 @@ async fn poll_group_once(
                 );
             }
 
+            // 数据面过滤：死区/变化上报/滑动窗口聚合（插入点固定：规则之后、publish 之前）
+            let outcome = crate::filters::apply(store, id, gid, &values, ts_ms as u64);
+            if outcome.suppressed_msgs > 0 {
+                metrics
+                    .filters_suppressed_msgs
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            if outcome.suppressed_tags > 0 {
+                metrics
+                    .filters_suppressed_tags
+                    .fetch_add(outcome.suppressed_tags, Ordering::Relaxed);
+            }
+            if outcome.window_emitted > 0 {
+                metrics.window_emitted_msgs.fetch_add(1, Ordering::Relaxed);
+            }
+
+            // 过滤后值 = 真实点位(published) + 虚拟点位(synthetic)
+            let filtered_values: Vec<_> = outcome
+                .published
+                .iter()
+                .cloned()
+                .chain(outcome.synthetic.iter().cloned())
+                .collect();
+
             let node_name = store.node_get(id).map(|n| n.config.name);
             let group_name = store.group_get(id, gid).map(|g| g.name);
-            let tag_names: HashMap<_, _> = values
+
+            // 合并真实点位名称与虚拟点位名称
+            let mut tag_names: HashMap<_, _> = filtered_values
                 .iter()
                 .filter_map(|(tid, _)| store.tag_get(*tid).map(|t| (*tid, t.name)))
                 .collect();
+            tag_names.extend(outcome.synthetic_names);
             let tag_names = if tag_names.is_empty() {
                 None
             } else {
                 Some(tag_names)
             };
+
+            // 整批抑制时跳过 publish（但仍更新 last_values）
+            if filtered_values.is_empty() {
+                // south_published 不增加（整批被过滤），bus_no_subscribers 也不增加（未尝试投递）
+                let mut st = south_conn.write().await;
+                st.insert(
+                    id,
+                    SouthConnectionState {
+                        connected: true,
+                        last_error: None,
+                    },
+                );
+                return;
+            }
+
             let data = Arc::new(GroupData {
                 node_id: id,
                 group_id: gid,
                 ts: Utc::now(),
-                values,
+                values: filtered_values,
                 node_name,
                 group_name,
                 tag_names,

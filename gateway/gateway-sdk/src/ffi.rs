@@ -159,6 +159,7 @@ pub fn alloc_c_string(s: &str) -> *mut c_char {
 
 /// 释放 `alloc_c_string` 分配的指针；.so 插件须重新导出此符号供宿主调用。
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C-unwind" fn gateway_plugin_free_string(ptr: *mut c_char) {
     if ptr.is_null() {
         return;
@@ -183,6 +184,7 @@ pub fn parse_result(json: Option<&str>) -> Result<(), String> {
 }
 
 /// 从 *const c_char 读取 C 字符串并转为 String；调用方负责 free。
+#[allow(clippy::missing_safety_doc)]
 pub unsafe fn ptr_to_string(ptr: *const c_char) -> Option<String> {
     if ptr.is_null() {
         return None;

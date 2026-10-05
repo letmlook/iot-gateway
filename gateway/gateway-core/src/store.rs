@@ -16,6 +16,8 @@ pub struct Store {
     tag_location: Arc<DashMap<TagId, (NodeId, GroupId)>>,
     /// 规则（key = rule id）。规则随配置持久化，运行期状态由 RuleEngine 维护
     rules: Arc<DashMap<String, crate::rules::Rule>>,
+    /// 组数据策略（key = (node_id, group_id)）。运行期状态由 filters::FilterState 维护
+    policies: Arc<DashMap<(NodeId, GroupId), crate::filters::GroupPolicy>>,
 }
 
 impl Store {
@@ -69,8 +71,9 @@ impl Store {
         self.tags.clear();
         self.group_tags.clear();
         self.tag_location.clear();
-        // 规则也来自快照（apply_snapshot 会重新灌入），因此一并清空
+        // 规则与策略都来自快照（apply_snapshot 会重新灌入），因此一并清空
         self.rules.clear();
+        self.policies.clear();
     }
 
     // ---------- Groups ----------
@@ -255,6 +258,32 @@ impl Store {
             })
             .map(|r| r.value().clone())
             .collect()
+    }
+
+    // ---------- Policies ----------
+    pub fn policy_insert(&self, policy: crate::filters::GroupPolicy) {
+        self.policies
+            .insert((policy.south_node_id, policy.group_id), policy);
+    }
+
+    pub fn policy_remove(
+        &self,
+        node_id: NodeId,
+        group_id: GroupId,
+    ) -> Option<crate::filters::GroupPolicy> {
+        self.policies.remove(&(node_id, group_id)).map(|(_, v)| v)
+    }
+
+    pub fn policy_get(
+        &self,
+        node_id: NodeId,
+        group_id: GroupId,
+    ) -> Option<crate::filters::GroupPolicy> {
+        self.policies.get(&(node_id, group_id)).map(|r| r.clone())
+    }
+
+    pub fn policies_list(&self) -> Vec<crate::filters::GroupPolicy> {
+        self.policies.iter().map(|r| r.value().clone()).collect()
     }
 
     pub fn tags_total_count(&self) -> u64 {

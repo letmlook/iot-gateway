@@ -430,6 +430,7 @@ async fn enqueue(node_id: NodeId, node_state: &NodeMqttState, topic: String, pay
 }
 
 #[cfg(feature = "mqtt-client")]
+#[allow(clippy::too_many_arguments)]
 async fn run_event_loop(
     node_id: NodeId,
     host: String,

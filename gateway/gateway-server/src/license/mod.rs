@@ -1,6 +1,8 @@
 //! 完全离线的软件授权：机器码、RSA 验签、功能分级。
 //! 禁止任何网络请求，仅依赖本地 license.dat 与内置公钥。
 
+#![allow(clippy::module_inception)]
+
 mod error;
 mod feature;
 mod hardware;

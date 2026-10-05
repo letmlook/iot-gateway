@@ -60,6 +60,12 @@ pub struct DataFlowMetrics {
     pub history_rows_pruned: AtomicU64,
     /// 历史数据写入失败次数
     pub history_write_err: AtomicU64,
+    /// 整批过滤抑制次数（过滤后无任何输出）
+    pub filters_suppressed_msgs: AtomicU64,
+    /// 被过滤抑制的点位次
+    pub filters_suppressed_tags: AtomicU64,
+    /// 窗口聚合发射次数
+    pub window_emitted_msgs: AtomicU64,
     /// 按北向节点的 Lagged 条数（用于定位「是哪个北向节点在丢数据」）
     pub lagged_by_node: Arc<dashmap::DashMap<NodeId, AtomicU64>>,
     /// 点位级：南向 (south_node_id, group_id, tag_id) -> 发布次数
@@ -87,6 +93,9 @@ impl DataFlowMetrics {
             history_rows_written: AtomicU64::new(0),
             history_rows_pruned: AtomicU64::new(0),
             history_write_err: AtomicU64::new(0),
+            filters_suppressed_msgs: AtomicU64::new(0),
+            filters_suppressed_tags: AtomicU64::new(0),
+            window_emitted_msgs: AtomicU64::new(0),
             lagged_by_node: Arc::new(dashmap::DashMap::new()),
             published_per_tag: Arc::new(dashmap::DashMap::new()),
             forwarded_per_tag: Arc::new(dashmap::DashMap::new()),
@@ -149,6 +158,13 @@ impl DataFlowMetrics {
             .retain(|k, _| !(k.1 == south_node_id && k.2 == group_id));
     }
 
+    /// 清理全部过滤与窗口指标
+    pub fn clear_filters(&self) {
+        self.filters_suppressed_msgs.store(0, Ordering::Relaxed);
+        self.filters_suppressed_tags.store(0, Ordering::Relaxed);
+        self.window_emitted_msgs.store(0, Ordering::Relaxed);
+    }
+
     /// 清理某北向节点的统计
     pub fn forget_north_node(&self, north_node_id: NodeId) {
         self.forwarded_per_tag.retain(|k, _| k.0 != north_node_id);
@@ -174,6 +190,9 @@ impl DataFlowMetrics {
             history_rows_written: self.history_rows_written.load(Ordering::Relaxed),
             history_rows_pruned: self.history_rows_pruned.load(Ordering::Relaxed),
             history_write_err: self.history_write_err.load(Ordering::Relaxed),
+            filters_suppressed_msgs: self.filters_suppressed_msgs.load(Ordering::Relaxed),
+            filters_suppressed_tags: self.filters_suppressed_tags.load(Ordering::Relaxed),
+            window_emitted_msgs: self.window_emitted_msgs.load(Ordering::Relaxed),
             lagged_by_node: self
                 .lagged_by_node
                 .iter()
@@ -243,6 +262,12 @@ pub struct DataFlowMetricsSnapshot {
     pub history_rows_pruned: u64,
     /// 历史数据写入失败次数
     pub history_write_err: u64,
+    /// 整批过滤抑制次数
+    pub filters_suppressed_msgs: u64,
+    /// 被过滤抑制的点位次
+    pub filters_suppressed_tags: u64,
+    /// 窗口聚合发射次数
+    pub window_emitted_msgs: u64,
     /// (北向节点, 跳过的消息条数)：定位是哪个北向节点在丢数据
     pub lagged_by_node: Vec<(NodeId, u64)>,
     pub published_per_tag: Vec<TagPublishedStat>,
