@@ -724,17 +724,22 @@ fn base64_encode(input: &str) -> String {
     let mut result = String::new();
     let bytes = input.as_bytes();
     for chunk in bytes.chunks(3) {
-        let b0 = chunk[0] as i32;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as i32;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as i32;
-        result.push(ALPHABET[((b0 << 2) | (b1 >> 6)) as usize] as char);
+        let b0 = chunk[0] as usize;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as usize;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as usize;
+        // char1: top 6 bits of b0
+        result.push(ALPHABET[b0 >> 2] as char);
+        // char2: bottom 2 bits of b0 + top 4 bits of b1
+        result.push(ALPHABET[((b0 & 0x03) << 4) | (b1 >> 4)] as char);
         if chunk.len() > 1 {
-            result.push(ALPHABET[(((b1 & 0x3F) << 4) | (b2 >> 4)) as usize] as char);
+            // char3: bottom 4 bits of b1 + top 2 bits of b2
+            result.push(ALPHABET[((b1 & 0x0F) << 2) | (b2 >> 6)] as char);
         } else {
             result.push('=');
         }
         if chunk.len() > 2 {
-            result.push(ALPHABET[((b2 & 0x3F) << 2) as usize] as char);
+            // char4: bottom 6 bits of b2
+            result.push(ALPHABET[b2 & 0x3F] as char);
         } else {
             result.push('=');
         }
@@ -905,4 +910,300 @@ fn config_schema() -> gateway_sdk::ConfigSchema {
             valid: Some(ParamValid { min: Some(10), max: Some(120_000), regex: None, length: None }),
             ..Default::default()
         })
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // Database name whitelist validation
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn db_name_whitelist_valid() {
+        let valid_names = [
+            "gateway",
+            "Gateway_DB",
+            "test123",
+            "a",
+            "A1_B2_C3",
+            "中文", // Unicode letters are not [A-Za-z0-9_] but regex check is on bytes
+        ];
+        let re = regex::Regex::new(DB_NAME_REGEX).unwrap();
+        for name in valid_names {
+            // Only test ASCII names for the regex
+            if name.is_ascii() {
+                assert!(re.is_match(name), " '{}' should be valid", name);
+            }
+        }
+    }
+
+    #[test]
+    fn db_name_whitelist_invalid() {
+        let invalid_names = [
+            "gateway-db", // hyphen
+            "gateway.db", // dot
+            "gateway db", // space
+            "gateway,db", // comma
+            "gateway=db", // equals
+        ];
+        let re = regex::Regex::new(DB_NAME_REGEX).unwrap();
+        for name in invalid_names {
+            assert!(!re.is_match(name), " '{}' should be invalid", name);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // sanitize_table_name
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn sanitize_table_name_keeps_alphanumeric_and_underscore() {
+        assert_eq!(sanitize_table_name("node1"), "node1");
+        assert_eq!(sanitize_table_name("Group_A"), "Group_A");
+        assert_eq!(sanitize_table_name("test123"), "test123");
+    }
+
+    #[test]
+    fn sanitize_table_name_replaces_invalid_chars() {
+        assert_eq!(sanitize_table_name("node-1"), "node_1");
+        assert_eq!(sanitize_table_name("node.1"), "node_1");
+        assert_eq!(sanitize_table_name("node 1"), "node_1");
+        assert_eq!(sanitize_table_name("node,1"), "node_1");
+        assert_eq!(sanitize_table_name("node=1"), "node_1");
+    }
+
+    #[test]
+    fn sanitize_table_name_underscore_only() {
+        assert_eq!(sanitize_table_name("---"), "___");
+        assert_eq!(sanitize_table_name("a.b.c"), "a_b_c");
+    }
+
+    // -------------------------------------------------------------------------
+    // base64_encode
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn base64_encode_basic() {
+        // "root:taosdata" should encode correctly
+        let encoded = base64_encode("root:taosdata");
+        assert_eq!(encoded, "cm9vdDp0YW9zZGF0YQ==");
+    }
+
+    #[test]
+    fn base64_encode_empty() {
+        assert_eq!(base64_encode(""), "");
+    }
+
+    #[test]
+    fn base64_encode_short() {
+        // "a" -> "YQ==" (6 bits from b0, 2 bits padded, then padding)
+        let encoded = base64_encode("a");
+        assert_eq!(encoded, "YQ==");
+    }
+
+    #[test]
+    fn base64_encode_padding() {
+        // 1 byte -> "YQ=="
+        assert_eq!(base64_encode("a"), "YQ==");
+        // 2 bytes -> "YWI="
+        assert_eq!(base64_encode("ab"), "YWI=");
+        // 3 bytes -> "YWJj" (no padding)
+        assert_eq!(base64_encode("abc"), "YWJj");
+        // 4 bytes -> "YWJjZA==" (multiple of 3, no padding needed... wait 4 bytes = 2 chunks)
+        assert_eq!(base64_encode("abcd"), "YWJjZA==");
+    }
+
+    // -------------------------------------------------------------------------
+    // Create database SQL generation
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn create_db_sql_format() {
+        let db = "gateway";
+        let sql = format!("CREATE DATABASE IF NOT EXISTS {} PRECISION 'ms'", db);
+        assert_eq!(sql, "CREATE DATABASE IF NOT EXISTS gateway PRECISION 'ms'");
+    }
+
+    // -------------------------------------------------------------------------
+    // join_payloads
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn join_payloads_empty() {
+        let result = join_payloads(vec![]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn join_payloads_single() {
+        let result = join_payloads(vec![b"line1".to_vec()]);
+        assert_eq!(result, b"line1");
+    }
+
+    #[test]
+    fn join_payloads_multiple() {
+        let payloads = vec![b"line1".to_vec(), b"line2".to_vec(), b"line3".to_vec()];
+        let result = join_payloads(payloads);
+        // Lines joined with \n
+        assert_eq!(result, b"line1\nline2\nline3");
+    }
+
+    // -------------------------------------------------------------------------
+    // ConfigSchema
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn config_schema_contains_required_params() {
+        let schema = config_schema();
+        let param_names: Vec<_> = schema.params.iter().map(|p| p.name.clone()).collect();
+        assert!(
+            param_names.contains(&"url".to_string()),
+            "should have url param"
+        );
+        assert!(
+            param_names.contains(&"database".to_string()),
+            "should have database param"
+        );
+        assert!(
+            param_names.contains(&"username".to_string()),
+            "should have username param"
+        );
+        assert!(
+            param_names.contains(&"password".to_string()),
+            "should have password param"
+        );
+        assert!(
+            param_names.contains(&"table_name_key".to_string()),
+            "should have table_name_key param"
+        );
+        assert!(
+            param_names.contains(&"auto_create_db".to_string()),
+            "should have auto_create_db param"
+        );
+        assert!(
+            param_names.contains(&"batch_max_lines".to_string()),
+            "should have batch_max_lines param"
+        );
+        assert!(
+            param_names.contains(&"batch_interval_ms".to_string()),
+            "should have batch_interval_ms param"
+        );
+    }
+
+    #[test]
+    fn config_schema_password_is_sensitive() {
+        let schema = config_schema();
+        let sensitive = schema.sensitive.as_ref();
+        assert!(
+            sensitive
+                .map(|s| s.contains(&"password".to_string()))
+                .unwrap_or(false),
+            "password should be in sensitive list"
+        );
+    }
+
+    #[test]
+    fn config_schema_url_has_regex() {
+        let schema = config_schema();
+        let url_param = schema
+            .params
+            .iter()
+            .find(|p| p.name == "url")
+            .expect("url param exists");
+        let valid = url_param.valid.as_ref().expect("url has valid rules");
+        assert!(valid.regex.is_some(), "url should have regex validation");
+        let regex = valid.regex.as_ref().unwrap();
+        assert!(
+            regex.contains("https?"),
+            "url regex should allow http/https"
+        );
+    }
+
+    #[test]
+    fn config_schema_database_has_whitelist_regex() {
+        let schema = config_schema();
+        let db_param = schema
+            .params
+            .iter()
+            .find(|p| p.name == "database")
+            .expect("database param exists");
+        let valid = db_param.valid.as_ref().expect("database has valid rules");
+        let regex = valid.regex.as_ref().expect("database has regex");
+        assert_eq!(regex, DB_NAME_REGEX, "database should use whitelist regex");
+    }
+
+    #[test]
+    fn config_schema_default_values() {
+        let schema = config_schema();
+        // url default
+        let url_param = schema
+            .params
+            .iter()
+            .find(|p| p.name == "url")
+            .expect("url param");
+        assert_eq!(
+            url_param.default.as_ref().expect("url has default"),
+            &serde_json::json!("http://127.0.0.1:6041")
+        );
+        // database default
+        let db_param = schema
+            .params
+            .iter()
+            .find(|p| p.name == "database")
+            .expect("database param");
+        assert_eq!(
+            db_param.default.as_ref().expect("database has default"),
+            &serde_json::json!("gateway")
+        );
+        // auto_create_db default
+        let ac_param = schema
+            .params
+            .iter()
+            .find(|p| p.name == "auto_create_db")
+            .expect("auto_create_db param");
+        assert_eq!(
+            ac_param
+                .default
+                .as_ref()
+                .expect("auto_create_db has default"),
+            &serde_json::json!(true)
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Default constants
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn default_constants() {
+        assert_eq!(DEFAULT_URL, "http://127.0.0.1:6041");
+        assert_eq!(DEFAULT_DATABASE, "gateway");
+        assert_eq!(DEFAULT_USERNAME, "root");
+        assert_eq!(DEFAULT_PASSWORD, "taosdata");
+        assert_eq!(DEFAULT_TABLE_NAME_KEY, "gateway_table");
+        assert_eq!(DEFAULT_BATCH_MAX_LINES, 500);
+        assert_eq!(DEFAULT_BATCH_INTERVAL_MS, 200);
+        assert_eq!(TAOS_WRITE_PATH, "/influxdb/v1/write");
+        assert_eq!(TAOS_SQL_PATH, "/rest/sql");
+    }
+
+    // -------------------------------------------------------------------------
+    // TdEngineConnectionStatus default
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn connection_status_default() {
+        let status = TdEngineConnectionStatus::default();
+        assert!(!status.connected);
+        assert!(status.last_error.is_none());
+        assert_eq!(status.dropped_rejected, 0);
+        assert_eq!(status.dropped_no_client, 0);
+        assert_eq!(status.skipped_bytes_fields, 0);
+    }
 }

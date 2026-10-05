@@ -79,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         mgr.register_north("mqtt", Arc::new(MqttPlugin::new()));
         // mgr.register_north("http", Arc::new(HttpPlugin::new()));
         // mgr.register_north("influxdb", Arc::new(InfluxDbPlugin::new()));
-        // mgr.register_north("tdengine", Arc::new(TdEnginePlugin::new()));
+        mgr.register_north("tdengine", Arc::new(plugin_tdengine::TdEnginePlugin::new()));
     }
 
     // 进程隔离模式下持有加载器：重启计数要从它这里读（见 /api/metrics）
