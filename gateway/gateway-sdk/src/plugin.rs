@@ -59,7 +59,11 @@ impl PluginInfo {
 }
 
 /// 南向插件：连接设备、按 Group 轮询、读写、校验。
+//
+// clippy 1.99 起 double_must_use 会命中 async_trait 生成函数（宏注入的 #[must_use]
+// 与 Pin<Box<dyn Future>> 自身的 must_use 叠加），属宏行为而非代码问题。
 #[async_trait]
+#[allow(clippy::double_must_use)]
 pub trait SouthPlugin: Send + Sync {
     fn meta(&self) -> PluginMeta;
 
@@ -146,6 +150,7 @@ pub trait SouthPlugin: Send + Sync {
 
 /// 北向插件：订阅南向 Group，接收 GroupData，转发到云/应用。
 #[async_trait]
+#[allow(clippy::double_must_use)]
 pub trait NorthPlugin: Send + Sync {
     fn meta(&self) -> PluginMeta;
 

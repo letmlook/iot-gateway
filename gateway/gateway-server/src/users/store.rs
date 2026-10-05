@@ -164,12 +164,16 @@ impl UserStore {
         let file = dir.join(".admin_initial_password");
         if let Err(e) = std::fs::write(&file, pwd) {
             tracing::warn!("write {} failed: {}", file.display(), e);
-            return;
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = &file; // 非 Unix 平台暂无 0600 等价处理
+            }
         }
     }
 
