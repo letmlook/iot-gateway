@@ -54,3 +54,6 @@ config/license.dat
 
 # 发布制品
 dist/
+
+# ZCode workspace metadata (machine-owned)
+.zcode/
