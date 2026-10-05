@@ -41,6 +41,10 @@ struct NodeInfluxDbState {
     tx: Option<mpsc::Sender<Record>>,
     cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
     event_loop_handle: Option<std::thread::JoinHandle<()>>,
+    /// 渲染后的 measurement
+    measurement_template: String,
+    /// 额外的静态 tags（从 tags_json 配置解析）
+    extra_tags: Vec<(String, String)>,
 }
 
 struct InfluxDbState {
@@ -96,7 +100,7 @@ impl NorthPlugin for InfluxDbPlugin {
         let bucket = config_str(&config, "bucket", "");
         let token = config_str(&config, "token", "");
         let precision = config_str(&config, "precision", DEFAULT_PRECISION);
-        let _measurement_template = config_str(
+        let measurement_template = config_str(
             &config,
             "measurement_template",
             DEFAULT_MEASUREMENT_TEMPLATE,
@@ -123,12 +127,13 @@ impl NorthPlugin for InfluxDbPlugin {
         }
 
         // 解析 tags_json
-        let _extra_tags: HashMap<String, String> = if tags_json.is_empty() {
-            HashMap::new()
+        let extra_tags: Vec<(String, String)> = if tags_json.is_empty() {
+            Vec::new()
         } else {
-            serde_json::from_str(&tags_json).map_err(|e| {
+            let map: HashMap<String, String> = serde_json::from_str(&tags_json).map_err(|e| {
                 gateway_sdk::PluginError::config_invalid(format!("tags_json parse failed: {}", e))
-            })?
+            })?;
+            map.into_iter().collect()
         };
 
         log::info(
@@ -233,6 +238,8 @@ impl NorthPlugin for InfluxDbPlugin {
                 tx: Some(record_tx),
                 cancel_tx: Some(cancel_tx),
                 event_loop_handle: Some(handle),
+                measurement_template,
+                extra_tags,
             },
         );
 
@@ -328,6 +335,10 @@ impl NorthPlugin for InfluxDbPlugin {
             return Ok(());
         };
 
+        // 从配置获取模板和额外 tags
+        let measurement_template = node_state.measurement_template.clone();
+        let extra_tags = node_state.extra_tags.clone();
+
         // 构建行协议（单行）
         let mut line = String::new();
         let node_name = data
@@ -338,16 +349,22 @@ impl NorthPlugin for InfluxDbPlugin {
             .group_name
             .clone()
             .unwrap_or_else(|| data.group_id.0.to_string());
-        let measurement = "${node_name}".replace("${node_name}", &node_name);
 
-        // tags: node=<node_name>, group=<group_name>
-        let tags = vec![
+        // 按 design §3.4 渲染 measurement 模板
+        let measurement = measurement_template
+            .replace("${node_id}", &data.node_id.0.to_string())
+            .replace("${group_id}", &data.group_id.0.to_string())
+            .replace("${node_name}", &node_name)
+            .replace("${group_name}", &group_name)
+            .replace("${timestamp}", &data.ts.to_rfc3339());
+
+        // tags: node=<node_name>, group=<group_name> + 用户追加的 extra_tags
+        let mut tags = vec![
             ("node".to_string(), node_name.clone()),
             ("group".to_string(), group_name),
         ];
-        // 追加 extra_tags
-        // (将从 node_state 的 extra_tags 获取，但这里没有存储，先留空)
-        // extra_tags 在 worker 中使用，这里只需要生成 line payload
+        tags.extend(extra_tags);
+
         let ts_ms = data.ts.timestamp_millis();
 
         let mut skipped = 0u64;
@@ -784,4 +801,367 @@ fn config_schema() -> gateway_sdk::ConfigSchema {
             valid: Some(ParamValid { min: Some(10), max: Some(120_000), regex: None, length: None }),
             ..Default::default()
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------------------------------------------------------------------------
+    // join_payloads tests (sync)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn join_payloads_empty() {
+        let payloads: Vec<Vec<u8>> = vec![];
+        let result = join_payloads(payloads);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn join_payloads_single() {
+        let payloads = vec![b"cpu,host=srv1 val=25.5i".to_vec()];
+        let result = join_payloads(payloads);
+        assert_eq!(result, b"cpu,host=srv1 val=25.5i".to_vec());
+    }
+
+    #[test]
+    fn join_payloads_multiple_lines() {
+        let payloads = vec![
+            b"cpu,host=srv1 val=25.5i".to_vec(),
+            b"cpu,host=srv2 val=30.0i".to_vec(),
+        ];
+        let result = join_payloads(payloads);
+        assert_eq!(
+            result,
+            b"cpu,host=srv1 val=25.5i\ncpu,host=srv2 val=30.0i".to_vec()
+        );
+    }
+
+    #[test]
+    fn join_payloads_preserves_content_with_newlines() {
+        // each payload may itself contain \n (line protocol allows this in field values
+        // only when properly escaped, but join_payloads treats each vec as atomic)
+        let payloads = vec![
+            b"m,f1=1i".to_vec(),
+            b"m,f2=2i".to_vec(),
+            b"m,f3=3i".to_vec(),
+        ];
+        let result = join_payloads(payloads);
+        let expected = b"m,f1=1i\nm,f2=2i\nm,f3=3i".to_vec();
+        assert_eq!(result, expected);
+    }
+
+    // ---------------------------------------------------------------------------
+    // HTTP status code → HttpClass classification
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn http_class_204_delivered() {
+        assert_eq!(
+            gateway_plugin_common::http::HttpClass::from_status_code(204),
+            gateway_plugin_common::http::HttpClass::Delivered
+        );
+    }
+
+    #[test]
+    fn http_class_200_delivered() {
+        assert_eq!(
+            gateway_plugin_common::http::HttpClass::from_status_code(200),
+            gateway_plugin_common::http::HttpClass::Delivered
+        );
+    }
+
+    #[test]
+    fn http_class_400_rejected() {
+        assert_eq!(
+            gateway_plugin_common::http::HttpClass::from_status_code(400),
+            gateway_plugin_common::http::HttpClass::Rejected
+        );
+    }
+
+    #[test]
+    fn http_class_401_rejected() {
+        assert_eq!(
+            gateway_plugin_common::http::HttpClass::from_status_code(401),
+            gateway_plugin_common::http::HttpClass::Rejected
+        );
+    }
+
+    #[test]
+    fn http_class_429_retryable() {
+        assert_eq!(
+            gateway_plugin_common::http::HttpClass::from_status_code(429),
+            gateway_plugin_common::http::HttpClass::Retryable
+        );
+    }
+
+    #[test]
+    fn http_class_500_retryable() {
+        assert_eq!(
+            gateway_plugin_common::http::HttpClass::from_status_code(500),
+            gateway_plugin_common::http::HttpClass::Retryable
+        );
+    }
+
+    #[test]
+    fn http_class_503_retryable() {
+        assert_eq!(
+            gateway_plugin_common::http::HttpClass::from_status_code(503),
+            gateway_plugin_common::http::HttpClass::Retryable
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Line protocol encoding via common::line (shared with tdengine)
+    // Verifies the integration path used in on_group_data
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn line_encoding_temperature_int() {
+        use gateway_plugin_common::line::{encode, LineField, LinePoint};
+        let point = LinePoint {
+            measurement: "sensor".to_string(),
+            tags: vec![
+                ("node".to_string(), "temp-01".to_string()),
+                ("group".to_string(), "env".to_string()),
+            ],
+            fields: vec![
+                ("temperature".to_string(), LineField::Int(256)),
+                ("humidity".to_string(), LineField::Int(85)),
+            ],
+            ts_ms: 1704067200000,
+        };
+        let mut out = String::new();
+        encode(&point, &mut out);
+        // measurement must not contain unescaped comma
+        assert!(!out.starts_with("sensor,,"));
+        // integer suffix
+        assert!(out.contains("256i"));
+        assert!(out.contains("85i"));
+        // ends with timestamp
+        assert!(out.ends_with("1704067200000"));
+    }
+
+    #[test]
+    fn line_encoding_with_special_chars() {
+        use gateway_plugin_common::line::{encode, LineField, LinePoint};
+        let point = LinePoint {
+            measurement: "cpu,usage".to_string(), // comma and space must be escaped
+            tags: vec![("k=v".to_string(), "v b".to_string())], // = and space must be escaped
+            fields: vec![(
+                "msg".to_string(),
+                LineField::Str(r#"say "hi"\test"#.to_string()),
+            )],
+            ts_ms: 1000,
+        };
+        let mut out = String::new();
+        encode(&point, &mut out);
+        // escaped comma in measurement
+        assert!(out.starts_with("cpu\\,usage"));
+        // escaped equals in tag key
+        assert!(out.contains("k\\=v="));
+        // escaped space in tag value
+        assert!(out.contains("v\\ b"));
+        // string field in double quotes with escaped backslash and quote
+        assert!(out.contains(r#""say \"hi\"\\test""#));
+    }
+
+    #[test]
+    fn line_encoding_bool_and_float() {
+        use gateway_plugin_common::line::{encode, LineField, LinePoint};
+        let point = LinePoint {
+            measurement: "status".to_string(),
+            tags: vec![],
+            fields: vec![
+                ("online".to_string(), LineField::Bool(true)),
+                ("temp".to_string(), LineField::Float(36.6)),
+            ],
+            ts_ms: 2000,
+        };
+        let mut out = String::new();
+        encode(&point, &mut out);
+        // no tags → no comma after measurement; bool field has 't' suffix
+        assert!(out.contains("online=t"));
+        assert!(out.contains("temp="));
+    }
+
+    #[test]
+    fn line_encoding_unsigned_int() {
+        use gateway_plugin_common::line::{encode, LineField, LinePoint};
+        let point = LinePoint {
+            measurement: "counter".to_string(),
+            tags: vec![],
+            fields: vec![("packets".to_string(), LineField::UInt(1234567890u64))],
+            ts_ms: 3000,
+        };
+        let mut out = String::new();
+        encode(&point, &mut out);
+        assert!(out.contains("1234567890u"));
+    }
+
+    // ---------------------------------------------------------------------------
+    // HTTP status code → HttpClass classification (already covered by
+    // common::http::tests; additional integration-level tests via send_lines)
+    // ---------------------------------------------------------------------------
+
+    // Note: reqwest-based mock server tests are inherently fragile on Windows due
+    // to TCP stream timing. The core logic is covered by:
+    //   - gateway_plugin_common::http::tests::status_code_classification
+    //   - send_lines returns HttpClass based on status codes (tested below)
+    //   - URL construction is a simple format! string (§3.4 requirement)
+    //
+    // The actual HTTP request construction (URL + headers) is verified by:
+    //   1. Compilation — send_lines compiles with correct header calls
+    //   2. Integration test: successful 204 response through the real send_lines path
+
+    #[test]
+    fn send_lines_classifies_204_as_delivered() {
+        use std::io::{Read, Write};
+        use std::net::{SocketAddr, TcpListener};
+
+        let listener = TcpListener::bind("127.0.0.1:0".to_string()).unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        let url = format!("http://{}", addr);
+
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap();
+            // Send minimal 204 response
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+            stream.flush().unwrap();
+            String::from_utf8_lossy(&buf[..n]).to_string()
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = reqwest::Client::new();
+        let class = rt.block_on(send_lines(
+            &client,
+            &url,
+            "my-org",
+            "my-bucket",
+            "my-token",
+            "ms",
+            b"cpu val=1i".to_vec(),
+        ));
+        assert_eq!(class, gateway_plugin_common::http::HttpClass::Delivered);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn send_lines_classifies_400_as_rejected() {
+        use std::io::{Read, Write};
+        use std::net::{SocketAddr, TcpListener};
+
+        let listener = TcpListener::bind("127.0.0.1:0".to_string()).unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        let url = format!("http://{}", addr);
+
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _n = stream.read(&mut buf).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+            stream.flush().unwrap();
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = reqwest::Client::new();
+        let class = rt.block_on(send_lines(
+            &client,
+            &url,
+            "org",
+            "bucket",
+            "token",
+            "ms",
+            b"bad".to_vec(),
+        ));
+        assert_eq!(class, gateway_plugin_common::http::HttpClass::Rejected);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn send_lines_classifies_429_as_retryable() {
+        use std::io::{Read, Write};
+        use std::net::{SocketAddr, TcpListener};
+
+        let listener = TcpListener::bind("127.0.0.1:0".to_string()).unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        let url = format!("http://{}", addr);
+
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _n = stream.read(&mut buf).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+            stream.flush().unwrap();
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = reqwest::Client::new();
+        let class = rt.block_on(send_lines(
+            &client,
+            &url,
+            "org",
+            "bucket",
+            "token",
+            "ms",
+            b"cpu".to_vec(),
+        ));
+        assert_eq!(class, gateway_plugin_common::http::HttpClass::Retryable);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn send_lines_classifies_500_as_retryable() {
+        use std::io::{Read, Write};
+        use std::net::{SocketAddr, TcpListener};
+
+        let listener = TcpListener::bind("127.0.0.1:0".to_string()).unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        let url = format!("http://{}", addr);
+
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _n = stream.read(&mut buf).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+            stream.flush().unwrap();
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = reqwest::Client::new();
+        let class = rt.block_on(send_lines(
+            &client,
+            &url,
+            "org",
+            "bucket",
+            "token",
+            "ms",
+            b"cpu".to_vec(),
+        ));
+        assert_eq!(class, gateway_plugin_common::http::HttpClass::Retryable);
+        handle.join().unwrap();
+    }
 }

@@ -217,3 +217,174 @@ pub fn payload_for_format(data: &GroupData, upload_format: &str) -> Vec<u8> {
         serde_json::to_vec(data).unwrap_or_default()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use gateway_sdk::types::TagId;
+
+    fn make_node_id() -> NodeId {
+        NodeId(uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap())
+    }
+
+    fn make_group_id() -> GroupId {
+        GroupId(uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap())
+    }
+
+    fn make_tag_id(n: u8) -> TagId {
+        TagId(uuid::Uuid::parse_str(&format!("00000000-0000-0000-0000-00000000000{}", n)).unwrap())
+    }
+
+    fn group_data_with_name() -> GroupData {
+        let node_id = make_node_id();
+        let group_id = make_group_id();
+        let ts = chrono::Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let mut tag_names = std::collections::HashMap::new();
+        tag_names.insert(make_tag_id(1), "temperature".to_string());
+        tag_names.insert(make_tag_id(2), "humidity".to_string());
+        GroupData {
+            node_id,
+            group_id,
+            ts,
+            values: vec![
+                (make_tag_id(1), DataValue::Float64(25.6)),
+                (make_tag_id(2), DataValue::Int32(60)),
+            ],
+            node_name: Some("sensor-01".to_string()),
+            group_name: Some("env-data".to_string()),
+            tag_names: Some(tag_names),
+        }
+    }
+
+    fn group_data_without_name() -> GroupData {
+        let node_id = make_node_id();
+        let group_id = make_group_id();
+        let ts = chrono::Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        GroupData {
+            node_id,
+            group_id,
+            ts,
+            values: vec![
+                (make_tag_id(1), DataValue::Float64(25.6)),
+                (make_tag_id(2), DataValue::Int32(60)),
+            ],
+            node_name: None,
+            group_name: None,
+            tag_names: None,
+        }
+    }
+
+    #[test]
+    fn values_format_with_node_name() {
+        let data = group_data_with_name();
+        let out = payload_for_format(&data, UPLOAD_FORMAT_VALUES_FORMAT);
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(json["node"].as_str().unwrap(), "sensor-01");
+        assert_eq!(json["group"].as_str().unwrap(), "env-data");
+        assert!(json["values"].get("temperature").is_some());
+        assert!(json["values"].get("humidity").is_some());
+    }
+
+    #[test]
+    fn values_format_fallback_to_id() {
+        let data = group_data_without_name();
+        let out = payload_for_format(&data, UPLOAD_FORMAT_VALUES_FORMAT);
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        // node/group should use id when name is absent
+        let node_id_str = make_node_id().0.to_string();
+        let group_id_str = make_group_id().0.to_string();
+        assert_eq!(json["node"].as_str().unwrap(), node_id_str);
+        assert_eq!(json["group"].as_str().unwrap(), group_id_str);
+    }
+
+    #[test]
+    fn tags_format_with_node_name() {
+        let data = group_data_with_name();
+        let out = payload_for_format(&data, UPLOAD_FORMAT_TAGS_FORMAT);
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(json["node"].as_str().unwrap(), "sensor-01");
+        assert_eq!(json["group"].as_str().unwrap(), "env-data");
+        let tags = json["tags"].as_array().unwrap();
+        assert_eq!(tags.len(), 2);
+    }
+
+    #[test]
+    fn tags_format_fallback_to_id() {
+        let data = group_data_without_name();
+        let out = payload_for_format(&data, UPLOAD_FORMAT_TAGS_FORMAT);
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let node_id_str = make_node_id().0.to_string();
+        let group_id_str = make_group_id().0.to_string();
+        assert_eq!(json["node"].as_str().unwrap(), node_id_str);
+        assert_eq!(json["group"].as_str().unwrap(), group_id_str);
+    }
+
+    #[test]
+    fn ecp_format_with_node_name() {
+        let data = group_data_with_name();
+        let out = payload_for_format(&data, UPLOAD_FORMAT_ECP_FORMAT);
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(json["node"].as_str().unwrap(), "sensor-01");
+        assert_eq!(json["group"].as_str().unwrap(), "env-data");
+        let tags = json["tags"].as_array().unwrap();
+        assert_eq!(tags.len(), 2);
+        // temperature Float64 → type 3
+        let temp = tags.iter().find(|t| t["name"] == "temperature").unwrap();
+        assert_eq!(temp["type"].as_u64().unwrap(), 3);
+        // humidity Int32 → type 2
+        let hum = tags.iter().find(|t| t["name"] == "humidity").unwrap();
+        assert_eq!(hum["type"].as_u64().unwrap(), 2);
+    }
+
+    #[test]
+    fn ecp_format_fallback_to_id() {
+        let data = group_data_without_name();
+        let out = payload_for_format(&data, UPLOAD_FORMAT_ECP_FORMAT);
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let node_id_str = make_node_id().0.to_string();
+        let group_id_str = make_group_id().0.to_string();
+        assert_eq!(json["node"].as_str().unwrap(), node_id_str);
+        assert_eq!(json["group"].as_str().unwrap(), group_id_str);
+    }
+
+    #[test]
+    fn group_data_format_with_node_name() {
+        let data = group_data_with_name();
+        let out = payload_for_format(&data, UPLOAD_FORMAT_GROUP_DATA);
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        // group_data serializes the whole GroupData
+        assert_eq!(json["node_name"].as_str().unwrap(), "sensor-01");
+        assert_eq!(json["group_name"].as_str().unwrap(), "env-data");
+    }
+
+    #[test]
+    fn group_data_format_fallback_to_id() {
+        let data = group_data_without_name();
+        let out = payload_for_format(&data, UPLOAD_FORMAT_GROUP_DATA);
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        // node_name/group_name absent when not set
+        assert!(json.get("node_name").is_none() || json["node_name"].is_null());
+    }
+
+    #[test]
+    fn raw_data_format_with_node_name() {
+        let data = group_data_with_name();
+        let out = payload_for_format(&data, UPLOAD_FORMAT_RAW_DATA);
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(json["node"].as_str().unwrap(), "sensor-01");
+        assert_eq!(json["group"].as_str().unwrap(), "env-data");
+        assert!(json["values"].get("temperature").is_some());
+    }
+
+    #[test]
+    fn raw_data_format_fallback_to_id() {
+        let data = group_data_without_name();
+        let out = payload_for_format(&data, UPLOAD_FORMAT_RAW_DATA);
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let node_id_str = make_node_id().0.to_string();
+        let group_id_str = make_group_id().0.to_string();
+        assert_eq!(json["node"].as_str().unwrap(), node_id_str);
+        assert_eq!(json["group"].as_str().unwrap(), group_id_str);
+    }
+}
