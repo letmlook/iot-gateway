@@ -57,19 +57,20 @@ function getSubCount(nodeId) {
   return subscriptionCounts.value[nodeId] ?? 0
 }
 
-// MQTT 等北向节点：使用实际连接状态；connected 为 null/未返回且运行中时视为已连接，避免误显示断开
+// 北向节点：使用实际连接状态；connection_status 存在且含 boolean connected 字段时用该字段；
+// connected 为 false 且运行中则 error；无 connection_status 或无 connected 字段时回退节点状态
 function getConnStatusClass(row) {
-  if (row.plugin_name === 'mqtt' && row.connection_status && row.state === 'running') {
-    const connected = row.connection_status.connected
-    return connected === false ? 'offline error' : 'online'
+  const cs = row.connection_status
+  if (cs && typeof cs.connected === 'boolean' && row.state === 'running') {
+    return cs.connected === false ? 'offline error' : 'online'
   }
   return row.state === 'running' ? 'online' : 'offline'
 }
 
 function getConnStatusText(row) {
-  if (row.plugin_name === 'mqtt' && row.connection_status && row.state === 'running') {
-    const connected = row.connection_status.connected
-    return connected === false ? t('south.disconnected') : t('south.connected')
+  const cs = row.connection_status
+  if (cs && typeof cs.connected === 'boolean' && row.state === 'running') {
+    return cs.connected === false ? t('south.disconnected') : t('south.connected')
   }
   return row.state === 'running' ? t('south.connected') : t('south.disconnected')
 }

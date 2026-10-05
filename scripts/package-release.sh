@@ -40,7 +40,12 @@ if [ "${SKIP_BUILD:-0}" != "1" ]; then
   cargo build --release --locked \
     -p plugin-sim -p plugin-mqtt -p plugin-modbus-tcp \
     -p plugin-modbus-rtu -p plugin-opcua -p plugin-virb \
+    -p plugin-http -p plugin-influxdb -p plugin-tdengine \
     --features ffi
+
+  echo "==> 构建 Kafka 插件（可选，需要 CMake + rdkafka 依赖；构建失败不中断打包）"
+  cargo build --release --locked -p plugin-kafka --features "ffi,kafka-client" || \
+    echo "WARN: kafka plugin build failed (requires CMake + librdkafka), package will omit kafka plugin"
 
   echo "==> 构建前端"
   if [ -d web/node_modules ]; then
@@ -57,10 +62,14 @@ mkdir -p "$OUT/plugins"
 cp target/release/gateway "$OUT/"
 cp target/release/gateway-plugin-host "$OUT/"
 # 只打包真正对外提供的插件；测试夹具（faulty/abi-mismatch）不进发布包
-for p in sim mqtt modbus_tcp modbus_rtu opcua virb; do
+for p in sim mqtt modbus_tcp modbus_rtu opcua virb http influxdb tdengine; do
   src="target/release/libplugin_${p}.${PLUGIN_EXT}"
   [ -f "$src" ] && cp "$src" "$OUT/plugins/"
 done
+# kafka 单独构建，可能缺失（无 CMake 时）
+if [ -f "target/release/libplugin_kafka.${PLUGIN_EXT}" ]; then
+  cp "target/release/libplugin_kafka.${PLUGIN_EXT}" "$OUT/plugins/"
+fi
 cp -R web/dist "$OUT/web-dist"
 cp -R config "$OUT/config"
 # 授权文件与机器码绑定、私钥绝不能分发：从包里剔除（现场用 rotate/gen 脚本单独生成）

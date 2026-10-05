@@ -13,6 +13,9 @@ gateway-sdk = { path = "../gateway-sdk" }
 gateway-core = { path = "../gateway-core" }
 plugin-sim = { path = "../gateway-plugins/plugin-sim" }
 plugin-mqtt = { path = "../gateway-plugins/plugin-mqtt" }
+plugin-http = { path = "../gateway-plugins/plugin-http" }
+plugin-influxdb = { path = "../gateway-plugins/plugin-influxdb" }
+plugin-tdengine = { path = "../gateway-plugins/plugin-tdengine" }
 plugin-modbus-tcp = { path = "../gateway-plugins/plugin-modbus-tcp" }
 plugin-modbus-rtu = { path = "../gateway-plugins/plugin-modbus-rtu" }
 axum = { version = "0.7", features = ["json", "macros", "multipart", "tokio", "ws"] }

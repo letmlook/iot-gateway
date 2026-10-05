@@ -10,7 +10,15 @@ if (-not (Test-Path plugins)) {
     New-Item -ItemType Directory -Path plugins | Out-Null
 }
 
-cargo build -p plugin-sim -p plugin-mqtt -p plugin-modbus-tcp -p plugin-modbus-rtu -p plugin-opcua -p plugin-virb --features ffi
+cargo build -p plugin-sim -p plugin-mqtt -p plugin-modbus-tcp -p plugin-modbus-rtu -p plugin-opcua -p plugin-virb -p plugin-http -p plugin-influxdb -p plugin-tdengine --features ffi
+
+# Kafka 需要 CMake + rdkafka，单独构建（失败不中断）
+try {
+    cargo build -p plugin-kafka --features "ffi,kafka-client" -ErrorAction Stop
+    Copy-Item target\debug\plugin_kafka.dll plugins\ -ErrorAction SilentlyContinue
+} catch {
+    Write-Host "WARN: kafka plugin build failed (requires CMake), skipping"
+}
 
 Copy-Item target\debug\plugin_sim.dll plugins\
 Copy-Item target\debug\plugin_mqtt.dll plugins\
@@ -18,6 +26,9 @@ Copy-Item target\debug\plugin_modbus_tcp.dll plugins\
 Copy-Item target\debug\plugin_modbus_rtu.dll plugins\
 Copy-Item target\debug\plugin_opcua.dll plugins\
 Copy-Item target\debug\plugin_virb.dll plugins\
+Copy-Item target\debug\plugin_http.dll plugins\
+Copy-Item target\debug\plugin_influxdb.dll plugins\
+Copy-Item target\debug\plugin_tdengine.dll plugins\
 
 Write-Host "plugins: $((Get-ChildItem plugins\*.dll -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }) -join ', ')"
 Get-ChildItem plugins\*.dll -ErrorAction SilentlyContinue

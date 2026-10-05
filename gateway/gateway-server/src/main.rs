@@ -59,14 +59,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // 从 plugins_dir 加载动态库插件（Windows: .dll，Unix: .so）；若无目录或加载后无插件则使用内置
     fn register_builtin_plugins(mgr: &mut gateway_core::Manager) {
+        use plugin_http::HttpPlugin;
+        use plugin_influxdb::InfluxDbPlugin;
         use plugin_modbus_rtu::ModbusRtuPlugin;
         use plugin_modbus_tcp::ModbusTcpPlugin;
         use plugin_mqtt::MqttPlugin;
         use plugin_sim::SimPlugin;
+        use plugin_tdengine::TdEnginePlugin;
         mgr.register_south("sim", Arc::new(SimPlugin::new()));
         mgr.register_south("modbus-tcp", Arc::new(ModbusTcpPlugin::new()));
         mgr.register_south("modbus-rtu", Arc::new(ModbusRtuPlugin::new()));
+        // 北向（kafka 不进 builtin：需要 librdkafka C 库，仅 .so 部署）
         mgr.register_north("mqtt", Arc::new(MqttPlugin::new()));
+        mgr.register_north("http", Arc::new(HttpPlugin::new()));
+        mgr.register_north("influxdb", Arc::new(InfluxDbPlugin::new()));
+        mgr.register_north("tdengine", Arc::new(TdEnginePlugin::new()));
     }
 
     // 进程隔离模式下持有加载器：重启计数要从它这里读（见 /api/metrics）

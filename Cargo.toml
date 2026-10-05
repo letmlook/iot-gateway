@@ -15,4 +15,11 @@ members = [
     # 测试夹具：故障注入 / ABI 不匹配（不参与发布）
     "gateway/gateway-plugins/plugin-faulty",
     "gateway/gateway-plugins/plugin-abi-mismatch",
+    # 北向新插件共享基础设施
+    "gateway/gateway-plugin-common",
+    # 北向新插件
+    "gateway/gateway-plugins/plugin-http",
+    "gateway/gateway-plugins/plugin-influxdb",
+    "gateway/gateway-plugins/plugin-tdengine",
+    "gateway/gateway-plugins/plugin-kafka",
 ]

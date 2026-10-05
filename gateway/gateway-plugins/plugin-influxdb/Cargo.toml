@@ -1,16 +1,16 @@
 [package]
-name = "plugin-mqtt"
+name = "plugin-influxdb"
 version = "0.1.0"
 edition = "2021"
-description = "北向插件：MQTT 发布"
+description = "北向插件：InfluxDB v2 行协议写入"
 
 [lib]
 crate-type = ["lib", "cdylib"]
 
 [features]
-default = ["mqtt-client"]
-mqtt-client = ["dep:rumqttc"]
-ffi = []  # 构建 .so 时启用
+default = ["http-client"]
+http-client = ["gateway-plugin-common/http"]
+ffi = []
 
 [dependencies]
 gateway-sdk = { path = "../../gateway-sdk" }
@@ -22,4 +22,4 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
-rumqttc = { version = "0.24", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

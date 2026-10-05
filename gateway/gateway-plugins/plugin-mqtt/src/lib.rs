@@ -8,17 +8,20 @@
 mod ffi;
 
 mod config;
-mod format;
-mod queue;
 mod state;
 
+// Re-export queue from common so state.rs can use crate::queue
+pub use gateway_plugin_common::queue;
+
 use config::{
-    config_bool, config_schema, config_str, config_u16, config_usize, DEFAULT_CACHE_DIR,
-    DEFAULT_CACHE_MEMORY_SIZE, DEFAULT_CACHE_SYNC_INTERVAL_MS, DEFAULT_HOST,
-    DEFAULT_KEEP_ALIVE_SECS, DEFAULT_PORT, DEFAULT_QOS, DEFAULT_TOPIC_TEMPLATE,
-    UPLOAD_FORMAT_VALUES_FORMAT,
+    config_schema, DEFAULT_HOST, DEFAULT_KEEP_ALIVE_SECS, DEFAULT_PORT, DEFAULT_QOS,
+    DEFAULT_TOPIC_TEMPLATE, UPLOAD_FORMAT_VALUES_FORMAT,
 };
-use format::{payload_for_format, topic_from_template};
+use gateway_plugin_common::config::{
+    config_bool, config_str, config_u16, config_usize, DEFAULT_CACHE_DIR,
+    DEFAULT_CACHE_MEMORY_SIZE, DEFAULT_CACHE_SYNC_INTERVAL_MS,
+};
+use gateway_plugin_common::format::{payload_for_format, topic_from_template};
 use gateway_sdk::log;
 use gateway_sdk::types::PluginKind;
 use gateway_sdk::PluginResult;
@@ -163,10 +166,13 @@ impl NorthPlugin for MqttPlugin {
             let cap = (cache_memory_size + 32).min(65535);
             let (client, eventloop) = AsyncClient::new(mqttoptions, cap);
             let queue = Arc::new(tokio::sync::Mutex::new(if cache_persist {
-                crate::queue::OfflineQueue::open(queue_path.clone(), cache_memory_size)
+                gateway_plugin_common::queue::OfflineQueue::open(
+                    queue_path.clone(),
+                    cache_memory_size,
+                )
             } else {
                 // 显式关闭落盘：纯内存队列（重启即失，行为与原实现一致）
-                crate::queue::OfflineQueue::memory_only(cache_memory_size)
+                gateway_plugin_common::queue::OfflineQueue::memory_only(cache_memory_size)
             }));
             {
                 let q = queue.lock().await;
@@ -232,9 +238,12 @@ impl NorthPlugin for MqttPlugin {
                 node_id,
                 NodeMqttState {
                     queue: Arc::new(tokio::sync::Mutex::new(if cache_persist {
-                        crate::queue::OfflineQueue::open(queue_path, cache_memory_size)
+                        gateway_plugin_common::queue::OfflineQueue::open(
+                            queue_path,
+                            cache_memory_size,
+                        )
                     } else {
-                        crate::queue::OfflineQueue::memory_only(cache_memory_size)
+                        gateway_plugin_common::queue::OfflineQueue::memory_only(cache_memory_size)
                     })),
                     connection_status: Arc::new(RwLock::new(MqttConnectionStatus::default())),
                     topic_template,

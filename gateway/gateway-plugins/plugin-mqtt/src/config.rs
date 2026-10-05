@@ -1,57 +1,20 @@
-//! MQTT 插件配置常量、辅助函数与 config_schema。
+//! MQTT 插件配置 Schema。
 
 use gateway_sdk::schema::{
     ConfigSchema, ParamAttribute, ParamOption, ParamSchema, ParamType, ParamValid,
 };
-use gateway_sdk::PluginConfig;
 
+// MQTT 特有常量
 pub const DEFAULT_HOST: &str = "broker.emqx.io";
 pub const DEFAULT_PORT: u16 = 1883;
 pub const DEFAULT_TOPIC_TEMPLATE: &str = "gateway/data/${node_id}/${group_id}";
-pub const DEFAULT_CACHE_MEMORY_SIZE: usize = 1000;
-/// 离线队列落盘目录（相对进程工作目录）。生产建议放在数据目录下，
-/// 例如 `GATEWAY_DATA_DIR` 指向的目录，便于随数据一起备份/清理。
-pub const DEFAULT_CACHE_DIR: &str = "data/mqtt-queue";
 pub const DEFAULT_KEEP_ALIVE_SECS: u64 = 30;
-pub const DEFAULT_CACHE_SYNC_INTERVAL_MS: u64 = 100;
 pub const DEFAULT_QOS: u8 = 1;
-pub const UPLOAD_FORMAT_GROUP_DATA: &str = "group_data";
-/// Values-format：timestamp、node、group、values(点位名->标量)、errors、metas
 pub const UPLOAD_FORMAT_VALUES_FORMAT: &str = "values_format";
-/// Tags-format：timestamp、node、group、tags:[{name, value}]
 pub const UPLOAD_FORMAT_TAGS_FORMAT: &str = "tags_format";
-/// ECP-format：timestamp、node、group、tags:[{name, value, type:1|2|3|4}]
 pub const UPLOAD_FORMAT_ECP_FORMAT: &str = "ecp_format";
-/// 与 raw_data.json 一致：node、group、timestamp(ms)、values(tag->[num])、errors、metas
+pub const UPLOAD_FORMAT_GROUP_DATA: &str = "group_data";
 pub const UPLOAD_FORMAT_RAW_DATA: &str = "raw_data";
-
-pub fn config_str(config: &PluginConfig, key: &str, default: &str) -> String {
-    config
-        .get(key)
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .unwrap_or_else(|| default.to_string())
-}
-
-pub fn config_u16(config: &PluginConfig, key: &str, default: u16) -> u16 {
-    config
-        .get(key)
-        .and_then(|v| v.as_u64())
-        .map(|n| n as u16)
-        .unwrap_or(default)
-}
-
-pub fn config_usize(config: &PluginConfig, key: &str, default: usize) -> usize {
-    config
-        .get(key)
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize)
-        .unwrap_or(default)
-}
-
-pub fn config_bool(config: &PluginConfig, key: &str, default: bool) -> bool {
-    config.get(key).and_then(|v| v.as_bool()).unwrap_or(default)
-}
 
 pub fn config_schema() -> ConfigSchema {
     ConfigSchema::new()
@@ -119,24 +82,9 @@ pub fn config_schema() -> ConfigSchema {
             default: Some(serde_json::json!(DEFAULT_QOS)),
             valid: None,
             options: Some(vec![
-                ParamOption {
-                    value: serde_json::json!(0),
-                    label: Some("QoS 0".to_string()),
-                    label_zh: Some("QoS 0".to_string()),
-                    label_en: Some("QoS 0".to_string()),
-                },
-                ParamOption {
-                    value: serde_json::json!(1),
-                    label: Some("QoS 1".to_string()),
-                    label_zh: Some("QoS 1".to_string()),
-                    label_en: Some("QoS 1".to_string()),
-                },
-                ParamOption {
-                    value: serde_json::json!(2),
-                    label: Some("QoS 2".to_string()),
-                    label_zh: Some("QoS 2".to_string()),
-                    label_en: Some("QoS 2".to_string()),
-                },
+                ParamOption { value: serde_json::json!(0), label: Some("QoS 0".to_string()), label_zh: Some("QoS 0".to_string()), label_en: Some("QoS 0".to_string()) },
+                ParamOption { value: serde_json::json!(1), label: Some("QoS 1".to_string()), label_zh: Some("QoS 1".to_string()), label_en: Some("QoS 1".to_string()) },
+                ParamOption { value: serde_json::json!(2), label: Some("QoS 2".to_string()), label_zh: Some("QoS 2".to_string()), label_en: Some("QoS 2".to_string()) },
             ]),
             ..Default::default()
         })
@@ -165,36 +113,11 @@ pub fn config_schema() -> ConfigSchema {
             default: Some(serde_json::json!(UPLOAD_FORMAT_VALUES_FORMAT)),
             valid: None,
             options: Some(vec![
-                ParamOption {
-                    value: serde_json::json!(UPLOAD_FORMAT_VALUES_FORMAT),
-                    label: Some("Values Format".to_string()),
-                    label_zh: Some("Values 格式 (timestamp/node/group/values/errors/metas)".to_string()),
-                    label_en: Some("Values (timestamp, node, group, values, errors, metas)".to_string()),
-                },
-                ParamOption {
-                    value: serde_json::json!(UPLOAD_FORMAT_TAGS_FORMAT),
-                    label: Some("Tags Format".to_string()),
-                    label_zh: Some("Tags 格式 (timestamp/node/group/tags:[{name,value}])".to_string()),
-                    label_en: Some("Tags (timestamp, node, group, tags array)".to_string()),
-                },
-                ParamOption {
-                    value: serde_json::json!(UPLOAD_FORMAT_ECP_FORMAT),
-                    label: Some("ECP Format".to_string()),
-                    label_zh: Some("ECP 格式 (tags 含 type: 1 bool/2 int/3 float/4 string)".to_string()),
-                    label_en: Some("ECP (tags with type: 1 bool, 2 int, 3 float, 4 string)".to_string()),
-                },
-                ParamOption {
-                    value: serde_json::json!(UPLOAD_FORMAT_GROUP_DATA),
-                    label: Some("GroupData".to_string()),
-                    label_zh: Some("完整 GroupData".to_string()),
-                    label_en: Some("Full GroupData".to_string()),
-                },
-                ParamOption {
-                    value: serde_json::json!(UPLOAD_FORMAT_RAW_DATA),
-                    label: Some("Raw Data".to_string()),
-                    label_zh: Some("Raw Data (values 为 tag->[num])".to_string()),
-                    label_en: Some("Raw Data (values as tag->[num])".to_string()),
-                },
+                ParamOption { value: serde_json::json!(UPLOAD_FORMAT_VALUES_FORMAT), label: Some("Values Format".to_string()), label_zh: Some("Values 格式 (timestamp/node/group/values/errors/metas)".to_string()), label_en: Some("Values (timestamp, node, group, values, errors, metas)".to_string()) },
+                ParamOption { value: serde_json::json!(UPLOAD_FORMAT_TAGS_FORMAT), label: Some("Tags Format".to_string()), label_zh: Some("Tags 格式 (timestamp/node/group/tags:[{name,value}])".to_string()), label_en: Some("Tags (timestamp, node, group, tags array)".to_string()) },
+                ParamOption { value: serde_json::json!(UPLOAD_FORMAT_ECP_FORMAT), label: Some("ECP Format".to_string()), label_zh: Some("ECP 格式 (tags 含 type: 1 bool/2 int/3 float/4 string)".to_string()), label_en: Some("ECP (tags with type: 1 bool, 2 int, 3 float, 4 string)".to_string()) },
+                ParamOption { value: serde_json::json!(UPLOAD_FORMAT_GROUP_DATA), label: Some("GroupData".to_string()), label_zh: Some("完整 GroupData".to_string()), label_en: Some("Full GroupData".to_string()) },
+                ParamOption { value: serde_json::json!(UPLOAD_FORMAT_RAW_DATA), label: Some("Raw Data".to_string()), label_zh: Some("Raw Data (values 为 tag->[num])".to_string()), label_en: Some("Raw Data (values as tag->[num])".to_string()) },
             ]),
             ..Default::default()
         })
@@ -246,7 +169,7 @@ pub fn config_schema() -> ConfigSchema {
             description_en: Some("Max in-memory cache size (message count) when MQTT connection exception occurs.".to_string()),
             attribute: ParamAttribute::Optional,
             ty: ParamType::Int,
-            default: Some(serde_json::json!(DEFAULT_CACHE_MEMORY_SIZE)),
+            default: Some(serde_json::json!(gateway_plugin_common::DEFAULT_CACHE_MEMORY_SIZE)),
             valid: None,
             ..Default::default()
         })
@@ -268,11 +191,11 @@ pub fn config_schema() -> ConfigSchema {
             name_zh: Some("离线队列目录".to_string()),
             name_en: Some("Offline Queue Directory".to_string()),
             description: Some("Directory for per-node offline queue files.".to_string()),
-            description_zh: Some(format!("每个节点一个 <节点ID>.queue 文件，默认 {}", DEFAULT_CACHE_DIR).to_string()),
+            description_zh: Some(format!("每个节点一个 <节点ID>.queue 文件，默认 {}", gateway_plugin_common::DEFAULT_CACHE_DIR).to_string()),
             description_en: Some("Directory for per-node offline queue files.".to_string()),
             attribute: ParamAttribute::Optional,
             ty: ParamType::String,
-            default: Some(serde_json::json!(DEFAULT_CACHE_DIR)),
+            default: Some(serde_json::json!(gateway_plugin_common::DEFAULT_CACHE_DIR)),
             valid: None,
             ..Default::default()
         })
@@ -285,7 +208,7 @@ pub fn config_schema() -> ConfigSchema {
             description_en: Some("Interval in milliseconds for replaying cached messages after reconnect.".to_string()),
             attribute: ParamAttribute::Optional,
             ty: ParamType::Int,
-            default: Some(serde_json::json!(DEFAULT_CACHE_SYNC_INTERVAL_MS as i64)),
+            default: Some(serde_json::json!(gateway_plugin_common::DEFAULT_CACHE_SYNC_INTERVAL_MS as i64)),
             valid: Some(ParamValid { min: Some(10), max: Some(120_000), regex: None, length: None }),
             ..Default::default()
         })
