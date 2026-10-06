@@ -680,7 +680,7 @@ mod tests {
         let gid = gid();
         let tid = tid();
         let store = store_with(nid, gid, tid, "temp");
-        clear_all();
+        with_lock(clear_all);
         let outcome = apply(&store, nid, gid, &[(tid, DataValue::Float64(25.0))], 1000);
         assert_eq!(outcome.published.len(), 1);
         assert!(outcome.synthetic.is_empty());
@@ -693,7 +693,7 @@ mod tests {
         let tid = tid();
         let store = store_with(nid, gid, tid, "temp");
         store.policy_insert(passthrough_policy(nid, gid));
-        clear_all();
+        with_lock(clear_all);
         let outcome = apply(&store, nid, gid, &[(tid, DataValue::Float64(25.0))], 1000);
         assert_eq!(outcome.published.len(), 1);
     }
@@ -707,7 +707,7 @@ mod tests {
         let tid = tid();
         let store = store_with(nid, gid, tid, "temp");
         store.policy_insert(on_change_policy(nid, gid, 2.0));
-        clear_all();
+        with_lock(clear_all);
         let outcome = apply(&store, nid, gid, &[(tid, DataValue::Float64(25.0))], 1000);
         assert_eq!(outcome.published.len(), 1);
     }

@@ -223,6 +223,27 @@ async fn auth_middleware(
                     .into_response();
                 }
             }
+            // 租户域校验：/api/nodes/{id}/* 的节点级路由在此**统一拦截**（默认拒绝）。
+            // 域不匹配与节点不存在一律 404，防存在性探测；handler 内的 resolve_node
+            // 负责取节点对象，本检查是覆盖全部节点级路由（含未来新增）的集中防线。
+            if state.config.enforce_tenants {
+                let p = normalize_api_path(request.uri().path());
+                if let Some(seg) = p.strip_prefix("nodes/").and_then(|r| r.split('/').next()) {
+                    if let Ok(id) = uuid::Uuid::parse_str(seg) {
+                        let nid = gateway_sdk::NodeId(id);
+                        if let Some(n) = state.manager.node_get(nid) {
+                            if !c.tenant.allows(&n.config.tenant_id) {
+                                tracing::warn!(
+                                    path = %request.uri().path(),
+                                    user = c.username.as_deref().unwrap_or("<session>"),
+                                    "tenant mismatch: node belongs to another tenant, 404"
+                                );
+                                return ApiError::not_found("node not found").into_response();
+                            }
+                        }
+                    }
+                }
+            }
             request.extensions_mut().insert(c);
             next.run(request).await
         }
@@ -689,6 +710,21 @@ mod tests {
             None,
         );
         RbacEnv { state, store, dir }
+    }
+
+    /// 在指定租户域创建用户并登录，返回 token（login_as 固定 default 域，多租户测试用这个）
+    async fn login_as_tenant(
+        env: &RbacEnv,
+        user: &str,
+        role: crate::users::UserRole,
+        tenant: &str,
+    ) -> String {
+        let pw = "pw-for-test-123";
+        env.store
+            .create(user, pw, role, tenant)
+            .await
+            .expect("create user");
+        env.store.login(user, pw).await.expect("login").0
     }
 
     async fn login_as(env: &RbacEnv, user: &str, role: crate::users::UserRole) -> String {
@@ -1238,5 +1274,215 @@ mod tests {
         assert!(ctx.is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------- 多租户跨域矩阵（设计 §4.2-9） ----------
+
+    /// 构造两个域各一个南向节点的环境（经 apply_snapshot 灌入，即启动加载/restore 同路径）
+    async fn tenant_env(enforce: bool) -> RbacEnv {
+        let dir = std::env::temp_dir().join(format!("gw-tenant-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = gateway_core::Db::open(&dir.join("data.db"), gateway_core::IntegrityMode::Off)
+            .expect("open data.db");
+        let store = Arc::new(crate::users::UserStore::open(db, 0).expect("open user store"));
+        let mut cfg = crate::config::Config::default();
+        cfg.disable_auth = false;
+        cfg.token = None;
+        cfg.static_dir = dir.clone();
+        cfg.enforce_tenants = enforce;
+        let state = AppState::new(
+            Arc::new(Manager::new()),
+            cfg,
+            None,
+            crate::license::FeatureManager::without_license(),
+            store.clone(),
+            None,
+            None,
+        );
+
+        let mut node_a = gateway_core::Node::new(
+            "node-a",
+            gateway_sdk::NodeKind::South,
+            "sim",
+            gateway_sdk::PluginConfig::new(),
+        );
+        node_a.config.tenant_id = "tenant-a".into();
+        let mut node_b = gateway_core::Node::new(
+            "node-b",
+            gateway_sdk::NodeKind::South,
+            "sim",
+            gateway_sdk::PluginConfig::new(),
+        );
+        node_b.config.tenant_id = "tenant-b".into();
+
+        let snap = gateway_core::Snapshot {
+            version: gateway_core::SNAPSHOT_VERSION,
+            nodes: vec![node_a, node_b],
+            groups: Vec::new(),
+            tags: Vec::new(),
+            subscriptions: Vec::new(),
+            rules: Vec::new(),
+            policies: Vec::new(),
+        };
+        state.manager.apply_snapshot(&snap).await;
+        RbacEnv { state, store, dir }
+    }
+
+    fn tenant_ids_of(body: &str) -> Vec<String> {
+        serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| {
+                v.as_array().map(|arr| {
+                    arr.iter()
+                        .filter_map(|n| {
+                            n.get("tenant_id")
+                                .and_then(|t| t.as_str())
+                                .map(String::from)
+                        })
+                        .collect()
+                })
+            })
+            .unwrap_or_default()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tenant_matrix_list_nodes_scoped() {
+        let env = tenant_env(true).await;
+        let token =
+            login_as_tenant(&env, "op-b", crate::users::UserRole::Operator, "tenant-b").await;
+
+        let (status, body) = authed_get(&env.state, "/nodes", &token).await;
+        assert_eq!(status, 200);
+        let ids = tenant_ids_of(&body);
+        assert_eq!(
+            ids,
+            vec!["tenant-b".to_string()],
+            "One 域只能看到本域节点: {body}"
+        );
+        cleanup_env(env);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tenant_matrix_node_level_routes_404_cross_domain() {
+        let env = tenant_env(true).await;
+        let token =
+            login_as_tenant(&env, "op-b", crate::users::UserRole::Operator, "tenant-b").await;
+        // node-a 属 tenant-a；取它的 id（list 由 Admin 视角或直接从 store 取）
+        let node_a = env
+            .state
+            .manager
+            .nodes_list()
+            .into_iter()
+            .find(|n| n.config.tenant_id == "tenant-a")
+            .expect("node-a exists");
+        let base = format!("/nodes/{}", node_a.config.id.0);
+
+        for uri in [
+            base.clone(),
+            format!("{base}/groups"),
+            format!("{base}/tags"),
+            format!("{base}/setting"),
+            format!("{base}/start"),
+            format!("{base}/connection-status"),
+        ] {
+            let (status, _) = authed_get(&env.state, &uri, &token).await;
+            assert_eq!(status, 404, "跨域节点级路由 {uri} 必须 404");
+        }
+        // 写值（反控）跨域：RBAC 允许 Operator，但域校验先一步 404
+        let (status, _) = post_json_with_token(
+            &env.state,
+            &format!("{base}/write_tags"),
+            r#"{"values":[]}"#,
+            &token,
+        )
+        .await;
+        assert_eq!(status, 404, "跨域写值必须 404，不得到达设备");
+        cleanup_env(env);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tenant_matrix_same_domain_allowed() {
+        let env = tenant_env(true).await;
+        let token =
+            login_as_tenant(&env, "op-b", crate::users::UserRole::Operator, "tenant-b").await;
+        let node_b = env
+            .state
+            .manager
+            .nodes_list()
+            .into_iter()
+            .find(|n| n.config.tenant_id == "tenant-b")
+            .expect("node-b exists");
+        let (status, _) = authed_get(
+            &env.state,
+            &format!("/nodes/{}", node_b.config.id.0),
+            &token,
+        )
+        .await;
+        assert_eq!(status, 200, "本域节点必须可访问");
+        cleanup_env(env);
+    }
+
+    /// §4.2-10：enforce_tenants=0 回退到形态 A 行为（跨域可见），但盖章仍在
+    #[tokio::test(flavor = "multi_thread")]
+    async fn enforce_tenants_off_restores_form_a_visibility() {
+        let env = tenant_env(false).await;
+        let token =
+            login_as_tenant(&env, "op-b", crate::users::UserRole::Operator, "tenant-b").await;
+        let node_a = env
+            .state
+            .manager
+            .nodes_list()
+            .into_iter()
+            .find(|n| n.config.tenant_id == "tenant-a")
+            .expect("node-a exists");
+        let (status, _) = authed_get(
+            &env.state,
+            &format!("/nodes/{}", node_a.config.id.0),
+            &token,
+        )
+        .await;
+        assert_eq!(status, 200, "关闭域过滤后回到形态 A 行为");
+        cleanup_env(env);
+    }
+
+    async fn authed_get(st: &AppState, uri: &str, token: &str) -> (u16, String) {
+        let app = super::router(st.clone())
+            .with_state(st.clone())
+            .into_service();
+        let req = axum::http::Request::builder()
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = ServiceExt::oneshot(app, req).await.unwrap();
+        let status = res.status().as_u16();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    async fn post_json_with_token(
+        st: &AppState,
+        uri: &str,
+        body: &str,
+        token: &str,
+    ) -> (u16, String) {
+        let app = super::router(st.clone())
+            .with_state(st.clone())
+            .into_service();
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let res = ServiceExt::oneshot(app, req).await.unwrap();
+        let status = res.status().as_u16();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&bytes).to_string())
     }
 }

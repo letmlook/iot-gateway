@@ -890,11 +890,24 @@ pub async fn metrics(State(state): State<AppState>) -> (axum::http::StatusCode, 
 }
 
 /// 数据流链路监控：返回各环节计数与点位级统计，用于排查「数据未正常发出」问题
-pub async fn data_flow(State(state): State<AppState>) -> Json<serde_json::Value> {
+pub async fn data_flow(
+    State(state): State<AppState>,
+    axum::extract::Extension(ctx): axum::extract::Extension<crate::api::AuthContext>,
+) -> Json<serde_json::Value> {
     let m = state.manager.data_flow_snapshot();
+    // 按会话域过滤：published 看南向节点归属，forwarded 要求南向与北向节点都本域，
+    // 避免 One 域用户经本端点窥见他域拓扑与点位名
+    let south_allowed = |sid: &gateway_sdk::NodeId| -> bool {
+        state
+            .manager
+            .node_get(*sid)
+            .map(|n| ctx.tenant.allows(&n.config.tenant_id))
+            .unwrap_or(false)
+    };
     let published_per_tag: Vec<serde_json::Value> = m
         .published_per_tag
         .iter()
+        .filter(|s| south_allowed(&s.south_node_id))
         .map(|s| {
             let tag = state.manager.store.tag_get(s.tag_id);
             let south_node = state.manager.node_get(s.south_node_id);
@@ -913,6 +926,7 @@ pub async fn data_flow(State(state): State<AppState>) -> Json<serde_json::Value>
     let forwarded_per_tag: Vec<serde_json::Value> = m
         .forwarded_per_tag
         .iter()
+        .filter(|s| south_allowed(&s.south_node_id) && south_allowed(&s.north_node_id))
         .map(|s| {
             let tag = state.manager.store.tag_get(s.tag_id);
             let north_node = state.manager.node_get(s.north_node_id);
@@ -1871,11 +1885,42 @@ fn node_log_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 /// 日志下载：type=system|driver|node|all（node 需配合 node_id）
 pub async fn download_log(
     State(state): State<AppState>,
+    axum::extract::Extension(ctx): axum::extract::Extension<crate::api::AuthContext>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<axum::response::Response, ApiError> {
     use axum::http::{header, Response, StatusCode};
 
+    // 域范围（设计 §3.5.4 / S20）：One 域禁拉 system/all（主日志含全部节点行，不做行级脱敏）；
+    // type=node 按节点域校验；type=driver 的节点日志按会话域过滤
+    let one_scope = matches!(ctx.tenant, crate::api::scope::TenantScope::One(_));
+    let scoped_node_ids: Vec<String> = if one_scope {
+        crate::api::scope::scoped_nodes(&state, &ctx.tenant)
+            .into_iter()
+            .map(|n| n.id().0.to_string())
+            .collect()
+    } else {
+        Vec::new()
+    };
     let kind = q.get("type").map(|s| s.as_str()).unwrap_or("all");
+    if one_scope && matches!(kind, "system" | "gateway" | "all") {
+        return Err(ApiError::not_found(
+            "system/all logs are restricted to administrators",
+        ));
+    }
+    if one_scope && kind == "node" {
+        if let Some(nid) = q.get("node_id") {
+            let allowed = nid
+                .parse::<uuid::Uuid>()
+                .ok()
+                .map(gateway_sdk::NodeId)
+                .and_then(|id| state.manager.node_get(id))
+                .map(|n| ctx.tenant.allows(&n.config.tenant_id))
+                .unwrap_or(false);
+            if !allowed {
+                return Err(ApiError::not_found("node log file not found"));
+            }
+        }
+    }
     let mut buf = String::new();
     let filename = match kind {
         "system" | "gateway" => {
@@ -1921,7 +1966,22 @@ pub async fn download_log(
                     }
                     vec![p]
                 }
-                _ => node_log_files(&dir),
+                _ => {
+                    let files = node_log_files(&dir);
+                    if one_scope {
+                        // 文件名含节点名或节点 id（见 logging::filename_base_for_node），
+                        // 按本域节点的 id 字符串做包含匹配过滤
+                        files
+                            .into_iter()
+                            .filter(|f| {
+                                let name = f.file_name().and_then(|x| x.to_str()).unwrap_or("");
+                                scoped_node_ids.iter().any(|id| name.contains(id.as_str()))
+                            })
+                            .collect()
+                    } else {
+                        files
+                    }
+                }
             };
             if files.is_empty() {
                 return Err(ApiError::not_found("node log files not found"));
