@@ -6,18 +6,24 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "gen:openapi": "cargo run -q -p gateway-server --bin export-openapi > ../openapi.json",
+    "gen:api": "npm run gen:openapi && openapi-typescript ../openapi.json -o src/types/api.d.ts",
+    "typecheck": "tsc -p jsconfig.json"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
     "@vue/shared": "^3.5.27",
     "element-plus": "^2.13.1",
+    "pinia": "^4.0.3",
     "vue": "^3.5.24",
     "vue-i18n": "^11.2.8",
     "vue-router": "^4.6.4"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.1",
+    "openapi-typescript": "^7.13.0",
+    "typescript": "~5.9.3",
     "vite": "^7.2.4"
   }
 }

@@ -6,6 +6,7 @@ import { getErrorMessage } from '../i18n'
 import { ElMessage } from 'element-plus'
 import { VideoPlay, VideoPause, Refresh, Search } from '@element-plus/icons-vue'
 import { api } from '../api.js'
+import { gatewayWs, FrameType } from '../ws/gatewayWs.js'
 import PageHeader from '../components/PageHeader.vue'
 import StatusIndicator from '../components/StatusIndicator.vue'
 
@@ -257,8 +258,39 @@ function initWriteInput(tag) {
 
 const selectedNodeInfo = computed(() => nodes.value.find(n => n.id === selectedNode.value))
 
-onMounted(loadNodes)
-onUnmounted(() => { if (timer) clearInterval(timer) })
+// WS integration
+let wsConnected = false
+function onWsConnected() {
+  wsConnected = true
+  gatewayWs.subscribe(FrameType.NODE_VALUES)
+}
+function onWsDisconnected() {
+  wsConnected = false
+}
+function onWsNodeValues(frame) {
+  if (!frame.data || !selectedNode.value) return
+  const vals = Array.isArray(frame.data) ? frame.data : [frame.data]
+  const newValues = { ...tagValues.value }
+  vals.forEach(v => {
+    if (v.tagId) newValues[v.tagId] = v.value ?? v
+  })
+  tagValues.value = newValues
+  lastUpdateTime.value = new Date()
+}
+gatewayWs.on('connected', onWsConnected)
+gatewayWs.on('disconnected', onWsDisconnected)
+gatewayWs.on(FrameType.NODE_VALUES, onWsNodeValues)
+
+onMounted(() => {
+  loadNodes()
+  if (!wsConnected) gatewayWs.connect()
+})
+onUnmounted(() => {
+  if (timer) clearInterval(timer)
+  gatewayWs.off('connected', onWsConnected)
+  gatewayWs.off('disconnected', onWsDisconnected)
+  gatewayWs.off(FrameType.NODE_VALUES, onWsNodeValues)
+})
 </script>
 
 <template>

@@ -4,9 +4,17 @@ version = "0.1.0"
 edition = "2021"
 description = "HTTP API、插件加载、Web 服务入口"
 
+[lib]
+name = "gateway_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "gateway"
 path = "src/main.rs"
+
+[[bin]]
+name = "export-openapi"
+path = "src/bin/export-openapi.rs"
 
 [dependencies]
 gateway-sdk = { path = "../gateway-sdk" }
@@ -47,7 +55,14 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 argon2 = "0.5"
 # 硬件信息（/api/hardware）：CPU、内存、系统版本
 sysinfo = "0.29"
+# OpenAPI
+utoipa = { version = "5.5", features = ["axum_extras", "chrono", "uuid"] }
+utoipa-swagger-ui = { version = "8.1", features = ["axum", "vendored"] }
+# WebSocket
+bitflags = "2"
+futures-util = "0.3"
 
 [dev-dependencies]
 # 集成测试：用 oneshot 直接打 axum Router
 tower = { version = "0.4", features = ["util"] }
+tokio-tungstenite = "0.26"

@@ -1,4 +1,5 @@
 import { createApp } from 'vue'
+import { createPinia } from 'pinia'
 import ElementPlus from 'element-plus'
 import zhCn from 'element-plus/es/locale/lang/zh-cn.mjs'
 import 'element-plus/dist/index.css'
@@ -8,6 +9,9 @@ import router from './router.js'
 import { i18n } from './i18n/index.js'
 
 const app = createApp(App)
+const pinia = createPinia()
+
+app.use(pinia)
 app.use(i18n)
 app.use(router)
 app.use(ElementPlus, { locale: zhCn })

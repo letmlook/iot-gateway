@@ -1,18 +1,23 @@
 <script setup>
-import { ref, inject, onMounted, computed } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { getErrorMessage } from '../i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Grid, List, Search, Refresh } from '@element-plus/icons-vue'
 import { api } from '../api.js'
+import { storeToRefs } from 'pinia'
+import { useGatewayStore } from '../stores/gateway.js'
 import PageHeader from '../components/PageHeader.vue'
 import StatusIndicator from '../components/StatusIndicator.vue'
 import DeviceCard from '../components/DeviceCard.vue'
 
 const router = useRouter()
 const { t } = useI18n()
-const southPlugins = inject('southPlugins', ref([]))
+
+// Gateway store for shared state
+const gatewayStore = useGatewayStore()
+const { southPlugins } = storeToRefs(gatewayStore)
 
 const nodes = ref([])
 const loading = ref(false)

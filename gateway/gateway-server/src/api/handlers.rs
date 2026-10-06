@@ -14,26 +14,26 @@ use crate::backup;
 use crate::logging;
 use crate::state::AppState;
 
-fn parse_node_id(s: &str) -> Result<NodeId, ApiError> {
+pub(crate) fn parse_node_id(s: &str) -> Result<NodeId, ApiError> {
     Uuid::parse_str(s)
         .map(NodeId)
         .map_err(|_| ApiError::bad_request("invalid node id"))
 }
 
-fn parse_group_id(s: &str) -> Result<gateway_sdk::GroupId, ApiError> {
+pub(crate) fn parse_group_id(s: &str) -> Result<gateway_sdk::GroupId, ApiError> {
     Uuid::parse_str(s)
         .map(gateway_sdk::GroupId)
         .map_err(|_| ApiError::bad_request("invalid group id"))
 }
 
-fn parse_tag_id(s: &str) -> Result<gateway_sdk::TagId, ApiError> {
+pub(crate) fn parse_tag_id(s: &str) -> Result<gateway_sdk::TagId, ApiError> {
     Uuid::parse_str(s)
         .map(gateway_sdk::TagId)
         .map_err(|_| ApiError::bad_request("invalid tag id"))
 }
 
 /// 北向节点无组/标签：仅南向节点允许组、标签、读 Tag、写 Tag。
-fn ensure_node_south(state: &AppState, nid: NodeId) -> Result<(), ApiError> {
+pub(crate) fn ensure_node_south(state: &AppState, nid: NodeId) -> Result<(), ApiError> {
     let node = state
         .manager
         .node_get(nid)
@@ -45,7 +45,7 @@ fn ensure_node_south(state: &AppState, nid: NodeId) -> Result<(), ApiError> {
 }
 
 /// 南向节点无订阅：仅北向节点允许订阅管理。
-fn ensure_node_north(state: &AppState, nid: NodeId) -> Result<(), ApiError> {
+pub(crate) fn ensure_node_north(state: &AppState, nid: NodeId) -> Result<(), ApiError> {
     let node = state
         .manager
         .node_get(nid)
@@ -970,7 +970,7 @@ pub struct CreateNodeReq {
 }
 
 /// 按插件 Schema 脱敏节点配置：敏感字段（口令、私钥、Token 等）统一返回 `"***"`
-fn mask_plugin_config(
+pub(crate) fn mask_plugin_config(
     state: &AppState,
     plugin_name: &str,
     north: bool,

@@ -1,4 +1,4 @@
-const BASE = '/api'
+const BASE = '/api/v1'
 const TOKEN_KEY = 'gateway_token'
 
 function getStoredToken() {
@@ -168,7 +168,8 @@ export const api = {
   pluginNorthSchema: (name) => req('GET', `/plugins/north/${name}/config_schema`),
 
   // 节点 CRUD
-  nodes: () => req('GET', '/nodes'),
+  nodes: (params) => req('GET', `/nodes${params ? '?' + new URLSearchParams(params).toString() : ''}`)
+    .then(r => r && r.items !== undefined ? r.items : r),
   node: (id) => req('GET', `/nodes/${id}`),
   createNode: (body) => req('POST', '/nodes', body),
   updateNode: (id, body) => req('PUT', `/nodes/${id}`, body),
@@ -182,14 +183,16 @@ export const api = {
   updateNodeSetting: (id, config) => req('PUT', `/nodes/${id}/setting`, config),
 
   // 组 CRUD
-  groups: (nodeId) => req('GET', `/nodes/${nodeId}/groups`),
+  groups: (nodeId, params) => req('GET', `/nodes/${nodeId}/groups${params ? '?' + new URLSearchParams(params).toString() : ''}`)
+    .then(r => r && r.items !== undefined ? r.items : r),
   group: (nodeId, gid) => req('GET', `/nodes/${nodeId}/groups/${gid}`),
   createGroup: (nodeId, body) => req('POST', `/nodes/${nodeId}/groups`, body),
   updateGroup: (nodeId, gid, body) => req('PUT', `/nodes/${nodeId}/groups/${gid}`, body),
   deleteGroup: (nodeId, gid) => req('DELETE', `/nodes/${nodeId}/groups/${gid}`),
 
   // 标签 CRUD
-  tags: (nodeId) => req('GET', `/nodes/${nodeId}/tags`),
+  tags: (nodeId, params) => req('GET', `/nodes/${nodeId}/tags${params ? '?' + new URLSearchParams(params).toString() : ''}`)
+    .then(r => r && r.items !== undefined ? r.items : r),
   tag: (nodeId, tid) => req('GET', `/nodes/${nodeId}/tags/${tid}`),
   createTag: (nodeId, body) => req('POST', `/nodes/${nodeId}/tags`, body),
   batchCreateTags: (nodeId, tags) => req('POST', `/nodes/${nodeId}/tags/batch`, { tags }),
@@ -212,8 +215,7 @@ export const api = {
     const formData = new FormData()
     formData.append('file', file)
     const token = getStoredToken()
-    const headers = {}
-    if (token) headers['Authorization'] = `Bearer ${token}`
+    const headers = token ? { Authorization: `Bearer ${token}` } : {}
     return fetch(`${BASE}/upload`, { method: 'POST', headers, body: formData }).then(async (r) => {
       const text = await r.text()
       if (!r.ok) throw await parseErrorResponse(r, text)
@@ -227,10 +229,7 @@ export const api = {
   licenseStatus: () => req('GET', '/license/status'),
   uploadLicense: (formData) => {
     const token = getStoredToken()
-    const headers = {}
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`
-    }
+    const headers = token ? { Authorization: `Bearer ${token}` } : {}
     return fetch(`${BASE}/license/upload`, {
       method: 'POST',
       headers,
@@ -244,7 +243,8 @@ export const api = {
   resetLicense: () => req('POST', '/license/reset'),
 
   // 用户管理（需认证）
-  users: () => req('GET', '/users'),
+  users: (params) => req('GET', `/users${params ? '?' + new URLSearchParams(params).toString() : ''}`)
+    .then(r => r && r.items !== undefined ? r.items : r),
   createUser: (body) => req('POST', '/users', body),
   getUser: (id) => req('GET', `/users/${id}`),
   updateUser: (id, body) => req('PUT', `/users/${id}`, body),
@@ -254,10 +254,7 @@ export const api = {
   // 日志管理
   downloadLog: (type = 'all') => {
     const token = getStoredToken()
-    const headers = {}
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`
-    }
+    const headers = token ? { Authorization: `Bearer ${token}` } : {}
     return fetch(`${BASE}/logs/download?type=${type}`, { headers }).then(async (r) => {
       if (!r.ok) throw await parseErrorResponse(r, await r.text())
       const blob = await r.blob()

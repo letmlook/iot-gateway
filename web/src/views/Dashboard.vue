@@ -1,19 +1,21 @@
 <script setup>
-import { ref, inject, onMounted, computed } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { getErrorMessage } from '../i18n'
 import { Connection, Upload, Cpu, Monitor, Setting, TrendCharts, Warning } from '@element-plus/icons-vue'
 import { api } from '../api.js'
+import { storeToRefs } from 'pinia'
+import { useGatewayStore } from '../stores/gateway.js'
 import PageHeader from '../components/PageHeader.vue'
 import StatusIndicator from '../components/StatusIndicator.vue'
 
 const router = useRouter()
 const { t } = useI18n()
-const health = ref(null)
-const nodes = ref([])
-const southPlugins = inject('southPlugins', ref([]))
-const northPlugins = inject('northPlugins', ref([]))
+
+// Pinia store for gateway data
+const gatewayStore = useGatewayStore()
+const { nodes, health, southPlugins, northPlugins } = storeToRefs(gatewayStore)
 const loading = ref(true)
 const error = ref('')
 
@@ -33,12 +35,7 @@ async function loadData() {
   loading.value = true
   error.value = ''
   try {
-    const [h, nd] = await Promise.all([
-      api.health().catch(() => null),
-      api.nodes().catch(() => []),
-    ])
-    health.value = h
-    nodes.value = nd
+    await gatewayStore.loadAll()
   } catch (e) {
     error.value = t('dashboard.loadOverviewFailed') + getErrorMessage(t, e)
   } finally {

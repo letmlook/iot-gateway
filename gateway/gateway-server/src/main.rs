@@ -8,6 +8,7 @@ mod license;
 mod logging;
 mod state;
 mod users;
+mod ws;
 
 use axum::Router;
 use gateway_core::proc_plugin::ProcessPluginLoader;

@@ -1,9 +1,15 @@
 //! REST API 与静态资源服务。
 
+mod dto;
 mod error;
 mod handlers;
+pub mod handlers_page;
+mod openapi;
 
+#[allow(unused_imports)]
+pub use dto::{Page, PageParams};
 pub use error::ApiError;
+pub use openapi::ApiDoc;
 
 use axum::extract::{Request, State};
 use axum::http::header;
@@ -35,6 +41,32 @@ pub struct AuthContext {
     pub username: Option<String>,
 }
 
+/// 从 Bearer token 解析认证上下文。复用自 auth_middleware，供 WS 首消息鉴权调用。
+pub fn resolve_bearer(state: &AppState, bearer: Option<&str>) -> Option<AuthContext> {
+    let t = bearer?.strip_prefix("Bearer ")?.to_string();
+    if t.is_empty() {
+        return None;
+    }
+    // 静态 token 视为管理员
+    if state
+        .config
+        .token
+        .as_ref()
+        .map(|c| constant_time_eq(c, &t))
+        .unwrap_or(false)
+    {
+        return Some(AuthContext {
+            role: crate::users::UserRole::Admin,
+            username: Some("static-token".to_string()),
+        });
+    }
+    // 用户 token
+    state.user_store.role_of(&t).map(|role| AuthContext {
+        role,
+        username: None,
+    })
+}
+
 /// 角色是否满足要求（admin > operator > viewer）
 fn role_satisfies(have: crate::users::UserRole, need: crate::users::UserRole) -> bool {
     use crate::users::UserRole::{Admin, Operator, Viewer};
@@ -46,15 +78,25 @@ fn role_satisfies(have: crate::users::UserRole, need: crate::users::UserRole) ->
     rank(have) >= rank(need)
 }
 
-/// 路由 -> 所需最低角色。
-/// 约定：读接口 Viewer+；写操作 Operator+；用户/授权/备份恢复等系统级操作 Admin。
-fn required_role(method: &axum::http::Method, path: &str) -> crate::users::UserRole {
-    use crate::users::UserRole::*;
-    let p = path
+/// 归一化 API 相对路径：接受 /api/v1/users、/api/users、v1/users、users 四种输入，统一返回 "users"。
+/// 这是安全关键函数——如果不统一，/api/v1/users 会把 Admin 规则绕成 Viewer 可读（越权漏洞）。
+fn normalize_api_path(raw: &str) -> &str {
+    let p = raw
+        .trim_start_matches("/api/v1/")
+        .trim_start_matches("/api/v1")
         .trim_start_matches("/api/")
         .trim_start_matches("/api")
         .trim_start_matches('/')
         .trim_end_matches('/');
+    // 兜底：裸 "v1/xxx" 输入（trim_end_matches 之后仍可能残留）
+    p.strip_prefix("v1/").unwrap_or(p)
+}
+
+/// 路由 -> 所需最低角色。
+/// 约定：读接口 Viewer+；写操作 Operator+；用户/授权/备份恢复等系统级操作 Admin。
+fn required_role(method: &axum::http::Method, path: &str) -> crate::users::UserRole {
+    use crate::users::UserRole::*;
+    let p = normalize_api_path(path);
 
     // 会话自身操作（登出等）任何已认证用户都可执行
     if p.starts_with("auth/") {
@@ -114,14 +156,8 @@ async fn auth_middleware(
         });
         return next.run(request).await;
     }
-    // 嵌套路由中 URI 可能是 /auth/login 或 /api/auth/login，统一处理
-    let path = request
-        .uri()
-        .path()
-        .trim_start_matches("/api/")
-        .trim_start_matches("/api")
-        .trim_start_matches('/')
-        .trim_end_matches('/');
+    // 嵌套路由中 URI 可能是 /auth/login 或 /api/auth/login，统一用 normalize_api_path 处理
+    let path = normalize_api_path(request.uri().path());
     if path == "health"
         || path == "metrics"
         || path == "version"
@@ -129,6 +165,9 @@ async fn auth_middleware(
         || path == "license/status"
         || path == "auth/login"
         || path == "login"
+        || path == "ws"
+        || path == "docs"
+        || path == "openapi.json"
     {
         return next.run(request).await;
     }
@@ -136,29 +175,9 @@ async fn auth_middleware(
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
-    let bearer = auth.and_then(|s| s.strip_prefix("Bearer ").map(|t| t.to_string()));
-    let ctx = match bearer {
-        Some(t) if !t.is_empty() => {
-            // 静态 token 视为管理员；用户 token 携带其角色，供授权中间件判定
-            if state
-                .config
-                .token
-                .as_ref()
-                .map(|c| constant_time_eq(c, &t))
-                .unwrap_or(false)
-            {
-                Some(AuthContext {
-                    role: crate::users::UserRole::Admin,
-                    username: Some("static-token".to_string()),
-                })
-            } else {
-                state.user_store.role_of(&t).map(|role| AuthContext {
-                    role,
-                    username: None,
-                })
-            }
-        }
-        _ => {
+    let ctx = match resolve_bearer(&state, auth) {
+        Some(c) => Some(c),
+        None => {
             // 既未配置静态 token 也无任何用户：视为"未初始化"放行（与历史行为一致）
             let has_users = state.user_store.has_any_user().await.ok() == Some(true);
             if state.config.token.is_none() && !has_users {
@@ -201,54 +220,37 @@ async fn auth_middleware(
 }
 
 pub fn router(state: AppState) -> Router<AppState> {
-    Router::new()
+    // 路由表：每个路径只注册一次。
+    // 分页端点：旧路径 → 旧 handler，v1 路径 → 分页 handler。
+    // 非分页端点：旧路径与 v1 路径都指向同一 handler。
+    let mut r = Router::<AppState>::new()
+        // ---- 认证相关（不过 v1 别名） ----
         .route("/auth/login", post(handlers::login))
         .route("/auth/logout", post(handlers::logout))
+        // ---- 健康探针/系统 ----
         .route("/health", get(handlers::health))
         .route("/metrics", get(handlers::metrics))
         .route("/data-flow", get(handlers::data_flow))
-        .route(
-            "/rules",
-            get(handlers::list_rules).post(handlers::create_rule),
-        )
-        .route(
-            "/rules/:id",
-            put(handlers::update_rule).delete(handlers::delete_rule),
-        )
-        .route("/rules/:id/enable", post(handlers::enable_rule))
-        // 历史数据：只读接口，GET 默认 Viewer+（见 required_role）
-        .route("/history/series", get(handlers::history_series))
-        .route("/history/series/list", get(handlers::history_series_list))
-        .route("/history/stats", get(handlers::history_stats))
         .route("/hardware", get(handlers::hardware))
+        .route("/version", get(handlers::version))
+        // ---- 日志 ----
         .route(
             "/logs/config",
             get(handlers::get_log_config).put(handlers::put_log_config),
         )
         .route("/logs/download", get(handlers::download_log))
+        // ---- 系统配置 ----
         .route(
             "/system/config",
             get(handlers::get_system_config).put(handlers::put_system_config),
         )
-        .route("/version", get(handlers::version))
+        // ---- 授权（不过 v1 别名） ----
         .route("/license/machine-id", get(handlers::license_machine_id))
         .route("/license/status", get(handlers::license_status))
         .route("/license/upload", post(handlers::upload_license))
         .route("/license/reset", post(handlers::reset_license))
         .route("/license/pro-tool", get(handlers::license_pro_tool))
-        .route(
-            "/users",
-            get(handlers::list_users).post(handlers::create_user),
-        )
-        .route(
-            "/users/:id",
-            get(handlers::get_user)
-                .put(handlers::update_user)
-                .delete(handlers::delete_user),
-        )
-        .route("/users/:id/password", put(handlers::change_password))
-        .route("/backup", post(handlers::backup))
-        .route("/restore", post(handlers::restore))
+        // ---- 插件（不过 v1 别名） ----
         .route("/plugins/south", get(handlers::list_south_plugins))
         .route(
             "/plugins/south/:name/config_schema",
@@ -263,9 +265,37 @@ pub fn router(state: AppState) -> Router<AppState> {
             "/plugins/north/:name/config_schema",
             get(handlers::north_plugin_config_schema),
         )
+        // ---- 备份/恢复 ----
+        .route("/backup", post(handlers::backup))
+        .route("/restore", post(handlers::restore))
+        // ---- 用户 CRUD ----
+        // GET: 旧路径 → 旧 handler（返回 {users:[...]}），v1 → 分页 handler（返回 Page<UserDto>）
+        // POST: 两者都走 handlers::create_user
+        .route(
+            "/users",
+            get(handlers::list_users).post(handlers::create_user),
+        )
+        .route(
+            "/v1/users",
+            get(handlers_page::list_users_v1).post(handlers::create_user),
+        )
+        .route(
+            "/users/:id",
+            get(handlers::get_user)
+                .put(handlers::update_user)
+                .delete(handlers::delete_user),
+        )
+        .route("/users/:id/password", put(handlers::change_password))
+        // ---- 节点 ----
+        // GET: 旧路径 → 旧 handler，v1 → 分页 handler
+        // POST: 两者都走 handlers::create_node
         .route(
             "/nodes",
             get(handlers::list_nodes).post(handlers::create_node),
+        )
+        .route(
+            "/v1/nodes",
+            get(handlers_page::list_nodes_v1).post(handlers::create_node),
         )
         .route(
             "/nodes/:id",
@@ -279,9 +309,15 @@ pub fn router(state: AppState) -> Router<AppState> {
             "/nodes/:id/connection-status",
             get(handlers::get_node_connection_status),
         )
+        // ---- 组 ----
+        // GET: 旧路径 → 旧 handler，v1 → 分页 handler
         .route(
             "/nodes/:id/groups",
             get(handlers::list_groups).post(handlers::add_group),
+        )
+        .route(
+            "/v1/nodes/:id/groups",
+            get(handlers_page::list_groups_v1).post(handlers::add_group),
         )
         .route(
             "/nodes/:id/groups/:gid",
@@ -289,9 +325,15 @@ pub fn router(state: AppState) -> Router<AppState> {
                 .put(handlers::update_group)
                 .delete(handlers::remove_group),
         )
+        // ---- 标签 ----
+        // GET: 旧路径 → 旧 handler，v1 → 分页 handler
         .route(
             "/nodes/:id/tags",
             get(handlers::list_tags).post(handlers::add_tag),
+        )
+        .route(
+            "/v1/nodes/:id/tags",
+            get(handlers_page::list_tags_v1).post(handlers::add_tag),
         )
         .route("/nodes/:id/tags/batch", post(handlers::batch_add_tags))
         .route(
@@ -300,29 +342,75 @@ pub fn router(state: AppState) -> Router<AppState> {
                 .put(handlers::update_tag)
                 .delete(handlers::remove_tag),
         )
+        // ---- 订阅（不过 v1 别名） ----
         .route(
             "/nodes/:id/subscriptions",
             get(handlers::get_subscriptions).put(handlers::set_subscriptions),
         )
+        // ---- 节点设置/读写 ----
         .route(
             "/nodes/:id/setting",
             get(handlers::get_node_setting).put(handlers::node_setting),
         )
         .route("/nodes/:id/read_tags", post(handlers::read_tags))
-        // 实时值：读采集缓存（不访问设备）。GET → Viewer+；
-        // 强制读设备仍走 POST /nodes/:id/read_tags（Operator+）
+        // ---- 实时值 ----
+        // 旧路径 → 旧 handler，v1 → 分页 handler
         .route("/nodes/:id/values", get(handlers::node_values))
+        .route("/v1/nodes/:id/values", get(handlers_page::node_values_v1))
         .route("/nodes/:id/write_tags", post(handlers::write_tags))
-        // 组数据策略：死区/变化上报/滑动窗口聚合（GET → Viewer+，PUT/DELETE → Operator+）
+        // ---- 组数据策略 ----
         .route(
             "/nodes/:id/groups/:gid/policy",
             get(handlers::get_policy)
                 .put(handlers::put_policy)
                 .delete(handlers::delete_policy),
         )
+        // ---- 历史数据（自带 from/to/bucket 分页参数，不过 v1 别名） ----
+        .route("/history/series", get(handlers::history_series))
+        .route("/history/series/list", get(handlers::history_series_list))
+        .route("/history/stats", get(handlers::history_stats))
+        // ---- 文件上传 ----
         .route("/upload", post(handlers::upload_config_file))
-        .with_state(state.clone())
-        .route_layer(middleware::from_fn_with_state(state, auth_middleware))
+        // ---- 规则 ----
+        // GET: 旧路径 → 旧 handler（返回 Vec<RuleView>），v1 → 分页 handler（返回 Page<RuleDto>）
+        // POST/PUT/DELETE: 两者都走 handlers
+        .route(
+            "/rules",
+            get(handlers::list_rules).post(handlers::create_rule),
+        )
+        .route(
+            "/rules/:id",
+            put(handlers::update_rule).delete(handlers::delete_rule),
+        )
+        .route("/rules/:id/enable", post(handlers::enable_rule))
+        .route(
+            "/v1/rules",
+            get(handlers_page::list_rules_v1).post(handlers::create_rule),
+        )
+        .route(
+            "/v1/rules/:id",
+            put(handlers::update_rule).delete(handlers::delete_rule),
+        )
+        .route("/v1/rules/:id/enable", post(handlers::enable_rule))
+        // ---- WebSocket ----
+        .route("/v1/ws", get(crate::ws::ws_handler));
+
+    // Swagger UI（enable_docs=true 时生效，路径已在白名单中）
+    if state.config.enable_docs {
+        use axum::routing::get;
+        use utoipa::OpenApi;
+        use utoipa_swagger_ui::SwaggerUi;
+        let doc = crate::api::ApiDoc::openapi();
+        r = r.merge(SwaggerUi::new("/v1/docs"));
+        r = r.route(
+            "/v1/openapi.json",
+            get(move |_: axum::extract::State<AppState>| async move { axum::Json(doc.clone()) }),
+        );
+    }
+
+    let state2 = state.clone();
+    r.with_state(state)
+        .route_layer(middleware::from_fn_with_state(state2, auth_middleware))
         .route_layer(middleware::from_fn(request_id_middleware))
 }
 
@@ -1015,5 +1103,117 @@ mod tests {
         assert_eq!(status_of(&env, "GET", "/nodes", Some(&t2)).await, 200);
 
         cleanup_env(env);
+    }
+
+    // ---------- S1: normalize_api_path 等价矩阵（防越权关键测试） ----------
+
+    #[test]
+    fn normalize_api_path_four_forms_equivalence() {
+        // 四种路径表示必须归一为同一结果
+        let cases = [
+            // (input, expected_normalized)
+            ("/api/v1/users", "users"),
+            ("/api/users", "users"),
+            ("v1/users", "users"),
+            ("users", "users"),
+            ("/api/v1/rules", "rules"),
+            ("/api/rules", "rules"),
+            ("v1/rules", "rules"),
+            ("rules", "rules"),
+            ("/api/v1/health", "health"),
+            ("/api/health", "health"),
+            ("v1/health", "health"),
+            ("health", "health"),
+            ("/api/v1/nodes/abc/start", "nodes/abc/start"),
+            ("/api/nodes/abc/start", "nodes/abc/start"),
+            ("v1/nodes/abc/start", "nodes/abc/start"),
+            ("nodes/abc/start", "nodes/abc/start"),
+            // 尾部斜杠去除
+            ("/api/v1/users/", "users"),
+            ("/api/users/", "users"),
+            ("users/", "users"),
+        ];
+        for (input, expected) in cases {
+            let got = super::normalize_api_path(input);
+            assert_eq!(
+                got, expected,
+                "normalize_api_path({:?}) = {:?}, want {:?}",
+                input, got, expected
+            );
+        }
+    }
+
+    #[test]
+    fn v1_alias_still_requires_admin_for_users() {
+        // 关键安全回归：/api/v1/users 必须仍是 Admin 权限，不能因为路径归一化绕过
+        use crate::users::UserRole::Admin;
+        assert_eq!(
+            required_role(&axum::http::Method::GET, "/api/v1/users"),
+            Admin
+        );
+        assert_eq!(
+            required_role(&axum::http::Method::POST, "/api/v1/rules"),
+            Admin
+        );
+        assert_eq!(
+            required_role(&axum::http::Method::GET, "/api/v1/rules"),
+            crate::users::UserRole::Viewer
+        );
+    }
+
+    #[test]
+    fn v1_health_still_public() {
+        // /api/v1/health 必须在白名单中（归一化后 path == "health"）
+        let path = super::normalize_api_path("/api/v1/health");
+        assert_eq!(
+            path, "health",
+            "health must be in whitelist after normalization"
+        );
+    }
+
+    // ---------- S1: v1 别名 RBAC 端到端（S3 注册 v1 路由后验证） ----------
+    // 注：v1_alias_equivalence 需 v1 路由已注册（路由注册属 S3），此处仅验证 normalize_api_path
+    // 归一化后在 required_role 中的命中正确。该测试在 S3 完成后补齐。
+
+    // ---------- S1: resolve_bearer 提取逻辑 ----------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resolve_bearer_static_token() {
+        let dir = std::env::temp_dir().join(format!("gw-resolve-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = gateway_core::Db::open(&dir.join("data.db"), gateway_core::IntegrityMode::Off)
+            .expect("open data.db");
+        let store = Arc::new(crate::users::UserStore::open(db, 0).expect("open user store"));
+        let mut cfg = crate::config::Config::default();
+        cfg.disable_auth = false;
+        cfg.token = Some("my-static-token".to_string());
+        let state = AppState::new(
+            Arc::new(Manager::new()),
+            cfg,
+            None,
+            crate::license::FeatureManager::without_license(),
+            store,
+            None,
+            None,
+        );
+
+        // 正确的静态 token → Admin
+        let ctx = super::resolve_bearer(&state, Some("Bearer my-static-token"));
+        assert!(ctx.is_some());
+        assert_eq!(ctx.unwrap().role, crate::users::UserRole::Admin);
+
+        // 错误的 token → None
+        let ctx = super::resolve_bearer(&state, Some("Bearer wrong-token"));
+        assert!(ctx.is_none());
+
+        // 空 Bearer → None
+        let ctx = super::resolve_bearer(&state, Some("Bearer "));
+        assert!(ctx.is_none());
+
+        // None → None
+        let ctx = super::resolve_bearer(&state, None);
+        assert!(ctx.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

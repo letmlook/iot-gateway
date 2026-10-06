@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, provide, computed, watch } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import zhCn from 'element-plus/es/locale/lang/zh-cn.mjs'
@@ -7,6 +7,9 @@ import en from 'element-plus/es/locale/lang/en.mjs'
 import { api } from './api.js'
 import { setLocale } from './i18n/index.js'
 import { initMode } from './themes.js'
+import { storeToRefs } from 'pinia'
+import { useGatewayStore } from './stores/gateway.js'
+import { useAuthStore } from './stores/auth.js'
 import SidebarNav from './components/SidebarNav.vue'
 import StatusBar from './components/StatusBar.vue'
 
@@ -14,16 +17,10 @@ const router = useRouter()
 const route = useRoute()
 const { t, locale } = useI18n()
 
-const southPlugins = ref([])
-const northPlugins = ref([])
-const nodes = ref([])
-const health = ref(null)
-const lastRefresh = ref('')
-
-provide('southPlugins', southPlugins)
-provide('northPlugins', northPlugins)
-provide('nodes', nodes)
-provide('health', health)
+// Pinia stores
+const authStore = useAuthStore()
+const gatewayStore = useGatewayStore()
+const { nodes, health, lastRefresh } = storeToRefs(gatewayStore)
 
 // Navigation data with i18n labels resolved via computed
 const mainNavItems = [
@@ -61,9 +58,7 @@ const resolvedSystemNav = computed(() => systemNavItems.map(i => ({ ...i, label:
 const runningCount = computed(() => nodes.value.filter(n => n.state === 'running').length)
 const totalCount = computed(() => nodes.value.length)
 
-const userDisplayName = computed(() => {
-  return localStorage.getItem('gateway_user') || 'admin'
-})
+const userDisplayName = computed(() => authStore.username || 'admin')
 
 // Language
 const currentLocale = ref(locale.value)
@@ -75,7 +70,7 @@ function toggleLocale() {
 }
 
 function handleLogout() {
-  api.clearAuth()
+  authStore.clearAuth()
   router.push('/login')
 }
 
@@ -84,17 +79,7 @@ const isLoginPage = computed(() => route.path === '/login')
 async function loadInitData() {
   if (route.path === '/login') return
   try {
-    const [sp, np, nd, h] = await Promise.all([
-      api.pluginsSouth().catch(() => []),
-      api.pluginsNorth().catch(() => []),
-      api.nodes().catch(() => []),
-      api.health().catch(() => null),
-    ])
-    southPlugins.value = sp
-    northPlugins.value = np
-    nodes.value = nd
-    health.value = h
-    lastRefresh.value = new Date().toLocaleTimeString()
+    await gatewayStore.loadAll()
   } catch (e) {
     console.error('Failed to load initial data', e)
   }

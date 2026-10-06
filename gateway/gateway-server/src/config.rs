@@ -62,6 +62,8 @@ pub struct Config {
     pub session_ttl_secs: u64,
     /// 启动完整性检查模式（GATEWAY_DB_INTEGRITY=full|quick|off）：data.db 损坏时自动从 .bak 恢复
     pub db_integrity: String,
+    /// 是否启用 OpenAPI 文档（Swagger UI + openapi.json）；默认关闭
+    pub enable_docs: bool,
 }
 
 fn default_bind_str() -> String {
@@ -148,6 +150,8 @@ struct ConfigFile {
     session_ttl_secs: u64,
     #[serde(default = "default_db_integrity")]
     db_integrity: String,
+    #[serde(default)]
+    enable_docs: bool,
 }
 
 fn default_data_dir_str() -> String {
@@ -218,6 +222,7 @@ impl Default for Config {
             history_max_rows: 5_000_000,
             session_ttl_secs: default_session_ttl_secs(),
             db_integrity: default_db_integrity(),
+            enable_docs: false,
         }
     }
 }
@@ -259,6 +264,7 @@ impl Config {
             history_max_rows: 5_000_000,
             session_ttl_secs: cf.session_ttl_secs,
             db_integrity: cf.db_integrity,
+            enable_docs: cf.enable_docs,
         })
     }
 
@@ -287,6 +293,7 @@ impl Config {
             bind: default_bind_str(),
             session_ttl_secs: default_session_ttl_secs(),
             db_integrity: default_db_integrity(),
+            enable_docs: false,
         };
         if let Ok(json) = serde_json::to_string_pretty(&default_cfg) {
             let _ = std::fs::write(&path, json);
@@ -420,6 +427,9 @@ impl Config {
             if !s.is_empty() {
                 c.db_integrity = s;
             }
+        }
+        if let Ok(s) = std::env::var("GATEWAY_ENABLE_DOCS") {
+            c.enable_docs = s == "1" || s.eq_ignore_ascii_case("true");
         }
         // 未提供备份密钥时随机生成：保证不再有「写死在仓库中的默认密钥」
         if c.backup_secret.is_empty() {

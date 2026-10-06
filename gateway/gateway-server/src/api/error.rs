@@ -17,7 +17,7 @@ const KNOWN_CODES: &[&str] = &[
     "validation_failed",
 ];
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct ApiErrorBody {
     pub code: String,
     pub message: String,
