@@ -5,8 +5,8 @@
 //! - 服务器 10s 内未收到有效认证则关闭连接
 //! - 服务器每 60s 发 ping，客户端需在 25s 内回应 pong
 //!
-//! 订阅 topics：node-values、group-values、system-metrics
-//! 帧通道：发送侧 bounded(256)，超限时丢弃最旧帧
+//! 数据推送：每连接独立的 bus.subscribe_all() tap，按订阅过滤器推送 values 帧；
+//! 节点状态每 ws_snapshot_interval_ms 推送一次全量快照。
 
 use axum::{
     extract::{
@@ -17,6 +17,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
@@ -26,7 +27,7 @@ use crate::api::{resolve_bearer, ApiError};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
-// WS 帧类型（与 dto.rs WsClientFrame/WsServerFrame 保持一致）
+// WS 帧类型（与 dto.rs 保持一致，使用 camelCase）
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,7 +40,13 @@ pub enum WsClientFrame {
     #[serde(rename = "pong")]
     Pong,
     #[serde(rename = "subscribe")]
-    Subscribe { topics: Vec<String> },
+    Subscribe {
+        topics: Vec<String>,
+        #[serde(rename = "nodeIds", skip_serializing_if = "Option::is_none")]
+        node_ids: Option<Vec<String>>,
+        #[serde(rename = "groupIds", skip_serializing_if = "Option::is_none")]
+        group_ids: Option<Vec<String>>,
+    },
     #[serde(rename = "unsubscribe")]
     Unsubscribe { topics: Vec<String> },
 }
@@ -48,26 +55,84 @@ pub enum WsClientFrame {
 #[serde(tag = "type")]
 #[allow(dead_code)]
 pub enum WsServerFrame {
+    /// 认证响应（auth 成功后发送）
+    #[serde(rename = "hello")]
+    Hello {
+        version: String,
+        build_date: String,
+        features: Vec<String>,
+    },
+    /// 认证失败
     #[serde(rename = "auth")]
     Auth {
         success: bool,
         message: Option<String>,
     },
+    /// 服务器 ping
     #[serde(rename = "ping")]
     Ping,
+    /// 客户端响应 pong
     #[serde(rename = "pong")]
     Pong,
-    #[serde(rename = "node-values")]
-    NodeValues { data: serde_json::Value },
-    #[serde(rename = "group-values")]
-    GroupValues { data: serde_json::Value },
-    #[serde(rename = "system-metrics")]
-    SystemMetrics { data: serde_json::Value },
+    /// values 帧：来自总线旁路订阅
+    #[serde(rename = "values")]
+    Values { data: WsValuesData },
+    /// nodes 快照帧：服务端周期推送
+    #[serde(rename = "nodes")]
+    Nodes { nodes: Vec<WsNodeSnapshot> },
+    /// 错误帧
     #[serde(rename = "error")]
     Error { message: String },
 }
 
+/// values 帧数据体
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WsValuesData {
+    #[serde(rename = "nodeId")]
+    pub node_id: String,
+    #[serde(rename = "nodeName")]
+    pub node_name: Option<String>,
+    #[serde(rename = "groupId")]
+    pub group_id: String,
+    #[serde(rename = "groupName")]
+    pub group_name: Option<String>,
+    pub values: Vec<WsTagValue>,
+}
+
+/// 单个 tag 的值（DataValue 编码与 REST 完全一致）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WsTagValue {
+    #[serde(rename = "tagId")]
+    pub tag_id: String,
+    #[serde(rename = "tagName")]
+    pub tag_name: Option<String>,
+    pub value: serde_json::Value,
+}
+
+/// nodes 快照帧中的节点
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WsNodeSnapshot {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    #[serde(rename = "pluginName")]
+    pub plugin_name: String,
+    pub state: String,
+    #[serde(rename = "connectionStatus", skip_serializing_if = "Option::is_none")]
+    pub connection_status: Option<serde_json::Value>,
+}
+
 impl WsServerFrame {
+    fn hello() -> Self {
+        WsServerFrame::Hello {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            build_date: env!("BUILD_DATE").to_string(),
+            features: vec!["values".to_string(), "nodes".to_string()],
+        }
+    }
     fn auth_ok() -> Self {
         WsServerFrame::Auth {
             success: true,
@@ -88,6 +153,12 @@ impl WsServerFrame {
             message: msg.to_string(),
         }
     }
+    fn values(data: WsValuesData) -> Self {
+        WsServerFrame::Values { data }
+    }
+    fn nodes(nodes: Vec<WsNodeSnapshot>) -> Self {
+        WsServerFrame::Nodes { nodes }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -97,9 +168,8 @@ impl WsServerFrame {
 bitflags::bitflags! {
     #[derive(Clone, Copy, Default)]
     pub struct Topics: u8 {
-        const NODE_VALUES = 1 << 0;
-        const GROUP_VALUES = 1 << 1;
-        const SYSTEM_METRICS = 1 << 2;
+        const VALUES = 1 << 0;
+        const NODES = 1 << 1;
     }
 }
 
@@ -108,14 +178,33 @@ impl Topics {
         let mut t = Topics::empty();
         for s in iter {
             match s {
-                "node-values" => t |= Topics::NODE_VALUES,
-                "group-values" => t |= Topics::GROUP_VALUES,
-                "system-metrics" => t |= Topics::SYSTEM_METRICS,
+                "values" => t |= Topics::VALUES,
+                "nodes" => t |= Topics::NODES,
                 _ => {}
             }
         }
         t
     }
+}
+
+// ---------------------------------------------------------------------------
+// 连接计数器与停机信号
+// ---------------------------------------------------------------------------
+
+static WS_CLIENT_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WS_FRAMES_SENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WS_FRAMES_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn ws_client_count() -> u64 {
+    WS_CLIENT_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn ws_frames_sent() -> u64 {
+    WS_FRAMES_SENT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn ws_frames_dropped() -> u64 {
+    WS_FRAMES_DROPPED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 // ---------------------------------------------------------------------------
@@ -127,7 +216,16 @@ pub async fn ws_handler(
     State(state): State<AppState>,
     ws: WebSocketUpgrade,
 ) -> Result<impl IntoResponse, ApiError> {
-    tracing::debug!("WS connection attempt");
+    // 连接数上限检查
+    let current = WS_CLIENT_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+    if current >= state.config.ws_max_clients as u64 {
+        tracing::warn!(
+            "WS rejected: max clients {} reached",
+            state.config.ws_max_clients
+        );
+        return Err(ApiError::service_unavailable("WS server at capacity"));
+    }
+
     let state = Arc::new(state);
     Ok(ws.on_upgrade(|socket| handle_socket(socket, state)))
 }
@@ -142,23 +240,55 @@ const SERVER_PING_INTERVAL: Duration = Duration::from_secs(60);
 const CLIENT_PONG_TIMEOUT: Duration = Duration::from_secs(25);
 
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
-    let (write_tx, write_rx) = mpsc::channel::<Message>(CHANNEL_CAPACITY);
-    let broadcast_tx = state.ws_broadcast_tx.clone();
-    let mut rx = broadcast_tx.subscribe();
+    // 增加连接计数
+    WS_CLIENT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-    // 后台任务：从 broadcast channel 消费帧并写入 WebSocket
+    // 每个连接独立的 bus tap
+    let bus = state.manager.bus();
+    let (tap_id, mut bus_rx) = bus.subscribe_all();
+
+    // 出站通道（有界 256）
+    let (out_tx, mut out_rx) = mpsc::channel::<Message>(CHANNEL_CAPACITY);
+    let out_tx_for_write = out_tx.clone();
+
+    // 用于向写任务发送关闭信号
+    let (close_tx, _close_rx) = broadcast::channel::<()>(1);
+    let close_tx_for_write = close_tx.clone();
+
+    // 写任务：从 out_rx 取帧并发送
     let write_task = tokio::spawn(async move {
-        let mut write_rx = write_rx;
-        while let Some(msg) = write_rx.recv().await {
-            if write_tx.send(msg).await.is_err() {
-                break;
+        let mut closed = close_tx_for_write.subscribe();
+        loop {
+            tokio::select! {
+                msg = out_rx.recv() => {
+                    match msg {
+                        Some(m) => {
+                            if out_tx_for_write.send(m).await.is_err() {
+                                break;
+                            }
+                            WS_FRAMES_SENT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        None => break,
+                    }
+                }
+                _ = closed.recv() => {
+                    break;
+                }
             }
         }
     });
 
     let (sender, receiver) = socket.split();
-    let result = handle_frames(sender, receiver, state, broadcast_tx, &mut rx).await;
+    let result = handle_frames(sender, receiver, state, &mut bus_rx, out_tx).await;
+
+    // 关闭写任务
+    let _ = close_tx.send(());
     let _ = write_task.await;
+
+    // 清理：注销 tap、减少计数
+    bus.unsubscribe_all(tap_id);
+    WS_CLIENT_COUNT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+
     if let Err(e) = result {
         tracing::debug!("WS connection error: {}", e);
     }
@@ -172,8 +302,8 @@ async fn handle_frames<S, R>(
     mut sender: S,
     mut receiver: R,
     state: Arc<AppState>,
-    broadcast_tx: broadcast::Sender<serde_json::Value>,
-    rx: &mut broadcast::Receiver<serde_json::Value>,
+    bus_rx: &mut broadcast::Receiver<Arc<gateway_sdk::GroupData>>,
+    out_tx: mpsc::Sender<Message>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     S: SinkExt<Message> + Unpin,
@@ -181,8 +311,10 @@ where
 {
     let mut session = Session {
         authenticated: false,
-        subscriptions: Topics::empty(),
         username: None,
+        topics: Topics::empty(),
+        node_filter: HashSet::new(),
+        group_filter: HashSet::new(),
     };
 
     // 10s 认证超时
@@ -196,13 +328,17 @@ where
     let mut pong_timer = interval(CLIENT_PONG_TIMEOUT);
     pong_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    // nodes 快照定时器
+    let mut snapshot_timer = interval(Duration::from_millis(state.config.ws_snapshot_interval_ms));
+    snapshot_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         tokio::select! {
             // 客户端消息
             msg = receiver.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if let Err(e) = process_client_frame(&text, &state, &mut session, &broadcast_tx).await {
+                        if let Err(e) = process_client_frame(&text, &state, &mut session, &out_tx).await {
                             tracing::warn!("WS client frame error: {}", e);
                             let _ = sender.send(Message::Text(serde_json::to_string(&WsServerFrame::error(&e.to_string())).unwrap())).await;
                             // 认证失败时关闭连接
@@ -215,7 +351,6 @@ where
                     }
                     Some(Ok(Message::Ping(data))) => {
                         let _ = sender.send(Message::Pong(data.clone())).await;
-                        let _ = sender.send(Message::Text(serde_json::to_string(&WsServerFrame::Pong).unwrap())).await;
                         pong_timer.reset();
                     }
                     Some(Ok(Message::Pong(_))) => {
@@ -256,31 +391,65 @@ where
                     tracing::warn!("WS: auth timeout");
                     let _ = sender.send(Message::Text(serde_json::to_string(&WsServerFrame::auth_fail("auth timeout")).unwrap())).await;
                     let _ = sender.send(Message::Close(Some(axum::extract::ws::CloseFrame{
-                        code: 1000u16,
+                        code: 4001u16,
                         reason: "auth timeout".into(),
                     }))).await;
                     break;
                 }
             }
 
-            // 广播消息（来自总线）
-            data = rx.recv() => {
+            // nodes 快照（ws_snapshot_interval_ms=0 时关闭）
+            _ = snapshot_timer.tick() => {
+                if session.authenticated && session.topics.contains(Topics::NODES) && state.config.ws_snapshot_interval_ms > 0 {
+                    let frame = build_nodes_frame(&state).await;
+                    if let Some(f) = frame {
+                        let text = serde_json::to_string(&f).unwrap_or_default();
+                        if out_tx.send(Message::Text(text)).await.is_err() {
+                            // 通道满，丢帧
+                            WS_FRAMES_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+
+            // 总线数据（旁路订阅）
+            data = bus_rx.recv() => {
                 match data {
-                    Ok(frame_json) => {
-                        let typ = frame_json.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                        let should_send = match typ {
-                            "node-values" => session.subscriptions.contains(Topics::NODE_VALUES),
-                            "group-values" => session.subscriptions.contains(Topics::GROUP_VALUES),
-                            "system-metrics" => session.subscriptions.contains(Topics::SYSTEM_METRICS),
-                            _ => true,
-                        };
-                        if should_send {
-                            let text = serde_json::to_string(&frame_json).unwrap_or_default();
-                            let _ = sender.send(Message::Text(text)).await;
+                    Ok(gd) => {
+                        if session.authenticated && session.topics.contains(Topics::VALUES) {
+                            // 按 node_ids / group_ids 过滤
+                            if !session.node_filter.is_empty() && !session.node_filter.contains(&gd.node_id.0.to_string()) {
+                                continue;
+                            }
+                            if !session.group_filter.is_empty() && !session.group_filter.contains(&gd.group_id.0.to_string()) {
+                                continue;
+                            }
+
+                            let frame = WsServerFrame::values(WsValuesData {
+                                node_id: gd.node_id.0.to_string(),
+                                node_name: gd.node_name.clone(),
+                                group_id: gd.group_id.0.to_string(),
+                                group_name: gd.group_name.clone(),
+                                values: gd.values.iter().map(|(tid, dv)| {
+                                    let tag_name = gd.tag_names.as_ref().and_then(|m| m.get(tid)).cloned();
+                                    WsTagValue {
+                                        tag_id: tid.0.to_string(),
+                                        tag_name,
+                                        value: serde_json::to_value(dv).unwrap_or_default(),
+                                    }
+                                }).collect(),
+                            });
+
+                            let text = serde_json::to_string(&frame).unwrap_or_default();
+                            if out_tx.send(Message::Text(text)).await.is_err() {
+                                // 通道满，丢帧
+                                WS_FRAMES_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::debug!("WS broadcast lagged {} frames", n);
+                        tracing::debug!("WS bus tap lagged {} frames", n);
+                        WS_FRAMES_DROPPED.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -297,8 +466,10 @@ where
 
 struct Session {
     authenticated: bool,
-    subscriptions: Topics,
     username: Option<String>,
+    topics: Topics,
+    node_filter: HashSet<String>,
+    group_filter: HashSet<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -309,7 +480,7 @@ async fn process_client_frame(
     text: &str,
     state: &Arc<AppState>,
     session: &mut Session,
-    broadcast_tx: &broadcast::Sender<serde_json::Value>,
+    out_tx: &mpsc::Sender<Message>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let frame: WsClientFrame = serde_json::from_str(text)?;
 
@@ -320,13 +491,20 @@ async fn process_client_frame(
                 session.authenticated = true;
                 session.username = ctx.username;
                 tracing::info!(username = ?session.username, "WS authenticated");
-                let _ = broadcast_tx.send(
-                    serde_json::to_string(&WsServerFrame::auth_ok())
-                        .unwrap()
-                        .into(),
-                );
+                // 发送 auth success
+                let _ = out_tx
+                    .send(Message::Text(
+                        serde_json::to_string(&WsServerFrame::auth_ok()).unwrap(),
+                    ))
+                    .await;
+                // 发送 hello
+                let _ = out_tx
+                    .send(Message::Text(
+                        serde_json::to_string(&WsServerFrame::hello()).unwrap(),
+                    ))
+                    .await;
             } else {
-                // 认证失败：返回错误让调用方关闭连接
+                // 认证失败
                 return Err("invalid token".into());
             }
         }
@@ -339,12 +517,21 @@ async fn process_client_frame(
             tracing::debug!("WS client pong received");
         }
 
-        WsClientFrame::Subscribe { topics } => {
+        WsClientFrame::Subscribe {
+            topics,
+            node_ids,
+            group_ids,
+        } => {
             if !session.authenticated {
                 return Err("not authenticated".into());
             }
-            let new_topics = Topics::from_strs(topics.iter().map(|s| s.as_str()));
-            session.subscriptions |= new_topics;
+            session.topics |= Topics::from_strs(topics.iter().map(|s| s.as_str()));
+            if let Some(ids) = node_ids {
+                session.node_filter = ids.into_iter().collect();
+            }
+            if let Some(ids) = group_ids {
+                session.group_filter = ids.into_iter().collect();
+            }
             tracing::debug!(username = ?session.username, "WS subscribed");
         }
 
@@ -353,7 +540,7 @@ async fn process_client_frame(
                 return Err("not authenticated".into());
             }
             let to_remove = Topics::from_strs(topics.iter().map(|s| s.as_str()));
-            session.subscriptions &= !to_remove;
+            session.topics &= !to_remove;
             tracing::debug!(username = ?session.username, "WS unsubscribed");
         }
     }
@@ -362,32 +549,56 @@ async fn process_client_frame(
 }
 
 // ---------------------------------------------------------------------------
-// 总线数据注入（由 state 或 manager 调用，发布到所有 WS 会话）
+// 构建 nodes 快照帧
 // ---------------------------------------------------------------------------
 
-/// 向所有 WS 会话广播 node-values 数据
-#[allow(dead_code)]
-pub fn broadcast_node_values(state: &AppState, data: serde_json::Value) {
-    let frame = serde_json::json!({ "type": "node-values", "data": data });
-    if let Err(e) = state.ws_broadcast_tx.send(frame) {
-        tracing::debug!("WS broadcast (node-values) skipped, no receivers: {}", e);
-    }
+async fn build_nodes_frame(state: &AppState) -> Option<WsServerFrame> {
+    use gateway_sdk::NodeKind;
+    let nodes = state.manager.nodes_list();
+
+    let snapshots: Vec<WsNodeSnapshot> = nodes
+        .iter()
+        .map(|node| {
+            let kind_str = if node.kind() == NodeKind::North {
+                "north"
+            } else {
+                "south"
+            };
+            let state_str = match node.state {
+                gateway_sdk::NodeState::Running => "running",
+                gateway_sdk::NodeState::Stopped => "stopped",
+                _ => "unknown",
+            };
+
+            WsNodeSnapshot {
+                id: node.id().0.to_string(),
+                name: node.config.name.clone(),
+                kind: kind_str.to_string(),
+                plugin_name: node.config.plugin_name.clone(),
+                state: state_str.to_string(),
+                connection_status: None,
+            }
+        })
+        .collect();
+
+    Some(WsServerFrame::nodes(snapshots))
 }
 
-/// 向所有 WS 会话广播 group-values 数据
-#[allow(dead_code)]
-pub fn broadcast_group_values(state: &AppState, data: serde_json::Value) {
-    let frame = serde_json::json!({ "type": "group-values", "data": data });
-    if let Err(e) = state.ws_broadcast_tx.send(frame) {
-        tracing::debug!("WS broadcast (group-values) skipped, no receivers: {}", e);
-    }
+// ---------------------------------------------------------------------------
+// 导出指标（供 handlers.rs metrics 使用）
+// ---------------------------------------------------------------------------
+
+/// 获取当前 WS 客户端数量
+pub fn metric_ws_clients() -> u64 {
+    ws_client_count()
 }
 
-/// 向所有 WS 会话广播 system-metrics 数据
-#[allow(dead_code)]
-pub fn broadcast_system_metrics(state: &AppState, data: serde_json::Value) {
-    let frame = serde_json::json!({ "type": "system-metrics", "data": data });
-    if let Err(e) = state.ws_broadcast_tx.send(frame) {
-        tracing::debug!("WS broadcast (system-metrics) skipped, no receivers: {}", e);
-    }
+/// 获取 WS 已发送帧计数
+pub fn metric_ws_frames_sent() -> u64 {
+    ws_frames_sent()
+}
+
+/// 获取 WS 丢弃帧计数
+pub fn metric_ws_frames_dropped() -> u64 {
+    ws_frames_dropped()
 }

@@ -259,17 +259,20 @@ function initWriteInput(tag) {
 const selectedNodeInfo = computed(() => nodes.value.find(n => n.id === selectedNode.value))
 
 // WS integration
-let wsConnected = false
 function onWsConnected() {
-  wsConnected = true
-  gatewayWs.subscribe(FrameType.NODE_VALUES)
+  if (selectedNode.value) {
+    gatewayWs.subscribe([FrameType.VALUES], [selectedNode.value], null)
+  }
 }
 function onWsDisconnected() {
-  wsConnected = false
+  // WS 断开时若自动刷新已开启则恢复 HTTP 轮询
+  if (autoRefresh.value) {
+    toggleAutoRefresh()
+  }
 }
-function onWsNodeValues(frame) {
-  if (!frame.data || !selectedNode.value) return
-  const vals = Array.isArray(frame.data) ? frame.data : [frame.data]
+function onWsValues(frame) {
+  if (!frame.data) return
+  const vals = Array.isArray(frame.data.values) ? frame.data.values : [frame.data]
   const newValues = { ...tagValues.value }
   vals.forEach(v => {
     if (v.tagId) newValues[v.tagId] = v.value ?? v
@@ -279,17 +282,30 @@ function onWsNodeValues(frame) {
 }
 gatewayWs.on('connected', onWsConnected)
 gatewayWs.on('disconnected', onWsDisconnected)
-gatewayWs.on(FrameType.NODE_VALUES, onWsNodeValues)
+gatewayWs.on(FrameType.VALUES, onWsValues)
+
+// 当选中的节点变化时，重新订阅 WS 并刷新数据
+watch(selectedNode, (newNodeId) => {
+  if (!newNodeId) return
+  tagValues.value = {}
+  // 清空旧值避免串台
+  if (gatewayWs.connected) {
+    gatewayWs.subscribe([FrameType.VALUES], [newNodeId], null)
+  }
+  // 刷新 groups/tags
+  loadGroups(newNodeId)
+})
 
 onMounted(() => {
   loadNodes()
-  if (!wsConnected) gatewayWs.connect()
+  // 连接 WS（gatewayWs 单例，不会重复连接）
+  gatewayWs.connect()
 })
 onUnmounted(() => {
   if (timer) clearInterval(timer)
   gatewayWs.off('connected', onWsConnected)
   gatewayWs.off('disconnected', onWsDisconnected)
-  gatewayWs.off(FrameType.NODE_VALUES, onWsNodeValues)
+  gatewayWs.off(FrameType.VALUES, onWsValues)
 })
 </script>
 

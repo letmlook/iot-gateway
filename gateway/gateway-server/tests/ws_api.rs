@@ -26,11 +26,14 @@ fn ws_server_frame_serializes_correctly() {
     let json = serde_json::to_string(&ping).unwrap();
     assert!(json.contains(r#""type":"ping""#));
 
-    let node_vals = WsServerFrame::NodeValues {
-        data: serde_json::json!([{"tagId":"t1","value":42.0}]),
+    let hello = WsServerFrame::Hello {
+        version: "1.0.0".to_string(),
+        build_date: "2026-10-06".to_string(),
+        features: vec!["values".to_string(), "nodes".to_string()],
     };
-    let json = serde_json::to_string(&node_vals).unwrap();
-    assert!(json.contains(r#""type":"node-values""#));
+    let json = serde_json::to_string(&hello).unwrap();
+    assert!(json.contains(r#""type":"hello""#));
+    assert!(json.contains("1.0.0"));
 }
 
 #[test]
@@ -44,13 +47,34 @@ fn ws_client_frame_deserializes_correctly() {
         _ => panic!("expected Auth variant"),
     }
 
-    let subscribe: WsClientFrame = serde_json::from_str(
-        r#"{ "type": "subscribe", "topics": ["node-values", "group-values"] }"#,
+    let subscribe: WsClientFrame =
+        serde_json::from_str(r#"{ "type": "subscribe", "topics": ["values", "nodes"] }"#).unwrap();
+    match subscribe {
+        WsClientFrame::Subscribe {
+            topics,
+            node_ids,
+            group_ids,
+        } => {
+            assert_eq!(topics, vec!["values", "nodes"]);
+            assert!(node_ids.is_none());
+            assert!(group_ids.is_none());
+        }
+        _ => panic!("expected Subscribe variant"),
+    }
+
+    let subscribe_with_filter: WsClientFrame = serde_json::from_str(
+        r#"{ "type": "subscribe", "topics": ["values"], "nodeIds": ["n1"], "groupIds": ["g1"] }"#,
     )
     .unwrap();
-    match subscribe {
-        WsClientFrame::Subscribe { topics } => {
-            assert_eq!(topics, vec!["node-values", "group-values"])
+    match subscribe_with_filter {
+        WsClientFrame::Subscribe {
+            topics,
+            node_ids,
+            group_ids,
+        } => {
+            assert_eq!(topics, vec!["values"]);
+            assert_eq!(node_ids, Some(vec!["n1".to_string()]));
+            assert_eq!(group_ids, Some(vec!["g1".to_string()]));
         }
         _ => panic!("expected Subscribe variant"),
     }
@@ -63,47 +87,31 @@ fn ws_client_frame_deserializes_correctly() {
 }
 
 #[test]
-fn ws_broadcast_functions_work() {
-    use gateway_core::Manager;
-    use gateway_server::config::Config;
-    use gateway_server::license::FeatureManager;
-    use gateway_server::users::UserStore;
-    use std::sync::Arc;
-
-    let cfg = Config::default();
-    let state = gateway_server::state::AppState::new(
-        Arc::new(Manager::with_limits(16, 4)),
-        cfg,
-        None,
-        FeatureManager::without_license(),
-        Arc::new(UserStore::empty()),
-        None,
-        None,
-    );
-
-    // broadcast 函数调用不 panic 即通过（无订阅者时直接丢弃）
-    let data = serde_json::json!([{ "tagId": "t1", "value": 1.0 }]);
-    gateway_server::ws::broadcast_node_values(&state, data.clone());
-    gateway_server::ws::broadcast_group_values(&state, data.clone());
-    gateway_server::ws::broadcast_system_metrics(&state, data.clone());
-}
-
-#[test]
 fn ws_topics_bitflags() {
     use gateway_server::ws::Topics;
 
     let empty = Topics::empty();
-    assert!(!empty.contains(Topics::NODE_VALUES));
+    assert!(!empty.contains(Topics::VALUES));
+    assert!(!empty.contains(Topics::NODES));
 
-    let with_node = Topics::from_strs(["node-values"].into_iter());
-    assert!(with_node.contains(Topics::NODE_VALUES));
-    assert!(!with_node.contains(Topics::GROUP_VALUES));
+    let with_values = Topics::from_strs(["values"].into_iter());
+    assert!(with_values.contains(Topics::VALUES));
+    assert!(!with_values.contains(Topics::NODES));
 
-    let combined = Topics::from_strs(["node-values", "group-values", "system-metrics"].into_iter());
-    assert!(combined.contains(Topics::NODE_VALUES));
-    assert!(combined.contains(Topics::GROUP_VALUES));
-    assert!(combined.contains(Topics::SYSTEM_METRICS));
+    let combined = Topics::from_strs(["values", "nodes"].into_iter());
+    assert!(combined.contains(Topics::VALUES));
+    assert!(combined.contains(Topics::NODES));
 
     let unknown = Topics::from_strs(["unknown-topic"].into_iter());
-    assert!(!unknown.contains(Topics::NODE_VALUES));
+    assert!(!unknown.contains(Topics::VALUES));
+}
+
+#[test]
+fn ws_metrics_functions_work() {
+    use gateway_server::ws::{metric_ws_clients, metric_ws_frames_dropped, metric_ws_frames_sent};
+
+    // 初始值应为 0
+    assert_eq!(metric_ws_clients(), 0);
+    assert_eq!(metric_ws_frames_sent(), 0);
+    assert_eq!(metric_ws_frames_dropped(), 0);
 }

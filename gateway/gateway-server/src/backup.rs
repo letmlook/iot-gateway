@@ -129,6 +129,7 @@ pub fn decrypt_backup(data: &[u8], secret: &str) -> Result<Snapshot, String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use gateway_core::SNAPSHOT_VERSION;

@@ -488,6 +488,7 @@ pub async fn serve_static_or_index(uri: axum::http::Uri) -> axum::response::Resp
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use crate::state::AppState;

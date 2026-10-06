@@ -328,30 +328,91 @@ impl From<&crate::api::error::ApiErrorBody> for Error {
 // WS 帧 DTO（OpenAPI 中声明，与 ws.rs 共用同一类型定义）
 // ---------------------------------------------------------------------------
 
-/// WS 服务器 → 客户端帧信封。
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct WsServerFrame {
-    #[serde(rename = "type")]
-    pub frame_type: String,
-    /// RFC3339 毫秒时间戳（除 pong 外均有）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ts: Option<String>,
-    #[serde(flatten, skip_serializing_if = "Option::is_none")]
-    pub data: Option<serde_json::Value>,
-}
-
 /// WS 客户端 → 服务器帧。
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(tag = "type", rename_all = "camelCase")]
 #[allow(dead_code)]
-pub struct WsClientFrame {
-    #[serde(rename = "type")]
-    pub frame_type: String,
-    pub token: Option<String>,
-    pub topics: Option<Vec<String>>,
-    #[serde(rename = "nodeIds", skip_serializing_if = "Option::is_none")]
-    pub node_ids: Option<Vec<String>>,
-    #[serde(rename = "groupIds", skip_serializing_if = "Option::is_none")]
-    pub group_ids: Option<Vec<String>>,
+pub enum WsClientFrame {
+    Auth {
+        token: Option<String>,
+    },
+    Ping,
+    Pong,
+    Subscribe {
+        topics: Vec<String>,
+        #[serde(rename = "nodeIds", skip_serializing_if = "Option::is_none")]
+        node_ids: Option<Vec<String>>,
+        #[serde(rename = "groupIds", skip_serializing_if = "Option::is_none")]
+        group_ids: Option<Vec<String>>,
+    },
+    Unsubscribe {
+        topics: Vec<String>,
+    },
+}
+
+/// values 帧数据体。
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WsValuesData {
+    #[serde(rename = "nodeId")]
+    pub node_id: String,
+    #[serde(rename = "nodeName", skip_serializing_if = "Option::is_none")]
+    pub node_name: Option<String>,
+    #[serde(rename = "groupId")]
+    pub group_id: String,
+    #[serde(rename = "groupName", skip_serializing_if = "Option::is_none")]
+    pub group_name: Option<String>,
+    pub values: Vec<WsTagValue>,
+}
+
+/// 单个 tag 的值（DataValue 编码与 REST 完全一致）。
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WsTagValue {
+    #[serde(rename = "tagId")]
+    pub tag_id: String,
+    #[serde(rename = "tagName", skip_serializing_if = "Option::is_none")]
+    pub tag_name: Option<String>,
+    pub value: serde_json::Value,
+}
+
+/// nodes 快照帧中的节点。
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WsNodeSnapshot {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    #[serde(rename = "pluginName")]
+    pub plugin_name: String,
+    pub state: String,
+    #[serde(rename = "connectionStatus", skip_serializing_if = "Option::is_none")]
+    pub connection_status: Option<serde_json::Value>,
+}
+
+/// WS 服务器 → 客户端帧。
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(tag = "type", rename_all = "camelCase")]
+#[allow(dead_code)]
+pub enum WsServerFrame {
+    Hello {
+        version: String,
+        build_date: String,
+        features: Vec<String>,
+    },
+    Auth {
+        success: bool,
+        message: Option<String>,
+    },
+    Ping,
+    Pong,
+    Values {
+        data: WsValuesData,
+    },
+    Nodes {
+        nodes: Vec<WsNodeSnapshot>,
+    },
+    Error {
+        message: String,
+    },
 }

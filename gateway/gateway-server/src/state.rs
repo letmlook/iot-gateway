@@ -8,7 +8,6 @@ use gateway_core::proc_plugin::ProcessPluginLoader;
 use gateway_core::Db;
 use gateway_core::{persist_save_secret, Manager, PluginLoader};
 use std::sync::Arc;
-use tokio::sync::broadcast;
 use tracing::warn;
 
 #[derive(Clone)]
@@ -29,8 +28,6 @@ pub struct AppState {
     _loader: Option<Arc<PluginLoader>>,
     /// 进程隔离模式下的插件加载器（含各子进程的重启计数）；inproc 模式为 None
     pub plugin_processes: Option<Arc<ProcessPluginLoader>>,
-    /// WS 广播 channel：WS 会话通过它接收总线推送的实时数据
-    pub ws_broadcast_tx: broadcast::Sender<serde_json::Value>,
 }
 
 impl AppState {
@@ -43,7 +40,6 @@ impl AppState {
         node_log_names: Option<NodeLogNameMap>,
         db: Option<Arc<Db>>,
     ) -> Self {
-        let (ws_broadcast_tx, _) = broadcast::channel(256);
         Self {
             manager,
             config,
@@ -54,7 +50,6 @@ impl AppState {
             persist_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             _loader: loader.map(Arc::new),
             plugin_processes: None,
-            ws_broadcast_tx,
         }
     }
 

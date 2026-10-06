@@ -60,6 +60,10 @@ impl ApiError {
     pub fn internal(msg: impl Into<String>) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", msg)
     }
+
+    pub fn service_unavailable(msg: impl Into<String>) -> Self {
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, "service_unavailable", msg)
+    }
 }
 
 /// 解析插件错误字符串 "code: message"，若前缀为已知 code 则拆分为 (code, message)

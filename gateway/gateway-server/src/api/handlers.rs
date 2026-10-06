@@ -716,7 +716,16 @@ pub async fn metrics(State(state): State<AppState>) -> (axum::http::StatusCode, 
          gateway_history_rows_pruned {}\n\
          # HELP gateway_history_write_err Total history write failures.\n\
          # TYPE gateway_history_write_err counter\n\
-         gateway_history_write_err {}\n",
+         gateway_history_write_err {}\n\
+         # HELP gateway_ws_clients Current WebSocket client count.
+         # TYPE gateway_ws_clients gauge
+         gateway_ws_clients {}\n\
+         # HELP gateway_ws_frames_sent_total Total WS frames sent to clients.
+         # TYPE gateway_ws_frames_sent_total counter
+         gateway_ws_frames_sent_total {}\n\
+         # HELP gateway_ws_frames_dropped_total Total WS frames dropped (full channel or lagged).
+         # TYPE gateway_ws_frames_dropped_total counter
+         gateway_ws_frames_dropped_total {}\n",
         nodes_total,
         nodes_running,
         plugins_south,
@@ -737,6 +746,9 @@ pub async fn metrics(State(state): State<AppState>) -> (axum::http::StatusCode, 
         df.history_rows_written,
         df.history_rows_pruned,
         df.history_write_err,
+        crate::ws::metric_ws_clients(),
+        crate::ws::metric_ws_frames_sent(),
+        crate::ws::metric_ws_frames_dropped(),
     );
     // 维度化指标：定位「是哪个北向节点在丢数据」
     let mut body = body;

@@ -64,6 +64,10 @@ pub struct Config {
     pub db_integrity: String,
     /// 是否启用 OpenAPI 文档（Swagger UI + openapi.json）；默认关闭
     pub enable_docs: bool,
+    /// WebSocket 最大并发连接数
+    pub ws_max_clients: u32,
+    /// WebSocket 节点状态快照推送间隔（毫秒）；0 = 关闭快照推送
+    pub ws_snapshot_interval_ms: u64,
 }
 
 fn default_bind_str() -> String {
@@ -110,6 +114,14 @@ fn default_db_integrity() -> String {
     "full".into()
 }
 
+fn default_ws_max_clients() -> u32 {
+    64
+}
+
+fn default_ws_snapshot_interval_ms() -> u64 {
+    5000
+}
+
 fn parse_origins(s: &str) -> Vec<String> {
     s.split(',')
         .map(|x| x.trim().to_string())
@@ -152,6 +164,10 @@ struct ConfigFile {
     db_integrity: String,
     #[serde(default)]
     enable_docs: bool,
+    #[serde(default = "default_ws_max_clients")]
+    ws_max_clients: u32,
+    #[serde(default = "default_ws_snapshot_interval_ms")]
+    ws_snapshot_interval_ms: u64,
 }
 
 fn default_data_dir_str() -> String {
@@ -223,6 +239,8 @@ impl Default for Config {
             session_ttl_secs: default_session_ttl_secs(),
             db_integrity: default_db_integrity(),
             enable_docs: false,
+            ws_max_clients: default_ws_max_clients(),
+            ws_snapshot_interval_ms: default_ws_snapshot_interval_ms(),
         }
     }
 }
@@ -265,6 +283,8 @@ impl Config {
             session_ttl_secs: cf.session_ttl_secs,
             db_integrity: cf.db_integrity,
             enable_docs: cf.enable_docs,
+            ws_max_clients: cf.ws_max_clients,
+            ws_snapshot_interval_ms: cf.ws_snapshot_interval_ms,
         })
     }
 
@@ -294,6 +314,8 @@ impl Config {
             session_ttl_secs: default_session_ttl_secs(),
             db_integrity: default_db_integrity(),
             enable_docs: false,
+            ws_max_clients: default_ws_max_clients(),
+            ws_snapshot_interval_ms: default_ws_snapshot_interval_ms(),
         };
         if let Ok(json) = serde_json::to_string_pretty(&default_cfg) {
             let _ = std::fs::write(&path, json);
@@ -430,6 +452,16 @@ impl Config {
         }
         if let Ok(s) = std::env::var("GATEWAY_ENABLE_DOCS") {
             c.enable_docs = s == "1" || s.eq_ignore_ascii_case("true");
+        }
+        if let Ok(s) = std::env::var("GATEWAY_WS_MAX_CLIENTS") {
+            if let Ok(n) = s.parse::<u32>() {
+                c.ws_max_clients = n;
+            }
+        }
+        if let Ok(s) = std::env::var("GATEWAY_WS_SNAPSHOT_INTERVAL_MS") {
+            if let Ok(n) = s.parse::<u64>() {
+                c.ws_snapshot_interval_ms = n;
+            }
         }
         // 未提供备份密钥时随机生成：保证不再有「写死在仓库中的默认密钥」
         if c.backup_secret.is_empty() {
