@@ -20,6 +20,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo check
         run: cargo check --workspace --all-targets
+      # 集成测试依赖的产物不会被 cargo test 顺带构建：
+      # ffi_fault_isolation 需要 cdylib 夹具，process_isolation 需要 plugin-host 可执行文件
+      - name: Build test fixtures
+        run: cargo build -p plugin-faulty -p plugin-abi-mismatch -p gateway-plugin-host
       - name: cargo test
         run: cargo test --workspace
 
