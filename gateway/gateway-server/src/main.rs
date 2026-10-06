@@ -135,11 +135,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // 历史存储（默认关闭）：通过总线旁路订阅落库，不依赖北向订阅关系
     let history_stats = std::sync::Arc::new(history::HistoryStats::default());
     let _history_recorder = if config.history_enabled {
+        // 租户盖章：写入时按节点解析归属域（节点已删则丢弃样本并计写错误）
+        let tenant_store = mgr.store.clone();
+        let tenant_resolver: history::HistoryTenantResolver =
+            std::sync::Arc::new(move |node_id: &str| {
+                uuid::Uuid::parse_str(node_id)
+                    .ok()
+                    .map(gateway_sdk::NodeId)
+                    .and_then(|id| tenant_store.node_get(id))
+                    .map(|n| n.config.tenant_id)
+            });
         match history::HistoryRecorder::start(
             config.history_cfg(),
             Some(mgr.bus()),
             mgr.data_flow_metrics.clone(),
             history_stats.clone(),
+            Some(tenant_resolver),
         ) {
             Ok(r) => {
                 tracing::info!("history storage enabled: {}", config.history_db().display());

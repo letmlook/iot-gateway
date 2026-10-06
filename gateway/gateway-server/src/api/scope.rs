@@ -107,6 +107,14 @@ pub fn scoped_rules(state: &AppState, ctx: &TenantScope) -> Vec<gateway_core::Ru
         .collect()
 }
 
+/// 历史查询的域过滤参数："*" 表示不过滤（仅 All 作用域会传它）
+pub fn history_tenant_filter(ctx: &TenantScope) -> String {
+    match ctx {
+        TenantScope::All => "*".to_string(),
+        TenantScope::One(t) => t.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

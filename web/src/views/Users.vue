@@ -14,12 +14,17 @@ const users = ref([])
 const showDialog = ref(false)
 const dialogLoading = ref(false)
 const isEdit = ref(false)
-const formUser = ref({ username: '', password: '', role: 'operator' })
+const formUser = ref({ username: '', password: '', role: 'operator', tenant: 'default' })
 const editId = ref('')
 const showPasswordDialog = ref(false)
 const passwordUserId = ref('')
 const newPassword = ref('')
 const passwordDialogLoading = ref(false)
+
+// 租户（形态 B）：域下拉数据源 + 租户管理区块
+const tenants = ref([])
+const newTenant = ref({ id: '', name: '' })
+const tenantLoading = ref(false)
 
 const roleOptions = [
   { value: 'admin', labelKey: 'users.roleAdmin' },
@@ -40,22 +45,32 @@ async function loadUsers() {
   }
 }
 
+async function loadTenants() {
+  try {
+    const res = await api.tenants()
+    tenants.value = res?.tenants ?? []
+  } catch {
+    // 非 Admin 拿不到租户列表：域下拉退化为自由输入不需要——保持空列表即可
+    tenants.value = []
+  }
+}
+
 function openAdd() {
   isEdit.value = false
   editId.value = ''
-  formUser.value = { username: '', password: '', role: 'operator' }
+  formUser.value = { username: '', password: '', role: 'operator', tenant: 'default' }
   showDialog.value = true
 }
 
 function openEdit(row) {
   isEdit.value = true
   editId.value = row.id
-  formUser.value = { username: row.username, password: '', role: row.role }
+  formUser.value = { username: row.username, password: '', role: row.role, tenant: row.tenant_id || 'default' }
   showDialog.value = true
 }
 
 async function saveUser() {
-  const { username, password, role } = formUser.value
+  const { username, password, role, tenant } = formUser.value
   if (!username?.trim()) {
     ElMessage.warning(t('users.usernameRequired'))
     return
@@ -67,10 +82,10 @@ async function saveUser() {
   dialogLoading.value = true
   try {
     if (isEdit.value) {
-      await api.updateUser(editId.value, { username: username.trim(), role })
+      await api.updateUser(editId.value, { username: username.trim(), role, tenant })
       ElMessage.success(t('users.updateSuccess'))
     } else {
-      await api.createUser({ username: username.trim(), password: password || '', role: role || 'operator' })
+      await api.createUser({ username: username.trim(), password: password || '', role: role || 'operator', tenant })
       ElMessage.success(t('users.createSuccess'))
     }
     showDialog.value = false
@@ -124,6 +139,45 @@ async function submitPassword() {
   }
 }
 
+async function doCreateTenant() {
+  const id = newTenant.value.id?.trim()
+  const name = newTenant.value.name?.trim() || id
+  if (!id) {
+    ElMessage.warning(t('users.tenantIdRequired'))
+    return
+  }
+  tenantLoading.value = true
+  try {
+    await api.createTenant({ id, name })
+    ElMessage.success(t('users.tenantCreated'))
+    newTenant.value = { id: '', name: '' }
+    await loadTenants()
+  } catch (e) {
+    ElMessage.error(getErrorMessage(t, e))
+  } finally {
+    tenantLoading.value = false
+  }
+}
+
+async function doDeleteTenant(row) {
+  try {
+    await ElMessageBox.confirm(
+      t('users.tenantDeleteConfirm', { name: row.id }),
+      t('common.confirmDelete'),
+      { type: 'warning', confirmButtonText: t('common.confirm'), cancelButtonText: t('common.cancel') }
+    )
+  } catch {
+    return
+  }
+  try {
+    await api.deleteTenant(row.id)
+    ElMessage.success(t('users.tenantDeleted'))
+    await Promise.all([loadTenants(), loadUsers()])
+  } catch (e) {
+    ElMessage.error(getErrorMessage(t, e))
+  }
+}
+
 function roleLabel(role) {
   const opt = roleOptions.find(o => o.value === role)
   return opt ? t(opt.labelKey) : role
@@ -152,7 +206,10 @@ function formatDateTime(dateStr) {
   }
 }
 
-onMounted(loadUsers)
+onMounted(() => {
+  loadUsers()
+  loadTenants()
+})
 </script>
 
 <template>
@@ -171,6 +228,11 @@ onMounted(loadUsers)
         <el-table-column prop="role" :label="t('users.role')" width="100">
           <template #default="{ row }">{{ roleLabel(row.role) }}</template>
         </el-table-column>
+        <el-table-column prop="tenant_id" :label="t('users.tenant')" min-width="100">
+          <template #default="{ row }">
+            <el-tag size="small" type="info">{{ row.tenant_id || 'default' }}</el-tag>
+          </template>
+        </el-table-column>
         <el-table-column prop="created_at" :label="t('users.createdAt')" min-width="140">
           <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
         </el-table-column>
@@ -185,6 +247,46 @@ onMounted(loadUsers)
 
       <el-empty v-if="!loading && users.length === 0" :description="t('users.noUsers')" />
     </div>
+
+    <!-- 租户管理（Admin；非 Admin 拿不到租户列表，区块自动隐藏） -->
+    <el-card v-if="tenants.length > 0" shadow="never" class="tenant-card">
+      <template #header>{{ t('users.tenantManage') }}</template>
+      <div class="tenant-toolbar">
+        <el-input
+          v-model="newTenant.id"
+          :placeholder="t('users.tenantIdPlaceholder')"
+          style="width: 180px"
+          maxlength="64"
+        />
+        <el-input
+          v-model="newTenant.name"
+          :placeholder="t('users.tenantNamePlaceholder')"
+          style="width: 180px"
+        />
+        <el-button type="primary" :loading="tenantLoading" @click="doCreateTenant">
+          {{ t('users.tenantCreate') }}
+        </el-button>
+      </div>
+      <el-table :data="tenants" stripe size="small">
+        <el-table-column prop="id" :label="t('users.tenantId')" min-width="120" />
+        <el-table-column prop="name" :label="t('users.tenantName')" min-width="140" />
+        <el-table-column prop="nodes_count" :label="t('users.tenantNodes')" width="100" />
+        <el-table-column prop="users_count" :label="t('users.tenantUsers')" width="100" />
+        <el-table-column :label="t('common.operation')" width="100">
+          <template #default="{ row }">
+            <el-button
+              link
+              type="danger"
+              size="small"
+              :disabled="row.id === 'default'"
+              @click="doDeleteTenant(row)"
+            >
+              {{ t('common.delete') }}
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
 
     <!-- 新增/编辑 -->
     <el-dialog
@@ -209,6 +311,17 @@ onMounted(loadUsers)
               :value="opt.value"
               :label="t(opt.labelKey)"
             />
+          </el-select>
+        </el-form-item>
+        <el-form-item :label="t('users.tenant')">
+          <el-select v-model="formUser.tenant" style="width: 100%">
+            <el-option
+              v-for="tn in tenants"
+              :key="tn.id"
+              :value="tn.id"
+              :label="`${tn.id} (${tn.name})`"
+            />
+            <el-option v-if="tenants.length === 0" value="default" label="default" />
           </el-select>
         </el-form-item>
       </el-form>
@@ -244,5 +357,13 @@ onMounted(loadUsers)
   display: flex;
   justify-content: flex-end;
   margin-bottom: 1rem;
+}
+.tenant-card {
+  margin-top: 1rem;
+}
+.tenant-toolbar {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
 }
 </style>

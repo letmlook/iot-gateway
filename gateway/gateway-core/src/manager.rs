@@ -310,24 +310,46 @@ impl Manager {
     }
 
     /// 设置北向节点的订阅。若该北向节点正在运行，会重启其总线消费任务以使新订阅生效。
-    /// 会过滤掉无效的订阅项（south_node_id 或 group_id 不存在）。
+    /// 订阅项合法性过滤（南向存在 + 是南向 + 组存在 + 与北向节点同域）。
+    ///
+    /// set_north_subscriptions（API 路径）与 apply_snapshot（启动加载 / restore 路径）
+    /// 共用：订阅表只有这两条写入路径，任何新增写入路径必须接入同一过滤器，
+    /// 否则伪造/异地导入的备份可把跨域订阅项注入内存表，击穿数据面同域封闭。
+    fn filter_subscriptions(
+        &self,
+        north_node_id: NodeId,
+        subs: Vec<GroupSubscription>,
+    ) -> Vec<GroupSubscription> {
+        // 北向节点自身必须存在（坏快照引用不存在节点：丢弃该节点全部订阅项）
+        let Some(north) = self.store.node_get(north_node_id) else {
+            return Vec::new();
+        };
+        subs.into_iter()
+            .filter(|s| {
+                let Some(n) = self.store.node_get(s.south_node_id) else {
+                    return false;
+                };
+                if n.kind() != NodeKind::South {
+                    return false;
+                }
+                if self.store.group_get(s.south_node_id, s.group_id).is_none() {
+                    return false;
+                }
+                // 同域校验：两端域由迁移保证非空，恒可比
+                north.config.tenant_id == n.config.tenant_id
+            })
+            .collect()
+    }
+
+    /// 北向订阅：全量替换某北向节点的订阅表。
+    /// 会过滤掉无效的订阅项（south_node_id 或 group_id 不存在、跨域）。
     #[instrument(skip(self))]
     pub async fn set_north_subscriptions(
         &self,
         north_node_id: NodeId,
         subs: Vec<GroupSubscription>,
     ) {
-        let subs: Vec<GroupSubscription> = subs
-            .into_iter()
-            .filter(|s| {
-                let node = self.store.node_get(s.south_node_id);
-                let Some(n) = node else { return false };
-                if n.kind() != NodeKind::South {
-                    return false;
-                }
-                self.store.group_get(s.south_node_id, s.group_id).is_some()
-            })
-            .collect();
+        let subs = self.filter_subscriptions(north_node_id, subs);
         {
             let mut t = self.subscriptions.write().await;
             t.insert(north_node_id, subs.clone());
@@ -608,7 +630,8 @@ impl Manager {
         let mut t = self.subscriptions.write().await;
         t.clear();
         for (nid, subs) in &s.subscriptions {
-            t.insert(*nid, subs.clone());
+            // 与 API 写入路径共用同一过滤器：跨域订阅项与孤儿项在内存表中收敛掉
+            t.insert(*nid, self.filter_subscriptions(*nid, subs.clone()));
         }
         drop(t);
         for n in &s.nodes {

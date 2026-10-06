@@ -687,12 +687,19 @@ pub async fn restore(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| backup_secret_of(&state));
     let snap = backup::decrypt_backup(&data, &secret).map_err(ApiError::bad_request)?;
-    if snap.version != gateway_core::SNAPSHOT_VERSION {
+    // v2 起快照携带租户归属；v1 备份由 serde default 在解析时补 default 章，旧备份无需重新导出
+    if snap.version > gateway_core::SNAPSHOT_VERSION {
         return Err(ApiError::bad_request(format!(
-            "unsupported snapshot version: {}, expected {}",
+            "unsupported snapshot version: {}, expected <= {}",
             snap.version,
             gateway_core::SNAPSHOT_VERSION
         )));
+    }
+    if snap.version < gateway_core::SNAPSHOT_VERSION {
+        tracing::info!(
+            version = snap.version,
+            "restoring legacy snapshot; all nodes/rules stamped into the 'default' tenant"
+        );
     }
     // License 门禁前移到「最终状态」校验：恢复前先整体检查插件授权与点位上限，
     // 避免通过备份绕过 create_node / add_tag 的增量校验。
@@ -2270,6 +2277,7 @@ fn now_ms() -> i64 {
 /// 历史序列查询：SQL 侧分桶降采样，点数不超过 `max_points`
 pub async fn history_series(
     State(state): State<AppState>,
+    axum::extract::Extension(ctx): axum::extract::Extension<crate::api::AuthContext>,
     Query(p): Query<SeriesQueryParams>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if !state.config.history_enabled {
@@ -2290,6 +2298,7 @@ pub async fn history_series(
         from_ms: from,
         to_ms: to,
         max_points,
+        tenant_id: crate::api::scope::history_tenant_filter(&ctx.tenant),
     };
     let db = state.config.history_db();
     // SQLite 是阻塞 API：放到阻塞线程池，别占住 async worker
@@ -2312,14 +2321,17 @@ pub async fn history_series(
 /// 库中有哪些序列（供前端选择）
 pub async fn history_series_list(
     State(state): State<AppState>,
+    axum::extract::Extension(ctx): axum::extract::Extension<crate::api::AuthContext>,
     Query(p): Query<SeriesListParams>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let db = state.config.history_db();
     let limit = p.limit.unwrap_or(200).clamp(1, 2000);
-    let list = tokio::task::spawn_blocking(move || crate::history::list_series(&db, limit))
-        .await
-        .map_err(|e| ApiError::bad_request(e.to_string()))?
-        .map_err(ApiError::bad_request)?;
+    let tenant = crate::api::scope::history_tenant_filter(&ctx.tenant);
+    let list =
+        tokio::task::spawn_blocking(move || crate::history::list_series(&db, limit, &tenant))
+            .await
+            .map_err(|e| ApiError::bad_request(e.to_string()))?
+            .map_err(ApiError::bad_request)?;
     Ok(Json(serde_json::json!({ "series": list })))
 }
 

@@ -40,14 +40,44 @@ use tracing::{info, warn};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS samples (
-  ts       INTEGER NOT NULL,
-  node_id  TEXT    NOT NULL,
-  group_id TEXT    NOT NULL,
-  tag      TEXT    NOT NULL,
-  value    REAL    NOT NULL
+  ts        INTEGER NOT NULL,
+  node_id   TEXT    NOT NULL,
+  group_id  TEXT    NOT NULL,
+  tag       TEXT    NOT NULL,
+  value     REAL    NOT NULL,
+  tenant_id TEXT    NOT NULL DEFAULT 'default'
 );
-CREATE INDEX IF NOT EXISTS idx_samples_series ON samples(node_id, group_id, tag, ts);
 "#;
+
+/// 旧索引名（v1）：迁移时删除，由 idx_samples_series_t 取代
+const LEGACY_INDEX: &str = "idx_samples_series";
+/// 现行索引：域为最左前缀，服务「按域过滤的序列查询」形状
+const SERIES_INDEX: &str = "idx_samples_series_t";
+
+/// 建库 / 迁移（幂等）：
+/// - 新库：v2 形状直接建立；
+/// - v1 旧库：samples 无 tenant_id 列 → ALTER 补列（存量样本归 default 域），
+///   删除旧索引并按 (tenant_id, node_id, group_id, tag, ts) 重建。
+pub fn ensure_history_schema(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(SCHEMA)?;
+    let has_tenant: bool = conn
+        .prepare("PRAGMA table_info(samples)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .any(|c| c.as_deref() == Ok("tenant_id"));
+    if !has_tenant {
+        conn.execute_batch(
+            "ALTER TABLE samples ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';
+             DROP INDEX IF EXISTS idx_samples_series;",
+        )?;
+    }
+    if LEGACY_INDEX != SERIES_INDEX {
+        conn.execute_batch(&format!("DROP INDEX IF EXISTS {LEGACY_INDEX};"))?;
+    }
+    conn.execute_batch(&format!(
+        "CREATE INDEX IF NOT EXISTS {SERIES_INDEX} ON samples(tenant_id, node_id, group_id, tag, ts);"
+    ))?;
+    Ok(())
+}
 
 /// 采样点
 #[derive(Debug, Clone, PartialEq)]
@@ -57,6 +87,8 @@ pub struct Sample {
     pub group_id: String,
     pub tag: String,
     pub value: f64,
+    /// 写入时从节点解析的租户域（节点删除后历史仍按保留策略留存，故冗余落列）
+    pub tenant_id: String,
 }
 
 /// 历史存储配置
@@ -103,6 +135,9 @@ pub struct HistoryStats {
     pub lagged: AtomicU64,
 }
 
+/// 租户解析器：node_id（字符串）→ 该节点归属的租户域；None = 节点不存在（样本丢弃）
+pub type HistoryTenantResolver = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 /// 历史存储句柄：持有写线程，Drop 时通知其退出
 pub struct HistoryRecorder {
     stop_tx: Option<tokio::sync::oneshot::Sender<()>>,
@@ -113,11 +148,14 @@ impl HistoryRecorder {
     /// 启动历史落库：订阅总线旁路，把数值型点位写入 SQLite。
     ///
     /// `bus` 为 `Some` 时挂旁路订阅；为 `None` 时不订阅（仅初始化库，便于测试与迁移）。
+    /// `tenant_resolver` 为 `Some` 时按节点盖章租户域（节点缺失则丢弃样本并计 write_err）；
+    /// 为 `None` 时一律归 default 域（仅测试/迁移场景）。
     pub fn start(
         cfg: HistoryConfig,
         bus: Option<Bus>,
         metrics: Arc<DataFlowMetrics>,
         stats: Arc<HistoryStats>,
+        tenant_resolver: Option<HistoryTenantResolver>,
     ) -> Result<Self, String> {
         if let Some(parent) = cfg.db_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -125,7 +163,7 @@ impl HistoryRecorder {
         // 先在启动线程把库建好：配置错误要在启动阶段暴露，而不是在写线程里静默失败
         {
             let conn = open_db(&cfg.db_path).map_err(|e| e.to_string())?;
-            conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
+            ensure_history_schema(&conn).map_err(|e| e.to_string())?;
         }
 
         let (tx, rx) = mpsc::channel::<Sample>(cfg.channel_capacity);
@@ -152,7 +190,16 @@ impl HistoryRecorder {
                         _ = &mut stop_rx => break,
                         msg = tap_rx.recv() => match msg {
                             Ok(data) => {
-                                for s in samples_from_group_data(&data) {
+                                for mut s in samples_from_group_data(&data) {
+                                    // 租户盖章：节点缺失则丢弃样本并计入写错误
+                                    match tenant_resolver.as_ref().and_then(|r| r(&s.node_id)) {
+                                        Some(t) => s.tenant_id = t,
+                                        None if tenant_resolver.is_some() => {
+                                            sub_stats.write_errors.fetch_add(1, Ordering::Relaxed);
+                                            continue;
+                                        }
+                                        None => s.tenant_id = "default".to_string(),
+                                    }
                                     // 写线程跟不上时在这里形成背压：通道满会等待，
                                     // 等待期间旁路订阅自身按容量丢弃并计数（见 Lagged 分支）
                                     if tx.send(s).await.is_err() {
@@ -189,7 +236,8 @@ impl Drop for HistoryRecorder {
     }
 }
 
-/// 把一条 GroupData 转成样本：只保留数值型点位，且需要知道点位名称
+/// 把一条 GroupData 转成样本：只保留数值型点位，且需要知道点位名称。
+/// tenant_id 不在此处盖章——由订阅任务经 resolver 解析后回填（节点缺失则整条丢弃）。
 pub fn samples_from_group_data(data: &GroupData) -> Vec<Sample> {
     let Some(names) = data.tag_names.as_ref() else {
         // 没有点位名映射时无法建立稳定的序列标识，跳过（避免用 tag_id 当序列名）
@@ -210,6 +258,7 @@ pub fn samples_from_group_data(data: &GroupData) -> Vec<Sample> {
                 group_id: group_id.clone(),
                 tag: name,
                 value: f,
+                tenant_id: String::new(),
             });
         }
     }
@@ -262,7 +311,7 @@ fn write_loop(
     metrics: Arc<DataFlowMetrics>,
 ) {
     let conn = match open_db(&cfg.db_path).and_then(|c| {
-        c.execute_batch(SCHEMA)?;
+        ensure_history_schema(&c)?;
         Ok(c)
     }) {
         Ok(c) => c,
@@ -344,10 +393,17 @@ fn write_batch(conn: &Connection, batch: &[Sample]) -> rusqlite::Result<u64> {
     {
         // 批量写入同样使用语句缓存：每条样本都重新 prepare 会让吞吐下降一个数量级
         let mut stmt = tx.prepare_cached(
-            "INSERT INTO samples (ts, node_id, group_id, tag, value) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO samples (ts, node_id, group_id, tag, value, tenant_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
         for s in batch {
-            stmt.execute(params![s.ts_ms, s.node_id, s.group_id, s.tag, s.value])?;
+            stmt.execute(params![
+                s.ts_ms,
+                s.node_id,
+                s.group_id,
+                s.tag,
+                s.value,
+                s.tenant_id
+            ])?;
         }
     }
     tx.commit()?;
@@ -410,6 +466,8 @@ pub struct SeriesQuery {
     pub from_ms: i64,
     pub to_ms: i64,
     pub max_points: u32,
+    /// 租户域过滤："*" 表示不过滤（仅 All 作用域传入），其余按域精确匹配
+    pub tenant_id: String,
 }
 
 /// 桶宽度：把区间切成不超过 `max_points` 个桶，最小 1ms
@@ -432,13 +490,22 @@ pub fn query_series(db_path: &Path, q: &SeriesQuery) -> Result<Vec<Bucket>, Stri
             "SELECT (ts / ?4) * ?4 AS b, AVG(value), MIN(value), MAX(value), COUNT(1)
              FROM samples
              WHERE node_id = ?1 AND group_id = ?2 AND tag = ?3 AND ts >= ?5 AND ts <= ?6
+               AND (?7 = '*' OR tenant_id = ?7)
              GROUP BY b
              ORDER BY b ASC",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(
-            params![q.node_id, q.group_id, q.tag, width, q.from_ms, q.to_ms],
+            params![
+                q.node_id,
+                q.group_id,
+                q.tag,
+                width,
+                q.from_ms,
+                q.to_ms,
+                q.tenant_id
+            ],
             |row| {
                 Ok(Bucket {
                     ts: row.get(0)?,
@@ -457,8 +524,12 @@ pub fn query_series(db_path: &Path, q: &SeriesQuery) -> Result<Vec<Bucket>, Stri
     Ok(out)
 }
 
-/// 库里有哪些序列（点位名），用于前端下拉选择
-pub fn list_series(db_path: &Path, limit: u32) -> Result<Vec<serde_json::Value>, String> {
+/// 库里有哪些序列（点位名），用于前端下拉选择；按租户域过滤（"*" = 不过滤）
+pub fn list_series(
+    db_path: &Path,
+    limit: u32,
+    tenant_id: &str,
+) -> Result<Vec<serde_json::Value>, String> {
     if !db_path.exists() {
         return Ok(Vec::new());
     }
@@ -467,12 +538,14 @@ pub fn list_series(db_path: &Path, limit: u32) -> Result<Vec<serde_json::Value>,
     let mut stmt = conn
         .prepare(
             "SELECT node_id, group_id, tag, COUNT(1), MIN(ts), MAX(ts)
-             FROM samples GROUP BY node_id, group_id, tag
+             FROM samples
+             WHERE (?2 = '*' OR tenant_id = ?2)
+             GROUP BY node_id, group_id, tag
              ORDER BY MAX(ts) DESC LIMIT ?1",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map(params![limit as i64], |row| {
+        .query_map(params![limit as i64, tenant_id], |row| {
             Ok(serde_json::json!({
                 "node_id": row.get::<_, String>(0)?,
                 "group_id": row.get::<_, String>(1)?,
@@ -543,6 +616,7 @@ mod tests {
             group_id: "g1".to_string(),
             tag: tag.to_string(),
             value: v,
+            tenant_id: "default".to_string(),
         }
     }
 
@@ -571,6 +645,7 @@ mod tests {
             from_ms: 0,
             to_ms: 10_000,
             max_points: 5,
+            tenant_id: "*".into(),
         };
         let series = query_series(&db, &q).unwrap();
         assert!(
@@ -616,6 +691,7 @@ mod tests {
             from_ms: 1500,
             to_ms: 5000,
             max_points: 100,
+            tenant_id: "*".into(),
         };
         let series = query_series(&db, &q).unwrap();
         let total: u64 = series.iter().map(|b| b.count).sum();
@@ -735,5 +811,115 @@ mod tests {
             tag_names: None,
         };
         assert!(samples_from_group_data(&data).is_empty());
+    }
+
+    /// §4.2-6：v1 旧库迁移——补 tenant_id 列、删旧索引建新索引、旧行归 default 域可查
+    #[test]
+    fn migrate_v1_db_adds_tenant_column() {
+        let db = tmp_db("migrate");
+        // 手工建 v1 形状（无 tenant_id，旧索引名）
+        {
+            let conn = open_db(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE samples (ts INTEGER NOT NULL, node_id TEXT NOT NULL,
+                   group_id TEXT NOT NULL, tag TEXT NOT NULL, value REAL NOT NULL);
+                 CREATE INDEX idx_samples_series ON samples(node_id, group_id, tag, ts);
+                 INSERT INTO samples VALUES (1000, 'n1', 'g1', 't', 1.0);",
+            )
+            .unwrap();
+        }
+        {
+            let conn = open_db(&db).unwrap();
+            ensure_history_schema(&conn).unwrap();
+            // 旧行仍在且归 default 域
+            let (n, tenant): (i64, String) = conn
+                .query_row(
+                    "SELECT COUNT(1), tenant_id FROM samples GROUP BY tenant_id",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(n, 1);
+            assert_eq!(tenant, "default");
+            // 新索引存在、旧索引已删
+            let idx: i64 = conn
+                .query_row(
+                    "SELECT COUNT(1) FROM sqlite_master WHERE type='index' AND name=?1",
+                    params![SERIES_INDEX],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(idx, 1, "新索引 {SERIES_INDEX} 应存在");
+            let old: i64 = conn
+                .query_row(
+                    "SELECT COUNT(1) FROM sqlite_master WHERE type='index' AND name=?1",
+                    params![LEGACY_INDEX],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(old, 0, "旧索引应已删除");
+        }
+        // 迁移后可按 default 域查询；其他域查不到
+        let q_all = SeriesQuery {
+            node_id: "n1".into(),
+            group_id: "g1".into(),
+            tag: "t".into(),
+            from_ms: 0,
+            to_ms: 2000,
+            max_points: 10,
+            tenant_id: "*".into(),
+        };
+        assert_eq!(query_series(&db, &q_all).unwrap().len(), 1);
+        let q_default = SeriesQuery {
+            tenant_id: "default".into(),
+            ..q_all.clone()
+        };
+        assert_eq!(query_series(&db, &q_default).unwrap().len(), 1);
+        let q_other = SeriesQuery {
+            tenant_id: "tenant-b".into(),
+            ..q_all
+        };
+        assert!(query_series(&db, &q_other).unwrap().is_empty());
+        let _ = std::fs::remove_file(&db);
+    }
+
+    /// §4.2-9（历史段）：同序列不同域的样本互不可见
+    #[test]
+    fn query_filters_by_tenant() {
+        let db = tmp_db("tenantfilter");
+        let conn = open_db(&db).unwrap();
+        ensure_history_schema(&conn).unwrap();
+        let mut a = sample(1000, "t", 1.0);
+        a.tenant_id = "tenant-a".into();
+        let mut b = sample(2000, "t", 2.0);
+        b.tenant_id = "tenant-b".into();
+        write_batch(&conn, &[a, b]).unwrap();
+        drop(conn);
+
+        let base = SeriesQuery {
+            node_id: "n1".into(),
+            group_id: "g1".into(),
+            tag: "t".into(),
+            from_ms: 0,
+            to_ms: 3000,
+            max_points: 10,
+            tenant_id: "*".into(),
+        };
+        assert_eq!(query_series(&db, &base).unwrap().len(), 2);
+        let qa = SeriesQuery {
+            tenant_id: "tenant-a".into(),
+            ..base.clone()
+        };
+        let sa = query_series(&db, &qa).unwrap();
+        assert_eq!(sa.len(), 1);
+        assert_eq!(sa[0].avg, 1.0);
+        let qb = SeriesQuery {
+            tenant_id: "tenant-b".into(),
+            ..base
+        };
+        let sb = query_series(&db, &qb).unwrap();
+        assert_eq!(sb.len(), 1);
+        assert_eq!(sb[0].avg, 2.0);
+        let _ = std::fs::remove_file(&db);
     }
 }

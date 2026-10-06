@@ -251,6 +251,11 @@ export const api = {
   deleteUser: (id) => req('DELETE', `/users/${id}`),
   changePassword: (id, password) => req('PUT', `/users/${id}/password`, { password: password || '' }),
 
+  // 租户管理（Admin；多租户形态 B）
+  tenants: () => req('GET', '/tenants'),
+  createTenant: (body) => req('POST', '/tenants', body),
+  deleteTenant: (id) => req('DELETE', `/tenants/${id}`),
+
   // 日志管理
   downloadLog: (type = 'all') => {
     const token = getStoredToken()
