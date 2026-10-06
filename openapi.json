@@ -1,0 +1,1068 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "gateway-server",
+    "description": "HTTP API、插件加载、Web 服务入口",
+    "license": {
+      "name": ""
+    },
+    "version": "0.1.0"
+  },
+  "paths": {},
+  "components": {
+    "schemas": {
+      "ApiErrorBody": {
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "description": "OpenAPI 全局错误组件。",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "GroupDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "intervalMs"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "intervalMs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "NodeDto": {
+        "type": "object",
+        "description": "v1 节点响应：脱敏 config + connection_status。",
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "pluginName",
+          "state",
+          "config"
+        ],
+        "properties": {
+          "config": {},
+          "connectionStatus": {},
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "pluginName": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          }
+        }
+      },
+      "PageParams": {
+        "type": "object",
+        "description": "通用分页查询参数。page 默认 1，page_size 默认 50 clamp [1, 1000]。",
+        "properties": {
+          "group_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "组 ID 过滤，仅 tags"
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "节点类型过滤，仅 nodes"
+          },
+          "page": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "page_size": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "name 子串过滤（大小写不敏感），仅 nodes/groups/tags"
+          }
+        }
+      },
+      "Page_GroupDto": {
+        "type": "object",
+        "description": "分页信封，v1 列表端点专用。",
+        "required": [
+          "items",
+          "total",
+          "page",
+          "pageSize"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "name",
+                "intervalMs"
+              ],
+              "properties": {
+                "description": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "id": {
+                  "type": "string"
+                },
+                "intervalMs": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                },
+                "name": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "page": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "pageSize": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "Page_NodeDto": {
+        "type": "object",
+        "description": "分页信封，v1 列表端点专用。",
+        "required": [
+          "items",
+          "total",
+          "page",
+          "pageSize"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "v1 节点响应：脱敏 config + connection_status。",
+              "required": [
+                "id",
+                "name",
+                "kind",
+                "pluginName",
+                "state",
+                "config"
+              ],
+              "properties": {
+                "config": {},
+                "connectionStatus": {},
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "pluginName": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "page": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "pageSize": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "Page_RuleDto": {
+        "type": "object",
+        "description": "分页信封，v1 列表端点专用。",
+        "required": [
+          "items",
+          "total",
+          "page",
+          "pageSize"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "name",
+                "enabled",
+                "source",
+                "condition",
+                "forMs",
+                "clearMs",
+                "action",
+                "runtime"
+              ],
+              "properties": {
+                "action": {
+                  "type": "object",
+                  "description": "RuleAction 枚举如实序列化为 JSON"
+                },
+                "clearMs": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                },
+                "condition": {
+                  "type": "object"
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "forMs": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                },
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "runtime": {
+                  "$ref": "#/components/schemas/RuleRuntime"
+                },
+                "source": {
+                  "type": "object",
+                  "description": "RuleSource 结构体如实序列化为 JSON"
+                }
+              }
+            }
+          },
+          "page": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "pageSize": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "Page_TagDto": {
+        "type": "object",
+        "description": "分页信封，v1 列表端点专用。",
+        "required": [
+          "items",
+          "total",
+          "page",
+          "pageSize"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "groupId",
+                "name",
+                "address",
+                "attr"
+              ],
+              "properties": {
+                "address": {
+                  "type": "string"
+                },
+                "attr": {
+                  "type": "string"
+                },
+                "dataType": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "description": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "groupId": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "page": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "pageSize": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "Page_UserDto": {
+        "type": "object",
+        "description": "分页信封，v1 列表端点专用。",
+        "required": [
+          "items",
+          "total",
+          "page",
+          "pageSize"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "username",
+                "role",
+                "createdAt",
+                "updatedAt"
+              ],
+              "properties": {
+                "createdAt": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "role": {
+                  "type": "string"
+                },
+                "updatedAt": {
+                  "type": "string"
+                },
+                "username": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "page": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "pageSize": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "Page_ValueDto": {
+        "type": "object",
+        "description": "分页信封，v1 列表端点专用。",
+        "required": [
+          "items",
+          "total",
+          "page",
+          "pageSize"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "/nodes/:id/values 响应中的单个 tag 值。",
+              "required": [
+                "tagId",
+                "name",
+                "groupId",
+                "value",
+                "available"
+              ],
+              "properties": {
+                "available": {
+                  "type": "boolean"
+                },
+                "groupId": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "tagId": {
+                  "type": "string"
+                },
+                "ts": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int64"
+                },
+                "value": {}
+              }
+            }
+          },
+          "page": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "pageSize": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "RuleDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "enabled",
+          "source",
+          "condition",
+          "forMs",
+          "clearMs",
+          "action",
+          "runtime"
+        ],
+        "properties": {
+          "action": {
+            "type": "object",
+            "description": "RuleAction 枚举如实序列化为 JSON"
+          },
+          "clearMs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "condition": {
+            "type": "object"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "forMs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "runtime": {
+            "$ref": "#/components/schemas/RuleRuntime"
+          },
+          "source": {
+            "type": "object",
+            "description": "RuleSource 结构体如实序列化为 JSON"
+          }
+        }
+      },
+      "RuleRuntime": {
+        "type": "object",
+        "required": [
+          "fired",
+          "fireCount"
+        ],
+        "properties": {
+          "fireCount": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "fired": {
+            "type": "boolean"
+          },
+          "lastValue": {}
+        }
+      },
+      "TagDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "groupId",
+          "name",
+          "address",
+          "attr"
+        ],
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "attr": {
+            "type": "string"
+          },
+          "dataType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "groupId": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "UserDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "username",
+          "role",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        }
+      },
+      "ValueDto": {
+        "type": "object",
+        "description": "/nodes/:id/values 响应中的单个 tag 值。",
+        "required": [
+          "tagId",
+          "name",
+          "groupId",
+          "value",
+          "available"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean"
+          },
+          "groupId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "tagId": {
+            "type": "string"
+          },
+          "ts": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "value": {}
+        }
+      },
+      "WsClientFrame": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "token": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "auth"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "ping"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "pong"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "topics",
+              "type"
+            ],
+            "properties": {
+              "groupIds": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              },
+              "nodeIds": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              },
+              "topics": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "subscribe"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "topics",
+              "type"
+            ],
+            "properties": {
+              "topics": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "unsubscribe"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "WS 客户端 → 服务器帧。"
+      },
+      "WsNodeSnapshot": {
+        "type": "object",
+        "description": "nodes 快照帧中的节点。",
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "pluginName",
+          "state"
+        ],
+        "properties": {
+          "connectionStatus": {},
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "pluginName": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          }
+        }
+      },
+      "WsServerFrame": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "version",
+              "build_date",
+              "features",
+              "type"
+            ],
+            "properties": {
+              "build_date": {
+                "type": "string"
+              },
+              "features": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "hello"
+                ]
+              },
+              "version": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "success",
+              "type"
+            ],
+            "properties": {
+              "message": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "success": {
+                "type": "boolean"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "auth"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "ping"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "pong"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "$ref": "#/components/schemas/WsValuesData"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "values"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "nodes",
+              "type"
+            ],
+            "properties": {
+              "nodes": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/WsNodeSnapshot"
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "nodes"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "message",
+              "type"
+            ],
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "error"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "WS 服务器 → 客户端帧。"
+      },
+      "WsTagValue": {
+        "type": "object",
+        "description": "单个 tag 的值（DataValue 编码与 REST 完全一致）。",
+        "required": [
+          "tagId",
+          "value"
+        ],
+        "properties": {
+          "tagId": {
+            "type": "string"
+          },
+          "tagName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "value": {}
+        }
+      },
+      "WsValuesData": {
+        "type": "object",
+        "description": "values 帧数据体。",
+        "required": [
+          "nodeId",
+          "groupId",
+          "values"
+        ],
+        "properties": {
+          "groupId": {
+            "type": "string"
+          },
+          "groupName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nodeId": {
+            "type": "string"
+          },
+          "nodeName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "values": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WsTagValue"
+            }
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "auth",
+      "description": "登录/登出"
+    },
+    {
+      "name": "nodes",
+      "description": "节点管理"
+    },
+    {
+      "name": "groups",
+      "description": "组管理"
+    },
+    {
+      "name": "tags",
+      "description": "标签管理"
+    },
+    {
+      "name": "rules",
+      "description": "规则管理"
+    },
+    {
+      "name": "users",
+      "description": "用户管理"
+    },
+    {
+      "name": "plugins",
+      "description": "插件"
+    },
+    {
+      "name": "system",
+      "description": "系统信息"
+    }
+  ]
+}
