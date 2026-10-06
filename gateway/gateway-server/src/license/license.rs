@@ -25,13 +25,13 @@ const LICENSE_AES_KEY: &[u8; 32] = b"IoTGateway@2024!SecretKey#Lic_32";
 /// 内置 RSA 公钥（PEM）。与管理员签名脚本中的私钥成对，严禁泄露私钥。
 /// 建议：发布前对公钥字符串做简单混淆或分段存储，增加逆向成本。
 const BUILTIN_PUBLIC_KEY_PEM: &str = r#"-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvqddab7KV8EV0A2ypXfF
-GpVtgPEQcFIUVIXOsxyNDmZraMOBSUL9nvm+eaX2vdUZgKHeQA2+D0hz6lDcC0nQ
-Cv8gJXolr8Lfb9CwgKSFUbE/C0cAwnbyIQ3/QvVcBEDlzcVAoQc50+UiFOLnvgpE
-udYL8/288MPaIO619Qs3TcSIfM3+R+djnadrDkmj9eN3LYiHZoUk5c3LfACEB4pq
-jmK8KRJzqlI+wWFHI6iCwnXrhU51EdlVVPTpKTqiIc2EB6IPyy5XC6cLXq03Eyay
-jdBim1jckfdk1hB6t2UsPsYkUxhSUmE7Z+hami8gh+L715R/Noeros6OjmUY+www
-dQIDAQAB
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuFLQGiatLIPTWokuM5/b
+0+982UJE44hW0/UZmjUYPYAborY+qnslgShL/tWvxGYCCyo9/lY8yt6ZkRDdEKDj
+tufc2xQKCGEkrGX/4G/n5SwEaMXdb4B7KN2tlzIc6XY0PuFNh61fqXEUX5YKN5mL
++eiFPw82CxfWNysQbApGvPSv7nIwN17wTp7/dmlI7uSLGM5/nfIW1U9gBI2G3cES
+x/QyH+c5llrNBh58o98Vub0hpV4tJDUGDoWzKhhyF3EBzRiBaoi9SqYRyf0/85M5
+9o2tVmqeEAe6XWlG+X7LhnnpXSeADiXnYoMuYCnvSnuob1dv8KaZOutYnhkbGt0L
+KQIDAQAB
 -----END PUBLIC KEY-----"#;
 
 /// 授权载荷（验签后解析出的内容）

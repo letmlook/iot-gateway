@@ -475,8 +475,23 @@ fn main() {
         .windows(2)
         .find(|w| w[0] == "--out")
         .map(|w| w[1].clone());
+    // 自定义规模覆盖（用于验收口径，如 Q5：--nodes 200 --tags-per-node 50）
+    let nodes_override = args
+        .windows(2)
+        .find(|w| w[0] == "--nodes")
+        .and_then(|w| w[1].parse::<usize>().ok());
+    let tags_override = args
+        .windows(2)
+        .find(|w| w[0] == "--tags-per-node")
+        .and_then(|w| w[1].parse::<usize>().ok());
 
-    let scale = if quick { Scale::quick() } else { Scale::full() };
+    let mut scale = if quick { Scale::quick() } else { Scale::full() };
+    if let Some(n) = nodes_override {
+        scale.persist_nodes = n;
+    }
+    if let Some(t) = tags_override {
+        scale.persist_tags_per_node = t;
+    }
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
