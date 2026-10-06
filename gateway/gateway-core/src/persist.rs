@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tracing::info;
 
 /// 当前快照/schema 版本。大于此版本需升级程序。
-pub const SNAPSHOT_VERSION: u32 = 1;
+pub const SNAPSHOT_VERSION: u32 = 2;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (version INTEGER NOT NULL);
@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS nodes (
   kind TEXT NOT NULL,
   plugin_name TEXT NOT NULL,
   config TEXT NOT NULL,
-  state TEXT NOT NULL
+  state TEXT NOT NULL,
+  tenant_id TEXT NOT NULL DEFAULT 'default'
 );
 CREATE TABLE IF NOT EXISTS groups (
   node_id TEXT NOT NULL,
@@ -66,7 +67,8 @@ CREATE TABLE IF NOT EXISTS rules (
   threshold REAL NOT NULL,
   for_ms INTEGER NOT NULL,
   clear_ms INTEGER NOT NULL,
-  action TEXT NOT NULL
+  action TEXT NOT NULL,
+  tenant_id TEXT NOT NULL DEFAULT 'default'
 );
 CREATE TABLE IF NOT EXISTS policies (
   south_node_id TEXT NOT NULL,
@@ -125,7 +127,7 @@ impl Default for Snapshot {
 }
 
 impl Snapshot {
-    /// 校验快照：版本、节点 ID 唯一性等
+    /// 校验快照：版本、节点 ID 唯一性、tenant_id 非空等
     pub fn validate(&self) -> Result<(), PersistError> {
         if self.version > SNAPSHOT_VERSION {
             return Err(PersistError::VersionUnsupported(
@@ -141,12 +143,24 @@ impl Snapshot {
                     n.id()
                 )));
             }
+            if n.config.tenant_id.is_empty() {
+                return Err(PersistError::Validation(format!(
+                    "node {:?} has empty tenant_id",
+                    n.id()
+                )));
+            }
         }
         let mut rule_ids = std::collections::HashSet::new();
         for r in &self.rules {
             if !rule_ids.insert(r.id.as_str()) {
                 return Err(PersistError::Validation(format!(
                     "duplicate rule id: {}",
+                    r.id
+                )));
+            }
+            if r.tenant_id.is_empty() {
+                return Err(PersistError::Validation(format!(
+                    "rule {} has empty tenant_id",
                     r.id
                 )));
             }
@@ -178,12 +192,62 @@ pub fn build_snapshot(
 fn ensure_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
     apply_pragmas(conn)?;
     conn.execute_batch(SCHEMA)?;
-    let mut stmt = conn.prepare("SELECT version FROM meta LIMIT 1")?;
-    let has_version = stmt.exists([])?;
-    drop(stmt);
-    if !has_version {
+
+    // 读取当前版本
+    let version: Option<u32> = conn
+        .query_row("SELECT version FROM meta LIMIT 1", [], |r| r.get(0))
+        .ok();
+
+    if version.is_none() {
+        // 全新库：直接插入版本号（CREATE TABLE IF NOT EXISTS 幂等）
         conn.execute("INSERT INTO meta (version) VALUES (?1)", [SNAPSHOT_VERSION])?;
+        return Ok(());
     }
+
+    let v = version.unwrap();
+
+    // v1 → v2 迁移：nodes 和 rules 表加 tenant_id 列
+    if v < 2 {
+        // 迁移 nodes 表
+        let nodes_has_tenant: bool = conn
+            .query_row("PRAGMA table_info(nodes)", [], |r| {
+                let col: String = r.get(1)?;
+                Ok(col == "tenant_id")
+            })
+            .unwrap_or(false);
+        if !nodes_has_tenant {
+            conn.execute(
+                "ALTER TABLE nodes ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'",
+                [],
+            )?;
+        }
+
+        // 迁移 rules 表
+        let rules_has_tenant: bool = conn
+            .query_row("PRAGMA table_info(rules)", [], |r| {
+                let col: String = r.get(1)?;
+                Ok(col == "tenant_id")
+            })
+            .unwrap_or(false);
+        if !rules_has_tenant {
+            conn.execute(
+                "ALTER TABLE rules ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'",
+                [],
+            )?;
+        }
+
+        // 按 source 节点为存量规则补章（孤儿规则保持 default）
+        conn.execute(
+            r#"UPDATE rules SET tenant_id = (
+                SELECT n.tenant_id FROM nodes n WHERE n.id = rules.south_node_id
+               ) WHERE EXISTS (SELECT 1 FROM nodes n WHERE n.id = rules.south_node_id)"#,
+            [],
+        )?;
+
+        // 更新版本号
+        conn.execute("UPDATE meta SET version = 2", [])?;
+    }
+
     Ok(())
 }
 
@@ -316,7 +380,8 @@ fn load_from_db(conn: &Connection) -> Result<Snapshot, PersistError> {
     }
 
     let mut nodes = Vec::new();
-    let mut stmt = conn.prepare("SELECT id, name, kind, plugin_name, config, state FROM nodes")?;
+    let mut stmt =
+        conn.prepare("SELECT id, name, kind, plugin_name, config, state, tenant_id FROM nodes")?;
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -325,10 +390,11 @@ fn load_from_db(conn: &Connection) -> Result<Snapshot, PersistError> {
             row.get::<_, String>(3)?,
             row.get::<_, String>(4)?,
             row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
         ))
     })?;
     for row in rows {
-        let (id, name, kind, plugin_name, config, state) = row?;
+        let (id, name, kind, plugin_name, config, state, tenant_id) = row?;
         let id = parse_node_id(&id)?;
         let kind = str_to_node_kind(&kind)?;
         let state = str_to_node_state(&state)?;
@@ -341,6 +407,7 @@ fn load_from_db(conn: &Connection) -> Result<Snapshot, PersistError> {
                 kind,
                 plugin_name,
                 config,
+                tenant_id,
             },
             state,
         });
@@ -435,7 +502,7 @@ fn load_from_db(conn: &Connection) -> Result<Snapshot, PersistError> {
     // 规则：action 以 JSON 存储，其余字段分列（便于人工查库）
     let mut rules = Vec::new();
     let mut stmt = conn.prepare(
-        "SELECT id, name, enabled, south_node_id, group_id, tag_name, op, threshold, for_ms, clear_ms, action FROM rules",
+        "SELECT id, name, enabled, south_node_id, group_id, tag_name, op, threshold, for_ms, clear_ms, action, tenant_id FROM rules",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok((
@@ -450,11 +517,24 @@ fn load_from_db(conn: &Connection) -> Result<Snapshot, PersistError> {
             row.get::<_, i64>(8)?,
             row.get::<_, i64>(9)?,
             row.get::<_, String>(10)?,
+            row.get::<_, String>(11)?,
         ))
     })?;
     for row in rows {
-        let (id, name, enabled, south, gid, tag_name, op, threshold, for_ms, clear_ms, action) =
-            row?;
+        let (
+            id,
+            name,
+            enabled,
+            south,
+            gid,
+            tag_name,
+            op,
+            threshold,
+            for_ms,
+            clear_ms,
+            action,
+            tenant_id,
+        ) = row?;
         let op = serde_json::from_str::<crate::rules::CompareOp>(&format!("\"{}\"", op))
             .map_err(|e| PersistError::Validation(format!("rule {}: bad op: {}", id, e)))?;
         let action: crate::rules::RuleAction = serde_json::from_str(&action)
@@ -472,6 +552,7 @@ fn load_from_db(conn: &Connection) -> Result<Snapshot, PersistError> {
             for_ms: for_ms.max(0) as u64,
             clear_ms: clear_ms.max(0) as u64,
             action,
+            tenant_id,
         });
     }
 
@@ -620,13 +701,14 @@ fn save_to_db(conn: &Connection, s: &Snapshot) -> Result<(), PersistError> {
     // 5000 点位的配置下这部分就是保存耗时的主体（性能基线实测约 83 ms/次）。
     {
         let mut stmt = tx.prepare_cached(
-            "INSERT INTO nodes (id, name, kind, plugin_name, config, state) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO nodes (id, name, kind, plugin_name, config, state, tenant_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 kind = excluded.kind,
                 plugin_name = excluded.plugin_name,
                 config = excluded.config,
-                state = excluded.state",
+                state = excluded.state,
+                tenant_id = excluded.tenant_id",
         )?;
         for n in &s.nodes {
             stmt.execute(params![
@@ -636,6 +718,7 @@ fn save_to_db(conn: &Connection, s: &Snapshot) -> Result<(), PersistError> {
                 n.config.plugin_name,
                 serde_json::to_string(&n.config.config)?,
                 node_state_to_str(n.state),
+                n.config.tenant_id,
             ])?;
         }
     }
@@ -727,8 +810,8 @@ fn save_to_db(conn: &Connection, s: &Snapshot) -> Result<(), PersistError> {
 
     {
         let mut stmt = tx.prepare_cached(
-            "INSERT INTO rules (id, name, enabled, south_node_id, group_id, tag_name, op, threshold, for_ms, clear_ms, action)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "INSERT INTO rules (id, name, enabled, south_node_id, group_id, tag_name, op, threshold, for_ms, clear_ms, action, tenant_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 enabled = excluded.enabled,
@@ -739,7 +822,8 @@ fn save_to_db(conn: &Connection, s: &Snapshot) -> Result<(), PersistError> {
                 threshold = excluded.threshold,
                 for_ms = excluded.for_ms,
                 clear_ms = excluded.clear_ms,
-                action = excluded.action",
+                action = excluded.action,
+                tenant_id = excluded.tenant_id",
         )?;
         for r in &s.rules {
             stmt.execute(params![
@@ -754,6 +838,7 @@ fn save_to_db(conn: &Connection, s: &Snapshot) -> Result<(), PersistError> {
                 r.for_ms as i64,
                 r.clear_ms as i64,
                 serde_json::to_string(&r.action)?,
+                r.tenant_id,
             ])?;
         }
     }
@@ -1958,6 +2043,133 @@ mod tests {
             "every short transaction must land"
         );
         drop(db);
+        cleanup_all(&path);
+    }
+
+    /// v1 → v2 迁移：既有库加 tenant_id 列后，新列默认为 'default'，规则按 source 节点补章
+    #[tokio::test]
+    async fn v1_to_v2_migration_adds_tenant_id_columns() {
+        let _backup_guard = BACKUP_TEST_LOCK.lock().await;
+        let path = temp_db("v1-mig");
+
+        // 用 v1 schema 手工造库（不含 tenant_id 列）
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meta (version INTEGER NOT NULL);
+                 INSERT INTO meta VALUES (1);
+                 CREATE TABLE nodes (id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL,
+                   plugin_name TEXT NOT NULL, config TEXT NOT NULL, state TEXT NOT NULL);
+                 CREATE TABLE rules (id TEXT PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER NOT NULL,
+                   south_node_id TEXT NOT NULL, group_id TEXT NOT NULL, tag_name TEXT NOT NULL,
+                   op TEXT NOT NULL, threshold REAL NOT NULL, for_ms INTEGER NOT NULL,
+                   clear_ms INTEGER NOT NULL, action TEXT NOT NULL);
+                 CREATE TABLE groups (node_id TEXT NOT NULL, group_id TEXT NOT NULL,
+                   name TEXT NOT NULL, interval_ms INTEGER NOT NULL, description TEXT,
+                   PRIMARY KEY (node_id, group_id));",
+            )
+            .unwrap();
+            // 插入一个节点和一条规则（用真实 UUID 格式）
+            let node_uuid = "550e8400-e29b-41d4-a716-446655440001";
+            let group_uuid = "550e8400-e29b-41d4-a716-446655440002";
+            conn.execute(
+                &format!(
+                    "INSERT INTO nodes VALUES ('{}', 'node-a', 'south', 'sim', '{{}}', 'running')",
+                    node_uuid
+                ),
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                &format!("INSERT INTO rules VALUES ('rid1', 'rule-1', 1, '{}', '{}', 'temp', 'gt', 30.0, 0, 0, '{{\"type\":\"log\",\"message\":\"hi\"}}')", node_uuid, group_uuid),
+                [],
+            )
+            .unwrap();
+        }
+
+        // 走 ensure_schema 迁移路径
+        let db = Db::open(&path, IntegrityMode::Off).expect("open migrated db");
+        let loaded = db
+            .load_snapshot(None)
+            .expect("load snapshot")
+            .expect("some");
+
+        // 节点和规则都带了 tenant_id
+        assert_eq!(loaded.nodes.len(), 1);
+        assert_eq!(loaded.nodes[0].config.tenant_id, "default");
+        assert_eq!(loaded.rules.len(), 1);
+        assert_eq!(loaded.rules[0].tenant_id, "default");
+
+        // meta 版本升到 2
+        let version: i64 = db
+            .with(|conn| Ok(conn.query_row("SELECT version FROM meta LIMIT 1", [], |r| r.get(0))?))
+            .expect("get version");
+        assert_eq!(version, 2);
+
+        drop(db);
+        cleanup_all(&path);
+    }
+
+    /// v2 快照 roundtrip：两个域的节点/规则域不串
+    #[tokio::test]
+    async fn snapshot_roundtrip_preserves_tenant_isolation() {
+        let _backup_guard = BACKUP_TEST_LOCK.lock().await;
+        let path = temp_db("tenant-iso");
+
+        let make_node = |name: &str, tenant: &str| -> Node {
+            let mut n = node_with(name, serde_json::json!({}));
+            n.config.tenant_id = tenant.to_string();
+            n.state = NodeState::Running;
+            n
+        };
+
+        let snap = Snapshot {
+            version: SNAPSHOT_VERSION,
+            nodes: vec![
+                make_node("node-a", "tenant-a"),
+                make_node("node-b", "tenant-b"),
+            ],
+            rules: vec![crate::rules::Rule {
+                id: "r1".to_string(),
+                name: "rule-a".to_string(),
+                enabled: true,
+                source: crate::rules::RuleSource {
+                    south_node_id: NodeId::new(),
+                    group_id: GroupId::new(),
+                    tag_name: "temp".to_string(),
+                },
+                condition: crate::rules::RuleCondition {
+                    op: crate::rules::CompareOp::Gt,
+                    threshold: 30.0,
+                },
+                for_ms: 0,
+                clear_ms: 0,
+                action: crate::rules::RuleAction::Log {
+                    message: "hi".to_string(),
+                },
+                tenant_id: "tenant-a".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        save(&path, &snap).await.expect("save");
+        let loaded = load(&path).await.expect("load").expect("some");
+
+        assert_eq!(loaded.nodes.len(), 2);
+        let t1 = loaded
+            .nodes
+            .iter()
+            .find(|n| n.config.name == "node-a")
+            .unwrap();
+        let t2 = loaded
+            .nodes
+            .iter()
+            .find(|n| n.config.name == "node-b")
+            .unwrap();
+        assert_eq!(t1.config.tenant_id, "tenant-a");
+        assert_eq!(t2.config.tenant_id, "tenant-b");
+        assert_eq!(loaded.rules[0].tenant_id, "tenant-a");
+
         cleanup_all(&path);
     }
 }

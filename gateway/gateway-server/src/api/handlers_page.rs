@@ -2,12 +2,12 @@
 //!
 //! 旧 handler 一行不改；分页只发生在 v1 别名路径上。
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::Json;
 use gateway_sdk::NodeKind;
 
 use crate::api::dto::{GroupDto, NodeDto, Page, PageParams, RuleDto, TagDto, UserDto, ValueDto};
-use crate::api::ApiError;
+use crate::api::{ApiError, AuthContext};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -17,6 +17,7 @@ use crate::state::AppState;
 /// GET /api/v1/nodes?page=1&page_size=50&kind=south&q=plc
 pub async fn list_nodes_v1(
     State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Query(p): Query<PageParams>,
 ) -> Result<Json<Page<NodeDto>>, ApiError> {
     p.validate_page()?;
@@ -24,7 +25,7 @@ pub async fn list_nodes_v1(
     let offset = p.offset();
 
     // 取全量（DashMap 迭代）后过滤+排序
-    let all_nodes = state.manager.nodes_list();
+    let all_nodes = crate::api::scope::scoped_nodes(&state, &ctx.tenant);
 
     let filtered: Vec<_> = all_nodes
         .iter()
@@ -230,6 +231,7 @@ pub async fn list_tags_v1(
 /// GET /api/v1/rules?page=1&page_size=50
 pub async fn list_rules_v1(
     State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Query(p): Query<PageParams>,
 ) -> Result<Json<Page<RuleDto>>, ApiError> {
     p.validate_page()?;
@@ -237,9 +239,7 @@ pub async fn list_rules_v1(
     let offset = p.offset();
 
     let engine = gateway_core::rule_engine();
-    let all_rules: Vec<_> = state
-        .manager
-        .rules_list()
+    let all_rules: Vec<_> = crate::api::scope::scoped_rules(&state, &ctx.tenant)
         .into_iter()
         .map(|rule| gateway_core::RuleView {
             runtime: engine.runtime(&rule.id),

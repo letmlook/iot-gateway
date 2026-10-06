@@ -156,6 +156,7 @@ fn rule(id: &str, env: &Env, op: CompareOp, threshold: f64, value: f64) -> Rule 
             tag_name: "heater".to_string(),
             value,
         },
+        tenant_id: "default".to_string(),
     }
 }
 

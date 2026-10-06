@@ -5,17 +5,19 @@ mod error;
 mod handlers;
 pub mod handlers_page;
 mod openapi;
+pub mod scope;
 
 #[allow(unused_imports)]
 pub use dto::{Page, PageParams};
 pub use error::ApiError;
 pub use openapi::ApiDoc;
+pub use scope::{AuthContext, TenantScope};
 
 use axum::extract::{Request, State};
 use axum::http::header;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 
 use crate::state::AppState;
@@ -35,19 +37,13 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 }
 
 /// 认证上下文：注入到请求扩展，供授权中间件与 handler 使用
-#[derive(Clone, Debug)]
-pub struct AuthContext {
-    pub role: crate::users::UserRole,
-    pub username: Option<String>,
-}
-
 /// 从 Bearer token 解析认证上下文。复用自 auth_middleware，供 WS 首消息鉴权调用。
 pub fn resolve_bearer(state: &AppState, bearer: Option<&str>) -> Option<AuthContext> {
     let t = bearer?.strip_prefix("Bearer ")?.to_string();
     if t.is_empty() {
         return None;
     }
-    // 静态 token 视为管理员
+    // 静态 token 视为管理员（All 域）
     if state
         .config
         .token
@@ -58,12 +54,23 @@ pub fn resolve_bearer(state: &AppState, bearer: Option<&str>) -> Option<AuthCont
         return Some(AuthContext {
             role: crate::users::UserRole::Admin,
             username: Some("static-token".to_string()),
+            tenant: TenantScope::All,
         });
     }
-    // 用户 token
-    state.user_store.role_of(&t).map(|role| AuthContext {
-        role,
-        username: None,
+    // 用户 token：取 (role, tenant_id)
+    // 当 GATEWAY_ENFORCE_TENANTS=0 时降为 All（禁用过滤但保留 stamping，逻辑统一在此处处理）
+    let enforce = state.config.enforce_tenants;
+    state.user_store.auth_of(&t).map(|(role, tenant_id)| {
+        let tenant = if enforce {
+            TenantScope::from_role_and_tenant(role, tenant_id)
+        } else {
+            TenantScope::All
+        };
+        AuthContext {
+            role,
+            username: None,
+            tenant,
+        }
     })
 }
 
@@ -102,9 +109,11 @@ fn required_role(method: &axum::http::Method, path: &str) -> crate::users::UserR
     if p.starts_with("auth/") {
         return Viewer;
     }
-    // 系统级：用户管理、备份与恢复、授权文件与门禁重置
+    // 系统级：用户管理、租户管理、备份与恢复、授权文件与门禁重置
     if p == "users"
         || p.starts_with("users/")
+        || p == "tenants"
+        || p.starts_with("tenants/")
         || p == "backup"
         || p == "restore"
         || p == "license/upload"
@@ -153,6 +162,7 @@ async fn auth_middleware(
         request.extensions_mut().insert(AuthContext {
             role: crate::users::UserRole::Admin,
             username: Some("auth-disabled".to_string()),
+            tenant: TenantScope::All,
         });
         return next.run(request).await;
     }
@@ -184,6 +194,7 @@ async fn auth_middleware(
                 Some(AuthContext {
                     role: crate::users::UserRole::Admin,
                     username: Some("uninitialized".to_string()),
+                    tenant: TenantScope::All,
                 })
             } else {
                 None
@@ -286,6 +297,12 @@ pub fn router(state: AppState) -> Router<AppState> {
                 .delete(handlers::delete_user),
         )
         .route("/users/:id/password", put(handlers::change_password))
+        // ---- 租户 CRUD（不过 v1 别名） ----
+        .route(
+            "/tenants",
+            get(handlers::list_tenants).post(handlers::create_tenant),
+        )
+        .route("/tenants/:id", delete(handlers::delete_tenant))
         // ---- 节点 ----
         // GET: 旧路径 → 旧 handler，v1 → 分页 handler
         // POST: 两者都走 handlers::create_node
@@ -676,7 +693,10 @@ mod tests {
 
     async fn login_as(env: &RbacEnv, user: &str, role: crate::users::UserRole) -> String {
         let pw = "pw-for-test-123";
-        env.store.create(user, pw, role).await.expect("create user");
+        env.store
+            .create(user, pw, role, "default")
+            .await
+            .expect("create user");
         env.store.login(user, pw).await.expect("login").0
     }
 
@@ -1020,6 +1040,7 @@ mod tests {
                 "exp-user",
                 "pw-for-test-123",
                 crate::users::UserRole::Viewer,
+                "default",
             )
             .await
             .expect("create user");
@@ -1068,6 +1089,7 @@ mod tests {
                 "sess-user",
                 "pw-for-test-123",
                 crate::users::UserRole::Viewer,
+                "default",
             )
             .await
             .expect("create user");

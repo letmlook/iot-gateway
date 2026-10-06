@@ -114,10 +114,17 @@ pub struct Rule {
     #[serde(default)]
     pub clear_ms: u64,
     pub action: RuleAction,
+    /// 所属租户 ID（服务端以 source 节点域盖章，请求传入值忽略）
+    #[serde(default = "default_tenant")]
+    pub tenant_id: String,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_tenant() -> String {
+    "default".to_string()
 }
 
 impl Rule {
@@ -412,6 +419,7 @@ mod tests {
             action: RuleAction::Log {
                 message: "hot".to_string(),
             },
+            tenant_id: "default".to_string(),
         }
     }
 

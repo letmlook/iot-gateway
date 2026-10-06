@@ -40,6 +40,8 @@ pub struct Config {
     pub master_secret: Option<String>,
     /// 是否启用角色授权（RBAC）：默认开启；`GATEWAY_ENFORCE_ROLES=0` 可临时关闭以便灰度
     pub enforce_roles: bool,
+    /// 是否启用租户域过滤（多租户隔离）：默认开启；`GATEWAY_ENFORCE_TENANTS=0` 可临时关闭以便灰度回退到形态 A
+    pub enforce_tenants: bool,
     /// 持久化写合并窗口（毫秒）：窗口内的多次变更合并为一次 SQLite 事务；0 表示每次变更立即落盘
     pub persist_debounce_ms: u64,
     /// 消息总线容量（条）：慢消费者可积压的消息数，规模较大时可调高
@@ -227,6 +229,7 @@ impl Default for Config {
             bind: default_bind_str(),
             master_secret: None,
             enforce_roles: true,
+            enforce_tenants: true,
             persist_debounce_ms: default_persist_debounce_ms(),
             bus_capacity: default_bus_capacity(),
             max_concurrent_polls: default_max_concurrent_polls(),
@@ -271,6 +274,7 @@ impl Config {
             },
             master_secret: None,
             enforce_roles: true,
+            enforce_tenants: true,
             persist_debounce_ms: default_persist_debounce_ms(),
             bus_capacity: default_bus_capacity(),
             max_concurrent_polls: default_max_concurrent_polls(),
@@ -396,6 +400,9 @@ impl Config {
         }
         if let Ok(s) = std::env::var("GATEWAY_ENFORCE_ROLES") {
             c.enforce_roles = !(s == "0" || s.eq_ignore_ascii_case("false"));
+        }
+        if let Ok(s) = std::env::var("GATEWAY_ENFORCE_TENANTS") {
+            c.enforce_tenants = !(s == "0" || s.eq_ignore_ascii_case("false"));
         }
         if let Ok(s) = std::env::var("GATEWAY_BUS_CAPACITY") {
             if let Ok(n) = s.parse::<usize>() {

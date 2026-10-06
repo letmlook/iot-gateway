@@ -1,7 +1,7 @@
 //! REST API handlers。
 
 use axum::body::Bytes;
-use axum::extract::{Multipart, Path, Query, State};
+use axum::extract::{Extension, Multipart, Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
@@ -155,12 +155,21 @@ pub struct CreateUserRequest {
     pub username: Option<String>,
     pub password: Option<String>,
     pub role: Option<String>,
+    /// 所属租户 ID；默认 "default"
+    #[serde(default = "default_tenant")]
+    pub tenant: String,
 }
 
 #[derive(serde::Deserialize)]
 pub struct UpdateUserRequest {
     pub username: Option<String>,
     pub role: Option<String>,
+    /// 变更租户 ID（仅 Admin 可指定）
+    pub tenant: Option<String>,
+}
+
+fn default_tenant() -> String {
+    "default".to_string()
 }
 
 #[derive(serde::Deserialize)]
@@ -185,6 +194,7 @@ pub async fn list_users(
                 "id": u.id,
                 "username": u.username,
                 "role": u.role.as_str(),
+                "tenant_id": u.tenant_id,
                 "created_at": u.created_at,
                 "updated_at": u.updated_at,
             })
@@ -207,13 +217,14 @@ pub async fn create_user(
     };
     let user = state
         .user_store
-        .create(username, password, role_enum)
+        .create(username, password, role_enum, &body.tenant)
         .await
         .map_err(ApiError::bad_request)?;
     Ok(Json(serde_json::json!({
         "id": user.id,
         "username": user.username,
         "role": user.role.as_str(),
+        "tenant_id": user.tenant_id,
         "created_at": user.created_at,
         "updated_at": user.updated_at,
     })))
@@ -234,6 +245,7 @@ pub async fn get_user(
         "id": user.id,
         "username": user.username,
         "role": user.role.as_str(),
+        "tenant_id": user.tenant_id,
         "created_at": user.created_at,
         "updated_at": user.updated_at,
     })))
@@ -257,13 +269,14 @@ pub async fn update_user(
     });
     let user = state
         .user_store
-        .update_simple(&id, username, role)
+        .update_simple(&id, username, role, body.tenant.as_deref())
         .await
         .map_err(ApiError::bad_request)?;
     Ok(Json(serde_json::json!({
         "id": user.id,
         "username": user.username,
         "role": user.role.as_str(),
+        "tenant_id": user.tenant_id,
         "created_at": user.created_at,
         "updated_at": user.updated_at,
     })))
@@ -292,6 +305,76 @@ pub async fn change_password(
     state
         .user_store
         .set_password(&id, password)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------- Tenants ----------
+/// 租户列表：Admin 返回所有租户；Operator/Viewer 仅返回自身租户（按 id/name 形式）。
+pub async fn list_tenants(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<crate::api::AuthContext>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let tenants = match &ctx.tenant {
+        crate::api::TenantScope::All => {
+            let rows = state
+                .user_store
+                .list_tenants()
+                .await
+                .map_err(ApiError::internal)?;
+            rows.into_iter()
+                .map(|t| serde_json::json!({ "id": t.id, "name": t.name }))
+                .collect::<Vec<_>>()
+        }
+        crate::api::TenantScope::One(tid) => {
+            // 非 Admin 只能看到自己的租户
+            vec![serde_json::json!({ "id": tid, "name": tid })]
+        }
+    };
+    Ok(Json(serde_json::json!({ "tenants": tenants })))
+}
+
+#[derive(serde::Deserialize)]
+pub struct CreateTenantReq {
+    pub id: String,
+    pub name: String,
+}
+
+/// 创建租户（Admin）。
+pub async fn create_tenant(
+    State(state): State<AppState>,
+    Json(req): Json<CreateTenantReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if req.id.trim().is_empty() {
+        return Err(ApiError::bad_request("tenant id cannot be empty"));
+    }
+    if req.id == "default" {
+        return Err(ApiError::bad_request(
+            "cannot create built-in tenant 'default'",
+        ));
+    }
+    state
+        .user_store
+        .create_tenant(&req.id, &req.name)
+        .await
+        .map_err(ApiError::bad_request)?;
+    Ok(Json(serde_json::json!({ "id": req.id, "name": req.name })))
+}
+
+/// 删除租户（Admin）。租户下有用户时拒绝删除。
+pub async fn delete_tenant(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if id == "default" {
+        return Err(ApiError::bad_request(
+            "cannot delete built-in tenant 'default'",
+        ));
+    }
+    state
+        .user_store
+        .delete_tenant(&id)
         .await
         .map_err(ApiError::bad_request)?;
     Ok(StatusCode::NO_CONTENT)
@@ -1017,8 +1100,11 @@ pub(crate) fn mask_plugin_config(
     serde_json::to_value(masked).unwrap_or_else(|_| serde_json::json!({}))
 }
 
-pub async fn list_nodes(State(state): State<AppState>) -> Json<Vec<serde_json::Value>> {
-    let nodes = state.manager.nodes_list();
+pub async fn list_nodes(
+    State(state): State<AppState>,
+    axum::extract::Extension(ctx): axum::extract::Extension<crate::api::AuthContext>,
+) -> Json<Vec<serde_json::Value>> {
+    let nodes = crate::api::scope::scoped_nodes(&state, &ctx.tenant);
     let mut result = Vec::with_capacity(nodes.len());
     for node in nodes {
         let mut j = serde_json::to_value(&node).unwrap_or(serde_json::json!({}));
@@ -1077,12 +1163,9 @@ pub async fn create_node(
 pub async fn get_node(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Extension(ctx): Extension<crate::api::AuthContext>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let nid = parse_node_id(&id)?;
-    let node = state
-        .manager
-        .node_get(nid)
-        .ok_or_else(|| ApiError::not_found("node not found"))?;
+    let (nid, node) = crate::api::scope::resolve_node(&state, &ctx, &id)?;
     let mut j = serde_json::to_value(&node).map_err(|e| ApiError::internal(e.to_string()))?;
     if let Some(obj) = j.as_object_mut() {
         if node.kind() == NodeKind::North {
@@ -2017,7 +2100,7 @@ pub struct EnableRuleReq {
 }
 
 impl CreateRuleReq {
-    fn into_rule(self, id: String) -> gateway_core::Rule {
+    fn into_rule(self, id: String, tenant_id: String) -> gateway_core::Rule {
         gateway_core::Rule {
             id,
             name: self.name,
@@ -2027,16 +2110,18 @@ impl CreateRuleReq {
             for_ms: self.for_ms,
             clear_ms: self.clear_ms,
             action: self.action,
+            tenant_id,
         }
     }
 }
 
 /// 规则列表：配置 + 运行期状态（触发次数、最近触发时间、最近值）
-pub async fn list_rules(State(state): State<AppState>) -> Json<Vec<gateway_core::RuleView>> {
+pub async fn list_rules(
+    State(state): State<AppState>,
+    axum::extract::Extension(ctx): axum::extract::Extension<crate::api::AuthContext>,
+) -> Json<Vec<gateway_core::RuleView>> {
     let engine = gateway_core::rule_engine();
-    let out = state
-        .manager
-        .rules_list()
+    let out = crate::api::scope::scoped_rules(&state, &ctx.tenant)
         .into_iter()
         .map(|rule| gateway_core::RuleView {
             runtime: engine.runtime(&rule.id),
@@ -2062,7 +2147,13 @@ pub async fn create_rule(
             id
         )));
     }
-    let rule = req.into_rule(id);
+    // 规则域以 source 节点域为准盖章
+    let source_node = state
+        .manager
+        .node_get(req.source.south_node_id)
+        .ok_or_else(|| ApiError::bad_request("source node not found"))?;
+    let tenant_id = source_node.config.tenant_id;
+    let rule = req.into_rule(id, tenant_id);
     rule.validate().map_err(ApiError::bad_request)?;
     validate_rule_refs(&state, &rule)?;
     state.manager.rule_insert(rule.clone());
@@ -2080,7 +2171,8 @@ pub async fn update_rule(
         .manager
         .rule_get(&id)
         .ok_or_else(|| ApiError::not_found("rule not found"))?;
-    let mut rule = req.into_rule(id.clone());
+    // tenant_id 不可更改（由 source 节点域决定），更新时保留原值
+    let mut rule = req.into_rule(id.clone(), existing.tenant_id);
     // 更新不改变启用状态，除非请求显式给出（这里保持与 body 一致，由前端决定）
     rule.id = existing.id;
     rule.validate().map_err(ApiError::bad_request)?;

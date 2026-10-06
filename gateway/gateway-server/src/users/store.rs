@@ -22,10 +22,16 @@ CREATE TABLE IF NOT EXISTS users (
   role TEXT NOT NULL DEFAULT 'operator',
   token TEXT,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  tenant_id TEXT NOT NULL DEFAULT 'default'
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username);
 CREATE INDEX IF NOT EXISTS idx_users_token ON users(token);
+CREATE TABLE IF NOT EXISTS tenants (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 "#;
 
 /// 系统初始化时的默认管理员：用户名
@@ -87,14 +93,16 @@ pub struct User {
     pub id: String,
     pub username: String,
     pub role: UserRole,
+    pub tenant_id: String,
     pub created_at: String,
     pub updated_at: String,
 }
 
-/// 内存会话条目：角色 + 绝对过期时刻（自登录签发起算，不因活动续期）
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 内存会话条目：角色 + 所属域 + 绝对过期时刻（自登录签发起算，不因活动续期）
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
     pub role: UserRole,
+    pub tenant_id: String,
     /// 绝对过期时刻（UNIX 秒）；None = 永不过期（仅 ttl=0 时出现）
     pub expires_at: Option<i64>,
 }
@@ -116,6 +124,7 @@ struct UserRow {
     password_hash: String,
     role: String,
     token: Option<String>,
+    tenant_id: String,
     created_at: String,
     updated_at: String,
 }
@@ -218,6 +227,7 @@ impl UserStore {
         let (tokens, generated) = tokio::task::block_in_place(|| {
             db.with(|conn| {
                 conn.execute_batch(USERS_SCHEMA)?;
+
                 // 增量迁移：users 表加 token_expiry 列（UNIX 秒；NULL = 未记录，如升级前签发的旧 token）。
                 // 已有列时 ALTER 必然失败——「执行失败即视为列已存在」，不做脆弱的字符串精确匹配。
                 if let Err(e) =
@@ -228,6 +238,39 @@ impl UserStore {
                         e
                     );
                 }
+
+                // v2 迁移：users 表加 tenant_id 列（幂等检查——遍历所有列而非只看第一行）
+                let has_tenant_id: bool = {
+                    let mut stmt = conn.prepare("PRAGMA table_info(users)")?;
+                    let mut rows = stmt.query([])?;
+                    let mut found = false;
+                    while let Some(row) = rows.next()? {
+                        let col: String = row.get(1)?;
+                        if col == "tenant_id" {
+                            found = true;
+                            break;
+                        }
+                    }
+                    found
+                };
+                if !has_tenant_id {
+                    if let Err(e) = conn.execute_batch(
+                        "ALTER TABLE users ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';",
+                    ) {
+                        return Err(PersistError::Validation(format!(
+                            "users tenant_id migration failed: {}",
+                            e
+                        )));
+                    }
+                }
+
+                // 确保内置 'default' 租户存在
+                let now = now_iso();
+                conn.execute(
+                    "INSERT OR IGNORE INTO tenants (id, name, created_at) VALUES ('default', 'Default', ?1)",
+                    params![&now],
+                )?;
+
                 let mut stmt =
                     conn.prepare("SELECT 1 FROM users WHERE username = ?1 LIMIT 1")?;
                 let has_admin = stmt.exists([DEFAULT_ADMIN_USERNAME])?;
@@ -240,7 +283,7 @@ impl UserStore {
                         hash_password(&pwd).map_err(PersistError::Validation)?;
                     let now = now_iso();
                     conn.execute(
-                        "INSERT INTO users (id, username, password_hash, role, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        "INSERT INTO users (id, username, password_hash, role, created_at, updated_at, tenant_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'default')",
                         params![&id, DEFAULT_ADMIN_USERNAME, &hash, "admin", &now, &now],
                     )?;
                     Self::write_initial_password_file(&db_path, &pwd);
@@ -269,16 +312,17 @@ impl UserStore {
                     // ttl=0：永不过期，与旧行为一致——全部灌内存，expires_at = None
                     let mut stmt = conn
                         .prepare(
-                            "SELECT token, role FROM users WHERE token IS NOT NULL AND token != ''",
+                            "SELECT token, role, tenant_id FROM users WHERE token IS NOT NULL AND token != ''",
                         )?;
-                    let rows = stmt.query_map([], |r| -> rusqlite::Result<(String, String)> {
-                        Ok((r.get(0)?, r.get(1)?))
+                    let rows = stmt.query_map([], |r| -> rusqlite::Result<(String, String, String)> {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
                     })?;
-                    for (t, role) in rows.flatten() {
+                    for (t, role, tenant_id) in rows.flatten() {
                         map.insert(
                             t,
                             Session {
                                 role: UserRole::from_str(&role),
+                                tenant_id,
                                 expires_at: None,
                             },
                         );
@@ -289,19 +333,20 @@ impl UserStore {
                     // 内存 expires_at 直接沿用 DB 值，不是「再加一次 ttl」。
                     let now = now_secs();
                     let mut stmt = conn.prepare(
-                        "SELECT token, role, token_expiry FROM users \
+                        "SELECT token, role, tenant_id, token_expiry FROM users \
                          WHERE token IS NOT NULL AND token != '' \
                            AND token_expiry IS NOT NULL AND token_expiry > ?1",
                     )?;
                     let rows = stmt
-                        .query_map([now], |r| -> rusqlite::Result<(String, String, i64)> {
-                            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                        .query_map([now], |r| -> rusqlite::Result<(String, String, String, i64)> {
+                            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
                         })?;
-                    for (t, role, expiry) in rows.flatten() {
+                    for (t, role, tenant_id, expiry) in rows.flatten() {
                         map.insert(
                             t,
                             Session {
                                 role: UserRole::from_str(&role),
+                                tenant_id,
                                 expires_at: Some(expiry),
                             },
                         );
@@ -329,6 +374,7 @@ impl UserStore {
             id: r.id.clone(),
             username: r.username.clone(),
             role: UserRole::from_str(&r.role),
+            tenant_id: r.tenant_id.clone(),
             created_at: r.created_at.clone(),
             updated_at: r.updated_at.clone(),
         }
@@ -375,7 +421,7 @@ impl UserStore {
         let result = tokio::task::spawn_blocking(move || {
             db.with(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT id, username, password_hash, role, token, created_at, updated_at FROM users WHERE username = ?1",
+                    "SELECT id, username, password_hash, role, token, tenant_id, created_at, updated_at FROM users WHERE username = ?1",
                 )?;
                 let row = stmt.query_row([username.as_str()], |r| {
                     Ok(UserRow {
@@ -384,8 +430,9 @@ impl UserStore {
                         password_hash: r.get(2)?,
                         role: r.get(3)?,
                         token: r.get(4)?,
-                        created_at: r.get(5)?,
-                        updated_at: r.get(6)?,
+                        tenant_id: r.get(5)?,
+                        created_at: r.get(6)?,
+                        updated_at: r.get(7)?,
                     })
                 });
                 let row: UserRow = match row {
@@ -449,6 +496,7 @@ impl UserStore {
                     token.clone(),
                     Session {
                         role: user.role,
+                        tenant_id: user.tenant_id.clone(),
                         expires_at,
                     },
                 );
@@ -496,18 +544,24 @@ impl UserStore {
         Ok(())
     }
 
-    /// 取 token 对应用户的角色，供授权（RBAC）判定使用。
+    /// 取 token 对应用户的角色与租户，供授权（RBAC）与租户判定使用。
     /// 过期判定收敛在此处：过期会话按未知 token 处理（认证中间件据此返回 401），
     /// 过期条目不在此处删除（需要写锁；条目数 = 用户数，每用户单 token，由下次登录顶号时惰性清出）。
-    pub fn role_of(&self, token: &str) -> Option<UserRole> {
+    pub fn auth_of(&self, token: &str) -> Option<(UserRole, String)> {
         self.tokens.try_read().ok().and_then(|t| {
             let s = t.get(token)?;
             if s.is_expired(now_secs()) {
                 None
             } else {
-                Some(s.role)
+                Some((s.role, s.tenant_id.clone()))
             }
         })
+    }
+
+    /// 兼容性别名：仅返回角色（不含租户），供不需要租户的调用方使用。
+    #[allow(dead_code)]
+    pub fn role_of(&self, token: &str) -> Option<UserRole> {
+        self.auth_of(token).map(|(role, _)| role)
     }
 
     pub async fn list(&self) -> Result<Vec<User>, String> {
@@ -518,7 +572,7 @@ impl UserStore {
         tokio::task::spawn_blocking(move || {
             db.with(|conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT id, username, password_hash, role, token, created_at, updated_at FROM users ORDER BY created_at",
+                    "SELECT id, username, password_hash, role, token, tenant_id, created_at, updated_at FROM users ORDER BY created_at",
                 )?;
                 let rows = stmt.query_map([], |r| {
                     Ok(UserRow {
@@ -527,8 +581,9 @@ impl UserStore {
                         password_hash: r.get(2)?,
                         role: r.get(3)?,
                         token: r.get(4)?,
-                        created_at: r.get(5)?,
-                        updated_at: r.get(6)?,
+                        tenant_id: r.get(5)?,
+                        created_at: r.get(6)?,
+                        updated_at: r.get(7)?,
                     })
                 })?;
                 let mut list = Vec::new();
@@ -552,7 +607,7 @@ impl UserStore {
         tokio::task::spawn_blocking(move || {
             db.with(|conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT id, username, password_hash, role, token, created_at, updated_at FROM users WHERE id = ?1",
+                    "SELECT id, username, password_hash, role, token, tenant_id, created_at, updated_at FROM users WHERE id = ?1",
                 )?;
                 let row = stmt.query_row([id.as_str()], |r| {
                     Ok(UserRow {
@@ -561,8 +616,9 @@ impl UserStore {
                         password_hash: r.get(2)?,
                         role: r.get(3)?,
                         token: r.get(4)?,
-                        created_at: r.get(5)?,
-                        updated_at: r.get(6)?,
+                        tenant_id: r.get(5)?,
+                        created_at: r.get(6)?,
+                        updated_at: r.get(7)?,
                     })
                 });
                 match row {
@@ -582,6 +638,7 @@ impl UserStore {
         username: &str,
         password: &str,
         role: UserRole,
+        tenant_id: &str,
     ) -> Result<User, String> {
         let db = match self.db() {
             Some(d) => d,
@@ -596,14 +653,15 @@ impl UserStore {
         }
         let password = password.to_string();
         let role_str = role.as_str().to_string();
+        let tenant_id = tenant_id.to_string();
         let id = tokio::task::spawn_blocking(move || {
             db.with(move |conn| {
                 let id = Uuid::new_v4().to_string();
                 let hash = hash_password(&password).map_err(PersistError::Validation)?;
                 let now = now_iso();
                 conn.execute(
-                    "INSERT INTO users (id, username, password_hash, role, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![&id, &username, &hash, &role_str, &now, &now],
+                    "INSERT INTO users (id, username, password_hash, role, created_at, updated_at, tenant_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![&id, &username, &hash, &role_str, &now, &now, &tenant_id],
                 )?;
                 Ok(id)
             })
@@ -621,6 +679,7 @@ impl UserStore {
         id: &str,
         username: Option<&str>,
         role: Option<UserRole>,
+        tenant_id: Option<&str>,
     ) -> Result<User, String> {
         let db = match self.db() {
             Some(d) => d,
@@ -632,10 +691,11 @@ impl UserStore {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
         let role_str = role.map(|r| r.as_str().to_string());
+        let tenant_id = tenant_id.map(|s| s.to_string());
         tokio::task::spawn_blocking(move || {
             db.with(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT id, username, password_hash, role, token, created_at, updated_at FROM users WHERE id = ?1",
+                    "SELECT id, username, password_hash, role, token, tenant_id, created_at, updated_at FROM users WHERE id = ?1",
                 )?;
                 let current: UserRow = stmt.query_row([id_clone.as_str()], |r| {
                     Ok(UserRow {
@@ -644,18 +704,28 @@ impl UserStore {
                         password_hash: r.get(2)?,
                         role: r.get(3)?,
                         token: r.get(4)?,
-                        created_at: r.get(5)?,
-                        updated_at: r.get(6)?,
+                        tenant_id: r.get(5)?,
+                        created_at: r.get(6)?,
+                        updated_at: r.get(7)?,
                     })
                 }).map_err(|_| {
                     PersistError::Validation("user not found".into())
                 })?;
                 let new_username = username.as_deref().unwrap_or(current.username.as_str());
                 let new_role = role_str.as_deref().unwrap_or(current.role.as_str());
+                let new_tenant = tenant_id.as_deref().unwrap_or(current.tenant_id.as_str());
                 let now = now_iso();
+
+                // 变更租户时必须使旧 token 失效（强制重新登录）
+                let token_changed = tenant_id.as_ref().is_some_and(|t| *t != current.tenant_id);
+                let sql = if token_changed {
+                    "UPDATE users SET username = ?1, role = ?2, tenant_id = ?3, token = NULL, token_expiry = NULL, updated_at = ?4 WHERE id = ?5"
+                } else {
+                    "UPDATE users SET username = ?1, role = ?2, tenant_id = ?3, updated_at = ?4 WHERE id = ?5"
+                };
                 conn.execute(
-                    "UPDATE users SET username = ?1, role = ?2, updated_at = ?3 WHERE id = ?4",
-                    params![new_username, new_role, &now, &id_clone],
+                    sql,
+                    params![new_username, new_role, new_tenant, &now, &id_clone],
                 )?;
                 Ok(())
             })
@@ -756,6 +826,155 @@ impl UserStore {
     }
 }
 
+/// 租户行（供 API 层使用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TenantRow {
+    pub id: String,
+    pub name: String,
+    pub created_at: String,
+}
+
+impl UserStore {
+    /// 列出所有租户
+    pub async fn list_tenants(&self) -> Result<Vec<TenantRow>, String> {
+        let db = match self.db() {
+            Some(d) => d,
+            None => return Ok(Vec::new()),
+        };
+        tokio::task::spawn_blocking(move || {
+            db.with(|conn| {
+                let mut stmt =
+                    conn.prepare("SELECT id, name, created_at FROM tenants ORDER BY created_at")?;
+                let rows = stmt.query_map([], |r| {
+                    Ok(TenantRow {
+                        id: r.get(0)?,
+                        name: r.get(1)?,
+                        created_at: r.get(2)?,
+                    })
+                })?;
+                let mut list = Vec::new();
+                for row in rows {
+                    list.push(row?);
+                }
+                Ok(list)
+            })
+            .map_err(err_string)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    /// 创建租户
+    pub async fn create_tenant(&self, id: &str, name: &str) -> Result<(), String> {
+        let db = match self.db() {
+            Some(d) => d,
+            None => return Err("user management disabled".into()),
+        };
+        let id = id.trim().to_string();
+        let name = name.trim().to_string();
+        if id.is_empty() || id.len() > 64 {
+            return Err("tenant id must be 1-64 characters".into());
+        }
+        if !id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            return Err("tenant id must be lowercase letters, digits and hyphens only".into());
+        }
+        if name.is_empty() {
+            return Err("tenant name required".into());
+        }
+        let now = now_iso();
+        tokio::task::spawn_blocking(move || {
+            db.with(move |conn| {
+                conn.execute(
+                    "INSERT INTO tenants (id, name, created_at) VALUES (?1, ?2, ?3)",
+                    params![&id, &name, &now],
+                )
+                .map_err(|e| {
+                    if e.to_string().contains("UNIQUE constraint") {
+                        PersistError::Validation("tenant id already exists".into())
+                    } else {
+                        PersistError::Validation(e.to_string())
+                    }
+                })?;
+                Ok(())
+            })
+            .map_err(err_string)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    /// 删除租户（必须先确保无节点和用户引用）
+    pub async fn delete_tenant(&self, id: &str) -> Result<(), String> {
+        let db = match self.db() {
+            Some(d) => d,
+            None => return Err("user management disabled".into()),
+        };
+        if id == "default" {
+            return Err("cannot delete the default tenant".into());
+        }
+        let id = id.to_string();
+        tokio::task::spawn_blocking(move || {
+            db.with(move |conn| {
+                // 检查节点引用
+                let node_count: i64 = conn.query_row(
+                    "SELECT COUNT(1) FROM nodes WHERE tenant_id = ?1",
+                    [&id],
+                    |r| r.get(0),
+                )?;
+                if node_count > 0 {
+                    return Err(PersistError::Validation(format!(
+                        "tenant has {} node(s), remove them first",
+                        node_count
+                    )));
+                }
+                // 检查用户引用
+                let user_count: i64 = conn.query_row(
+                    "SELECT COUNT(1) FROM users WHERE tenant_id = ?1",
+                    [&id],
+                    |r| r.get(0),
+                )?;
+                if user_count > 0 {
+                    return Err(PersistError::Validation(format!(
+                        "tenant has {} user(s), delete them first",
+                        user_count
+                    )));
+                }
+                conn.execute("DELETE FROM tenants WHERE id = ?1", [&id])
+                    .map_err(|e| PersistError::Validation(e.to_string()))?;
+                Ok(())
+            })
+            .map_err(err_string)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    /// 检查租户是否存在
+    #[allow(dead_code)]
+    pub async fn tenant_exists(&self, id: &str) -> Result<bool, String> {
+        let db = match self.db() {
+            Some(d) => d,
+            None => return Ok(false),
+        };
+        let id = id.to_string();
+        tokio::task::spawn_blocking(move || {
+            db.with(|conn| {
+                let n: i64 =
+                    conn.query_row("SELECT COUNT(1) FROM tenants WHERE id = ?1", [&id], |r| {
+                        r.get(0)
+                    })?;
+                Ok(n > 0)
+            })
+            .map_err(err_string)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -779,6 +998,7 @@ mod tests {
     fn session_expiry_predicate_boundaries() {
         let never = Session {
             role: UserRole::Viewer,
+            tenant_id: "default".to_string(),
             expires_at: None,
         };
         assert!(!never.is_expired(0), "expires_at=None 永不过期");
@@ -786,6 +1006,7 @@ mod tests {
 
         let s = Session {
             role: UserRole::Operator,
+            tenant_id: "default".to_string(),
             expires_at: Some(1_000),
         };
         assert!(!s.is_expired(999), "now < expires_at 未过期");
@@ -801,7 +1022,7 @@ mod tests {
         let path = dir.join("data.db");
         let store = UserStore::open(open_db(&path), 3_600).expect("open");
         store
-            .create("alice", "pw-123456", UserRole::Viewer)
+            .create("alice", "pw-123456", UserRole::Viewer, "default")
             .await
             .expect("create");
 
@@ -819,12 +1040,13 @@ mod tests {
         );
 
         // 内存条目与 DB 列一致
-        let mem = *store
+        let mem = store
             .tokens
             .read()
             .await
             .get(&token)
-            .expect("session cached");
+            .expect("session cached")
+            .clone();
         assert_eq!(mem.role, UserRole::Viewer);
         assert_eq!(mem.expires_at, Some(exp));
         let db: Option<i64> = Connection::open(&path)
@@ -848,7 +1070,7 @@ mod tests {
         let path = dir.join("data.db");
         let store = UserStore::open(open_db(&path), 0).expect("open");
         store
-            .create("bob", "pw-123456", UserRole::Operator)
+            .create("bob", "pw-123456", UserRole::Operator, "default")
             .await
             .expect("create");
 
@@ -888,8 +1110,8 @@ mod tests {
                     ("legacy", "tok-null", None),
                 ] {
                     conn.execute(
-                        "INSERT INTO users (id, username, password_hash, role, token, created_at, updated_at, token_expiry) \
-                         VALUES (?1, ?2, 'x', 'viewer', ?3, '0', '0', ?4)",
+                        "INSERT INTO users (id, username, password_hash, role, token, tenant_id, created_at, updated_at, token_expiry) \
+                         VALUES (?1, ?2, 'x', 'viewer', ?3, 'default', '0', '0', ?4)",
                         params![Uuid::new_v4().to_string(), name, token, expiry],
                     )?;
                 }
@@ -908,7 +1130,13 @@ mod tests {
             None,
             "token_expiry 为 NULL 的存量旧 token 视为已过期（安全优先）"
         );
-        let mem = *store.tokens.read().await.get("tok-future").expect("loaded");
+        let mem = store
+            .tokens
+            .read()
+            .await
+            .get("tok-future")
+            .expect("loaded")
+            .clone();
         assert_eq!(
             mem.expires_at,
             Some(now + 3_600),
@@ -934,7 +1162,7 @@ mod tests {
         let path = dir.join("data.db");
         let store = UserStore::open(open_db(&path), 3_600).expect("open");
         let user = store
-            .create("bob", "pw-old-123", UserRole::Operator)
+            .create("bob", "pw-old-123", UserRole::Operator, "default")
             .await
             .expect("create");
 

@@ -4,6 +4,11 @@ use gateway_sdk::types::{NodeId, NodeKind, NodeState};
 use gateway_sdk::PluginConfig;
 use serde::{Deserialize, Serialize};
 
+/// 默认租户 ID（用于 serde default）
+fn default_tenant() -> String {
+    "default".to_string()
+}
+
 /// 节点配置（对应一个插件实例）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
@@ -13,6 +18,9 @@ pub struct NodeConfig {
     /// 插件名称，如 "sim" / "mqtt"
     pub plugin_name: String,
     pub config: PluginConfig,
+    /// 所属租户 ID
+    #[serde(default = "default_tenant")]
+    pub tenant_id: String,
 }
 
 /// 节点：配置 + 运行时状态
@@ -37,6 +45,7 @@ impl Node {
                 kind,
                 plugin_name: plugin_name.into(),
                 config,
+                tenant_id: default_tenant(),
             },
             state: NodeState::Stopped,
         }
