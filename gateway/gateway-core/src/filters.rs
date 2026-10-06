@@ -574,10 +574,11 @@ mod tests {
 
     /// 在每个修改全局状态的测试开头调用，确保串行执行。
     fn with_lock<R>(f: impl FnOnce() -> R) -> R {
-        // 先清除（读锁，可重入）
-        clear_all();
-        // 写锁（阻塞其他测试）
+        // 写锁（阻塞其他测试）——必须先拿锁再清空：若先 clear_all 再等锁，
+        // 并行测试会在本测试函数体执行中途再次清空全局状态，把 baseline 洗掉，
+        // 造成「首采必报」的假阳性（suppress 断言随机失败）。
         let guard = std::sync::RwLock::write(&FILTER_TEST_LOCK);
+        clear_all();
         // 用 catch_unwind 包装测试体，防止 panic 中毒
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
         drop(guard);
