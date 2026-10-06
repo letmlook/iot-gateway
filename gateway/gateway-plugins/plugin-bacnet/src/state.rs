@@ -1,92 +1,47 @@
 //! BACnet 插件运行时状态。
+//!
+//! UDP 无连接：每个节点持有一个绑定了本机临时端口的 std::net::UdpSocket。
+//! 选 std 而非 tokio 的原因：FFI 形态下每次插件调用运行在一次性的
+//! current_thread runtime 上（见 SDK ffi 契约），tokio 资源跨调用复用会因
+//! 「注册于其他 runtime」而失败；std socket 与 runtime 解耦，两种形态行为一致。
+//! 阻塞收发通过 spawn_blocking 执行，不占住 async worker 线程。
 
 use gateway_sdk::{Group, Tag};
+use std::net::UdpSocket;
+use std::sync::atomic::AtomicU8;
+use std::time::Duration;
 
-/// UDP 无连接，用连续失败计数代替 ConnectionState。
-/// 连续失败 ≥ RECONNECT_THRESHOLD 次后丢弃并重建客户端。
-const RECONNECT_THRESHOLD: u32 = 3;
+/// 单节点请求超时的下限与上限
+pub const TIMEOUT_MIN_MS: u32 = 100;
+pub const TIMEOUT_MAX_MS: u32 = 60_000;
 
 /// 每个节点的运行时状态
-pub struct BacnetState {
-    pub ip: String,
+pub struct BacnetNodeState {
+    pub host: String,
     pub port: u16,
+    /// 配置指定的设备实例；None = 用首个响应 I-Am 的设备
     pub device_instance: Option<u32>,
-    pub timeout_ms: u64,
-    pub write_priority: u8,
+    pub timeout_ms: u32,
+    pub write_priority: Option<u8>,
     pub groups: Vec<Group>,
     pub tags: Vec<Tag>,
-    /// 客户端连续失败计数（≥3 后丢弃重建）
-    pub failure_count: u32,
-    /// BacnetClient（Arc<Mutex<Option<...>>> 形式）
-    /// 每次 FFI 调用时在 spawn_blocking 内取走，用完即放
-    #[cfg(feature = "bacnet-client")]
-    pub client: std::sync::Arc<std::sync::Mutex<Option<bacnet_rs::client::BacnetClient>>>,
+    /// 绑定临时端口的 socket（与 runtime 解耦；Arc 以便 spawn_blocking 使用）
+    pub socket: std::sync::Arc<UdpSocket>,
+    /// 设备地址（host:port）
+    pub remote: std::net::SocketAddr,
+    /// 滚动 invoke id（单节点同一时刻只有一个在途请求）
+    pub invoke: AtomicU8,
 }
 
-impl BacnetState {
-    /// 记录一次失败，连续 ≥3 次则触发重建
-    pub fn record_failure(&mut self) -> bool {
-        self.failure_count += 1;
-        #[cfg(feature = "bacnet-client")]
-        {
-            // 丢弃客户端，下轮 poll 时重建
-            if let Ok(mut guard) = self.client.lock() {
-                *guard = None;
-            }
-        }
-        self.failure_count >= RECONNECT_THRESHOLD
+impl BacnetNodeState {
+    pub fn timeout(&self) -> Duration {
+        Duration::from_millis(self.timeout_ms.clamp(TIMEOUT_MIN_MS, TIMEOUT_MAX_MS) as u64)
     }
 
-    /// 成功时清零计数
-    pub fn record_success(&mut self) {
-        self.failure_count = 0;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn failure_count_increments() {
-        let mut s = BacnetState {
-            ip: "127.0.0.1".to_string(),
-            port: 47808,
-            device_instance: None,
-            timeout_ms: 3000,
-            write_priority: 8,
-            groups: vec![],
-            tags: vec![],
-            failure_count: 0,
-            #[cfg(feature = "bacnet-client")]
-            client: std::sync::Arc::new(std::sync::Mutex::new(None)),
-        };
-        assert_eq!(s.failure_count, 0);
-        s.record_failure();
-        assert_eq!(s.failure_count, 1);
-        s.record_failure();
-        assert_eq!(s.failure_count, 2);
-        // 第三次会触发重建
-        let should_reconnect = s.record_failure();
-        assert_eq!(s.failure_count, 3);
-        assert!(should_reconnect);
-    }
-
-    #[test]
-    fn success_resets_count() {
-        let mut s = BacnetState {
-            ip: "127.0.0.1".to_string(),
-            port: 47808,
-            device_instance: None,
-            timeout_ms: 3000,
-            write_priority: 8,
-            groups: vec![],
-            tags: vec![],
-            failure_count: 2,
-            #[cfg(feature = "bacnet-client")]
-            client: std::sync::Arc::new(std::sync::Mutex::new(None)),
-        };
-        s.record_success();
-        assert_eq!(s.failure_count, 0);
+    /// 生成下一个 invoke id
+    pub fn next_invoke(&self) -> u8 {
+        self.invoke
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .wrapping_add(1)
     }
 }

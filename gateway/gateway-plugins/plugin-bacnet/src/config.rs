@@ -18,12 +18,12 @@ pub fn config_u16(config: &PluginConfig, key: &str, default: u16) -> u16 {
         .unwrap_or(default)
 }
 
-pub fn config_u64(config: &PluginConfig, key: &str, default: u64) -> u64 {
-    config.get(key).and_then(|v| v.as_u64()).unwrap_or(default)
-}
-
-pub fn config_u32(config: &PluginConfig, key: &str, default: u32) -> Option<u32> {
-    config.get(key).and_then(|v| v.as_u64()).map(|n| n as u32)
+pub fn config_u32(config: &PluginConfig, key: &str, default: u32) -> u32 {
+    config
+        .get(key)
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32)
+        .unwrap_or(default)
 }
 
 #[allow(dead_code)]

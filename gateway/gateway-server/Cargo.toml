@@ -27,6 +27,8 @@ plugin-tdengine = { path = "../gateway-plugins/plugin-tdengine" }
 plugin-modbus-tcp = { path = "../gateway-plugins/plugin-modbus-tcp" }
 plugin-modbus-rtu = { path = "../gateway-plugins/plugin-modbus-rtu" }
 plugin-s7 = { path = "../gateway-plugins/plugin-s7" }
+plugin-bacnet = { path = "../gateway-plugins/plugin-bacnet" }
+plugin-ethernet-ip = { path = "../gateway-plugins/plugin-ethernet-ip" }
 axum = { version = "0.7", features = ["json", "macros", "multipart", "tokio", "ws"] }
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 tokio = { version = "1", features = ["full"] }
