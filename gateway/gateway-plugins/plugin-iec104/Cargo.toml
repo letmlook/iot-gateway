@@ -2,11 +2,22 @@
 name = "plugin-iec104"
 version = "0.1.0"
 edition = "2021"
-description = "南向 IEC 60870-5-104 插件（占位桩，待实现）"
+description = "南向 IEC 60870-5-104 插件：通过 TCP 连接 104 被控站（主站/控制站角色）"
 
 [lib]
 crate-type = ["lib", "cdylib"]
 
+[features]
+default = ["iec104-client"]
+iec104-client = ["dep:iec104"]
+ffi = []
+
 [dependencies]
 gateway-sdk = { path = "../../gateway-sdk" }
 async-trait = "0.1"
+tokio = { version = "1", features = ["rt", "time", "sync", "macros", "net"] }
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+iec104 = { version = "0.5.1", optional = true }

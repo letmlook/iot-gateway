@@ -60,11 +60,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // 从 plugins_dir 加载动态库插件（Windows: .dll，Unix: .so）；若无目录或加载后无插件则使用内置
     fn register_builtin_plugins(mgr: &mut gateway_core::Manager) {
-        // 2026-10-05 批：8 个新插件 crate 均已落地并启用 builtin 注册；
-        // 例外：kafka 仅 .so 部署（需要 librdkafka C 库）；iec104 待实现后启用（当前为占位桩）。
+        // 2026-10-05 批：全部 8 个新插件均已启用 builtin 注册。
         use plugin_bacnet::BacnetPlugin;
         use plugin_ethernet_ip::EthernetIpPlugin;
         use plugin_http::HttpPlugin;
+        use plugin_iec104::Iec104Plugin;
         use plugin_influxdb::InfluxDbPlugin;
         use plugin_modbus_rtu::ModbusRtuPlugin;
         use plugin_modbus_tcp::ModbusTcpPlugin;
@@ -75,6 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         mgr.register_south("s7", Arc::new(S7Plugin::new()));
         mgr.register_south("bacnet", Arc::new(BacnetPlugin::new()));
         mgr.register_south("ethernet-ip", Arc::new(EthernetIpPlugin::new()));
+        mgr.register_south("iec104", Arc::new(Iec104Plugin::new()));
         mgr.register_south("modbus-tcp", Arc::new(ModbusTcpPlugin::new()));
         mgr.register_south("modbus-rtu", Arc::new(ModbusRtuPlugin::new()));
         // 北向（kafka 不进 builtin：需要 librdkafka C 库，仅 .so 部署）

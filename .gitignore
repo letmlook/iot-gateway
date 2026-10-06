@@ -57,3 +57,6 @@ dist/
 
 # ZCode workspace metadata (machine-owned)
 .zcode/
+
+# Windows 保留设备名误产生的文件（重定向 > nul 在 POSIX shell 会生成字面文件）
+nul
