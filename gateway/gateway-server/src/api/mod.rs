@@ -57,7 +57,7 @@ pub fn resolve_bearer(state: &AppState, bearer: Option<&str>) -> Option<AuthCont
             tenant: TenantScope::All,
         });
     }
-    // 用户 token：取 (role, tenant_id)
+    // 用户 token：取 (role, tenant_id) 与用户名（T7 审计六元组用）
     // 当 GATEWAY_ENFORCE_TENANTS=0 时降为 All（禁用过滤但保留 stamping，逻辑统一在此处处理）
     let enforce = state.config.enforce_tenants;
     state.user_store.auth_of(&t).map(|(role, tenant_id)| {
@@ -68,7 +68,7 @@ pub fn resolve_bearer(state: &AppState, bearer: Option<&str>) -> Option<AuthCont
         };
         AuthContext {
             role,
-            username: None,
+            username: state.user_store.username_of(&t),
             tenant,
         }
     })
@@ -109,11 +109,12 @@ fn required_role(method: &axum::http::Method, path: &str) -> crate::users::UserR
     if p.starts_with("auth/") {
         return Viewer;
     }
-    // 系统级：用户管理、租户管理、备份与恢复、授权文件与门禁重置
+    // 系统级：用户管理、租户管理、审计日志、备份与恢复、授权文件与门禁重置
     if p == "users"
         || p.starts_with("users/")
         || p == "tenants"
         || p.starts_with("tenants/")
+        || p == "audit"
         || p == "backup"
         || p == "restore"
         || p == "license/upload"
@@ -139,15 +140,47 @@ fn required_role(method: &axum::http::Method, path: &str) -> crate::users::UserR
     }
 }
 
-async fn request_id_middleware(request: Request, next: Next) -> Response {
+async fn request_id_middleware(mut request: Request, next: Next) -> Response {
     let id = uuid::Uuid::new_v4().to_string();
     tracing::Span::current().record("request_id", tracing::field::display(&id));
+    // 同一 id 放进请求扩展：本中间件在最外层，内层 auth_middleware 读取它写入审计行，
+    // 保证审计的 request_id 与响应头 x-request-id 同值。
+    request.extensions_mut().insert(id.clone());
     let mut res = next.run(request).await;
     if let Ok(v) = header::HeaderValue::try_from(id) {
         res.headers_mut()
             .insert(header::HeaderName::from_static("x-request-id"), v);
     }
     res
+}
+
+/// T7 审计落库（docs/design/多租户.md §6 T7）：认证中间件尾部 fire-and-forget 异步写入，
+/// 不阻塞响应；写失败只打日志，绝不影响请求本身。只记元数据六元组，不记录请求体/响应体。
+fn spawn_audit_log(
+    state: &AppState,
+    ctx: &AuthContext,
+    method: &str,
+    path: &str,
+    status: u16,
+    request_id: Option<String>,
+) {
+    // All 作用域（Admin/静态 token 等）按 history_tenant_filter 同款约定记 "*"
+    let tenant = match &ctx.tenant {
+        TenantScope::All => "*".to_string(),
+        TenantScope::One(t) => t.clone(),
+    };
+    let username = ctx.username.clone();
+    let method = method.to_string();
+    let path = path.to_string();
+    let store = state.user_store.clone();
+    tokio::spawn(async move {
+        if let Err(e) = store
+            .audit_insert(username, Some(tenant), method, path, status, request_id)
+            .await
+        {
+            tracing::warn!("audit_log insert failed (ignored): {}", e);
+        }
+    });
 }
 
 /// 认证 + 授权中间件：先确定身份（静态 token / 用户 token / 未初始化），再按「路径 + 方法」校验角色。
@@ -158,7 +191,8 @@ async fn auth_middleware(
     next: Next,
 ) -> Response {
     if state.config.disable_auth {
-        // 认证关闭时按最高权限放行（并由启动日志给出醒目告警）
+        // 认证关闭时按最高权限放行（并由启动日志给出醒目告警）。
+        // 不做审计：该模式仅限开发/本地，身份是 "auth-disabled" 占位，落审计只会产生噪音。
         request.extensions_mut().insert(AuthContext {
             role: crate::users::UserRole::Admin,
             username: Some("auth-disabled".to_string()),
@@ -168,6 +202,8 @@ async fn auth_middleware(
     }
     // 嵌套路由中 URI 可能是 /auth/login 或 /api/auth/login，统一用 normalize_api_path 处理
     let path = normalize_api_path(request.uri().path());
+    // 白名单端点不审计：探针类（health/metrics）高频访问会刷爆审计表；登录失败已有
+    // 专门的失败计数日志与账号锁定机制（UserStore::login）。
     if path == "health"
         || path == "metrics"
         || path == "version"
@@ -203,6 +239,11 @@ async fn auth_middleware(
     };
     match ctx {
         Some(c) => {
+            // 审计六元组采集：request_id 由最外层 request_id_middleware 放入请求扩展
+            //（与响应头 x-request-id 同值）；method/path 在 request 被 move 前先取出。
+            let request_id = request.extensions().get::<String>().cloned();
+            let method = request.method().as_str().to_string();
+            let req_path = request.uri().path().to_string();
             // 授权校验：路径 + 方法 -> 所需最低角色
             if state.config.enforce_roles {
                 let required = required_role(request.method(), request.uri().path());
@@ -215,6 +256,8 @@ async fn auth_middleware(
                         user = c.username.as_deref().unwrap_or("<session>"),
                         "forbidden: insufficient role"
                     );
+                    // 被拒绝的访问是审计最有价值的行，同样落库
+                    spawn_audit_log(&state, &c, &method, &req_path, 403, request_id.clone());
                     return ApiError::forbidden(format!(
                         "insufficient role: '{}' requires '{}'",
                         c.role.as_str(),
@@ -238,14 +281,34 @@ async fn auth_middleware(
                                     user = c.username.as_deref().unwrap_or("<session>"),
                                     "tenant mismatch: node belongs to another tenant, 404"
                                 );
+                                spawn_audit_log(
+                                    &state,
+                                    &c,
+                                    &method,
+                                    &req_path,
+                                    404,
+                                    request_id.clone(),
+                                );
                                 return ApiError::not_found("node not found").into_response();
                             }
                         }
                     }
                 }
             }
-            request.extensions_mut().insert(c);
-            next.run(request).await
+            request.extensions_mut().insert(c.clone());
+            let res = next.run(request).await;
+            // T7：认证中间件尾部异步落库。401（无 AuthContext，六元组无身份可记）与
+            // 白名单/disable_auth 分支不审计；其余已解析身份的请求（含 handler 产生的
+            // 4xx/5xx）都记一行。
+            spawn_audit_log(
+                &state,
+                &c,
+                &method,
+                &req_path,
+                res.status().as_u16(),
+                request_id,
+            );
+            res
         }
         None => ApiError::unauthorized().into_response(),
     }
@@ -324,6 +387,8 @@ pub fn router(state: AppState) -> Router<AppState> {
             get(handlers::list_tenants).post(handlers::create_tenant),
         )
         .route("/tenants/:id", delete(handlers::delete_tenant))
+        // ---- 审计日志（T7，Admin-only；不过 v1 别名，同 tenants 等新端点） ----
+        .route("/audit", get(handlers::list_audit))
         // ---- 节点 ----
         // GET: 旧路径 → 旧 handler，v1 → 分页 handler
         // POST: 两者都走 handlers::create_node
@@ -820,6 +885,11 @@ mod tests {
             Operator
         );
         assert_eq!(required_role(&axum::http::Method::GET, "/api/users"), Admin);
+        assert_eq!(
+            required_role(&axum::http::Method::GET, "/api/audit"),
+            Admin,
+            "T7 审计日志查询必须 Admin-only"
+        );
         assert_eq!(
             required_role(&axum::http::Method::POST, "/api/restore"),
             Admin
@@ -1484,5 +1554,163 @@ mod tests {
             .await
             .unwrap();
         (status, String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    // ---------- T7 审计日志（设计 §6 T7：写路径落行、Admin 可查、operator 403、分页冒烟） ----------
+
+    /// 轮询等待审计异步落库完成（fire-and-forget 写入不与响应同步），超时 panic
+    async fn wait_audit_rows(env: &RbacEnv, min: usize) -> Vec<crate::users::AuditRow> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Ok((rows, _)) = env.store.list_audit(0, 1000).await {
+                if rows.len() >= min {
+                    return rows;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "audit rows did not reach {} within 5s",
+                min
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// 写路径落行：已认证请求在认证中间件尾部异步落一行六元组
+    #[tokio::test(flavor = "multi_thread")]
+    async fn audit_write_path_lands_row() {
+        let env = rbac_env().await;
+        let token = login_as(&env, "aud-viewer", crate::users::UserRole::Viewer).await;
+        assert_eq!(status_of(&env, "GET", "/nodes", Some(&token)).await, 200);
+
+        let rows = wait_audit_rows(&env, 1).await;
+        assert_eq!(rows.len(), 1, "本用例仅发出一个受审计请求");
+        let r = &rows[0];
+        assert_eq!(
+            r.username.as_deref(),
+            Some("aud-viewer"),
+            "用户会话必须记录真实用户名"
+        );
+        assert_eq!(r.tenant.as_deref(), Some("default"), "One 域记录用户所属域");
+        assert_eq!(r.method, "GET");
+        assert_eq!(r.path, "/nodes");
+        assert_eq!(r.status, 200);
+        assert!(r.ts > 0, "ts 由存储层盖章");
+        assert!(
+            r.request_id
+                .as_deref()
+                .map(|s| !s.is_empty())
+                .unwrap_or(false),
+            "request_id 必须与响应头 x-request-id 同源（非空 UUID）"
+        );
+        cleanup_env(env);
+    }
+
+    /// Admin 可查：经 GET /api/audit 查到写路径落的行（分页信封）
+    #[tokio::test(flavor = "multi_thread")]
+    async fn audit_admin_can_query_via_api() {
+        let env = rbac_env().await;
+        let viewer = login_as(&env, "aud-v", crate::users::UserRole::Viewer).await;
+        let admin = login_as(&env, "aud-admin", crate::users::UserRole::Admin).await;
+        assert_eq!(status_of(&env, "GET", "/nodes", Some(&viewer)).await, 200);
+        wait_audit_rows(&env, 1).await;
+
+        let (status, body) = authed_get(&env.state, "/audit", &admin).await;
+        assert_eq!(status, 200, "Admin 查询审计必须放行: {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).expect("page envelope");
+        assert_eq!(v["page"], 1);
+        assert_eq!(v["pageSize"], 50, "默认 page_size=50");
+        let items = v["items"].as_array().expect("items array");
+        assert!(
+            items.iter().any(|it| {
+                it["username"] == "aud-v"
+                    && it["path"] == "/nodes"
+                    && it["method"] == "GET"
+                    && it["status"] == 200
+            }),
+            "Admin 必须能查到写路径落的行: {body}"
+        );
+        cleanup_env(env);
+    }
+
+    /// operator 403：无权查询审计；且被拒绝的访问本身也落审计
+    #[tokio::test(flavor = "multi_thread")]
+    async fn audit_operator_403_is_rejected_and_recorded() {
+        let env = rbac_env().await;
+        let op = login_as(&env, "aud-op", crate::users::UserRole::Operator).await;
+        assert_eq!(status_of(&env, "GET", "/audit", Some(&op)).await, 403);
+
+        let rows = wait_audit_rows(&env, 1).await;
+        assert!(
+            rows.iter().any(|r| {
+                r.username.as_deref() == Some("aud-op")
+                    && r.path == "/audit"
+                    && r.status == 403
+                    && r.tenant.as_deref() == Some("default")
+            }),
+            "operator 的 403 访问必须被审计: {rows:?}"
+        );
+        cleanup_env(env);
+    }
+
+    /// 分页冒烟：存储层播种固定行数后验证窗口、信封与非法参数
+    #[tokio::test(flavor = "multi_thread")]
+    async fn audit_pagination_smoke() {
+        let env = rbac_env().await;
+        let admin = login_as(&env, "aud-admin", crate::users::UserRole::Admin).await;
+
+        // 直接经存储层播种 7 行（不经 HTTP，避免自审计行干扰播种计数）
+        for i in 0..7u32 {
+            env.store
+                .audit_insert(
+                    Some(format!("pg-user-{}", i)),
+                    Some("default".to_string()),
+                    "GET".to_string(),
+                    format!("/seed/{}", i),
+                    200,
+                    None,
+                )
+                .await
+                .expect("seed audit row");
+        }
+
+        // 非法分页参数：page=0 → 400
+        assert_eq!(
+            status_of(&env, "GET", "/audit?page=0", Some(&admin)).await,
+            400
+        );
+
+        // page_size=2 窗口：恰好 2 行 + 信封字段回显
+        let (status, body) = authed_get(&env.state, "/audit?page=1&page_size=2", &admin).await;
+        assert_eq!(status, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["items"].as_array().unwrap().len(), 2);
+        assert_eq!(v["page"], 1);
+        assert_eq!(v["pageSize"], 2);
+        assert!(
+            v["total"].as_u64().unwrap() >= 7,
+            "total 至少覆盖播种的 7 行: {body}"
+        );
+
+        // 等待前两次查询的自审计行（400 一行 + 200 一行）全部落库，之后全量窗口可精确计数：
+        // 7 播种 + 2 自审计 = 9；当前查询自身的审计行在其响应之后才落库，不进入本次结果
+        let rows = wait_audit_rows(&env, 9).await;
+        assert_eq!(rows.len(), 9);
+
+        let (status, body) = authed_get(&env.state, "/audit?page=1&page_size=1000", &admin).await;
+        assert_eq!(status, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["total"].as_u64().unwrap(), 9, "{body}");
+        let items = v["items"].as_array().unwrap();
+        assert_eq!(items.len(), 9, "全量窗口内 items 数等于 total");
+        let paths: Vec<&str> = items.iter().filter_map(|it| it["path"].as_str()).collect();
+        for i in 0..7 {
+            assert!(
+                paths.contains(&format!("/seed/{}", i).as_str()),
+                "seed {} missing in {paths:?}",
+                i
+            );
+        }
+        cleanup_env(env);
     }
 }

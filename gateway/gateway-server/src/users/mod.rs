@@ -2,4 +2,4 @@
 
 mod store;
 
-pub use store::{User, UserRole, UserStore};
+pub use store::{AuditRow, User, UserRole, UserStore};

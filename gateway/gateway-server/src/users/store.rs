@@ -32,10 +32,24 @@ CREATE TABLE IF NOT EXISTS tenants (
   name TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL,
+  username TEXT,
+  tenant TEXT,
+  method TEXT NOT NULL,
+  path TEXT NOT NULL,
+  status INTEGER NOT NULL,
+  request_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts);
 "#;
 
 /// 系统初始化时的默认管理员：用户名
 const DEFAULT_ADMIN_USERNAME: &str = "admin";
+/// 审计日志保留天数：沿用主日志策略（logging.rs 每日滚动 + max_log_files(14) → 审计行保留 14 天），
+/// 启动时清理一次，避免审计表无限增长。
+const AUDIT_RETENTION_DAYS: i64 = 14;
 /// 连续登录失败达到该次数后临时锁定账号，防止暴力破解
 const MAX_FAILED_LOGINS: u32 = 5;
 /// 登录失败锁定时长（秒）
@@ -98,11 +112,13 @@ pub struct User {
     pub updated_at: String,
 }
 
-/// 内存会话条目：角色 + 所属域 + 绝对过期时刻（自登录签发起算，不因活动续期）
+/// 内存会话条目：角色 + 所属域 + 登录用户名 + 绝对过期时刻（自登录签发起算，不因活动续期）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
     pub role: UserRole,
     pub tenant_id: String,
+    /// 登录用户名（T7 审计六元组取值来源；随登录/启动加载从 users 行带入）
+    pub username: String,
     /// 绝对过期时刻（UNIX 秒）；None = 永不过期（仅 ttl=0 时出现）
     pub expires_at: Option<i64>,
 }
@@ -271,6 +287,13 @@ impl UserStore {
                     params![&now],
                 )?;
 
+                // T7 审计日志滚动清理：沿用主日志策略（每日滚动、保留 14 天），启动时清一次；
+                // 失败仅告警，不影响启动。
+                let cutoff = now_secs() - AUDIT_RETENTION_DAYS * 86_400;
+                if let Err(e) = conn.execute("DELETE FROM audit_log WHERE ts < ?1", params![cutoff]) {
+                    tracing::warn!("audit_log retention cleanup failed: {}", e);
+                }
+
                 let mut stmt =
                     conn.prepare("SELECT 1 FROM users WHERE username = ?1 LIMIT 1")?;
                 let has_admin = stmt.exists([DEFAULT_ADMIN_USERNAME])?;
@@ -312,17 +335,18 @@ impl UserStore {
                     // ttl=0：永不过期，与旧行为一致——全部灌内存，expires_at = None
                     let mut stmt = conn
                         .prepare(
-                            "SELECT token, role, tenant_id FROM users WHERE token IS NOT NULL AND token != ''",
+                            "SELECT token, role, tenant_id, username FROM users WHERE token IS NOT NULL AND token != ''",
                         )?;
-                    let rows = stmt.query_map([], |r| -> rusqlite::Result<(String, String, String)> {
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                    let rows = stmt.query_map([], |r| -> rusqlite::Result<(String, String, String, String)> {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
                     })?;
-                    for (t, role, tenant_id) in rows.flatten() {
+                    for (t, role, tenant_id, username) in rows.flatten() {
                         map.insert(
                             t,
                             Session {
                                 role: UserRole::from_str(&role),
                                 tenant_id,
+                                username,
                                 expires_at: None,
                             },
                         );
@@ -333,20 +357,21 @@ impl UserStore {
                     // 内存 expires_at 直接沿用 DB 值，不是「再加一次 ttl」。
                     let now = now_secs();
                     let mut stmt = conn.prepare(
-                        "SELECT token, role, tenant_id, token_expiry FROM users \
+                        "SELECT token, role, tenant_id, token_expiry, username FROM users \
                          WHERE token IS NOT NULL AND token != '' \
                            AND token_expiry IS NOT NULL AND token_expiry > ?1",
                     )?;
                     let rows = stmt
-                        .query_map([now], |r| -> rusqlite::Result<(String, String, String, i64)> {
-                            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                        .query_map([now], |r| -> rusqlite::Result<(String, String, String, i64, String)> {
+                            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
                         })?;
-                    for (t, role, tenant_id, expiry) in rows.flatten() {
+                    for (t, role, tenant_id, expiry, username) in rows.flatten() {
                         map.insert(
                             t,
                             Session {
                                 role: UserRole::from_str(&role),
                                 tenant_id,
+                                username,
                                 expires_at: Some(expiry),
                             },
                         );
@@ -497,6 +522,7 @@ impl UserStore {
                     Session {
                         role: user.role,
                         tenant_id: user.tenant_id.clone(),
+                        username: user.username.clone(),
                         expires_at,
                     },
                 );
@@ -562,6 +588,19 @@ impl UserStore {
     #[allow(dead_code)]
     pub fn role_of(&self, token: &str) -> Option<UserRole> {
         self.auth_of(token).map(|(role, _)| role)
+    }
+
+    /// 取 token 对应用户的用户名（T7 审计六元组用），语义与 auth_of 一致：
+    /// 未知或已过期 token 返回 None。
+    pub fn username_of(&self, token: &str) -> Option<String> {
+        self.tokens.try_read().ok().and_then(|t| {
+            let s = t.get(token)?;
+            if s.is_expired(now_secs()) {
+                None
+            } else {
+                Some(s.username.clone())
+            }
+        })
     }
 
     pub async fn list(&self) -> Result<Vec<User>, String> {
@@ -975,6 +1014,106 @@ impl UserStore {
     }
 }
 
+// ---------------------------------------------------------------------------
+// T7 审计日志（设计 docs/design/多租户.md §6 T7）：audit_log 归 UserStore 管，
+// 与 users/tenants 同库（data.db）、同 spawn_blocking 访问模式。
+// 只记请求元数据六元组，不含请求体/响应体。
+// ---------------------------------------------------------------------------
+
+/// 审计日志行（GET /api/audit 读取）
+#[derive(Debug, Clone)]
+pub struct AuditRow {
+    pub id: i64,
+    /// UNIX 秒
+    pub ts: i64,
+    pub username: Option<String>,
+    /// 请求者域：具体租户 id，或 All 作用域的 "*"
+    pub tenant: Option<String>,
+    pub method: String,
+    pub path: String,
+    pub status: u16,
+    pub request_id: Option<String>,
+}
+
+impl UserStore {
+    /// 审计落库：ts 由存储层取当前 UNIX 秒。调用方（认证中间件尾部）对失败只打日志，
+    /// 绝不影响请求本身；无 DB（empty() 禁用态）时静默成功。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn audit_insert(
+        &self,
+        username: Option<String>,
+        tenant: Option<String>,
+        method: String,
+        path: String,
+        status: u16,
+        request_id: Option<String>,
+    ) -> Result<(), String> {
+        let db = match self.db() {
+            Some(d) => d,
+            None => return Ok(()),
+        };
+        let ts = now_secs();
+        tokio::task::spawn_blocking(move || {
+            db.with(move |conn| {
+                conn.execute(
+                    "INSERT INTO audit_log (ts, username, tenant, method, path, status, request_id) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![ts, username, tenant, &method, &path, status as i64, request_id],
+                )?;
+                Ok(())
+            })
+            .map_err(err_string)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    /// 审计日志分页查询：按 id 倒序（最新在前），SQL 端 LIMIT/OFFSET；
+    /// 返回 (当前页行, 总行数)。
+    pub async fn list_audit(
+        &self,
+        offset: usize,
+        limit: u32,
+    ) -> Result<(Vec<AuditRow>, u64), String> {
+        let db = match self.db() {
+            Some(d) => d,
+            None => return Ok((Vec::new(), 0)),
+        };
+        let limit = limit as i64;
+        let offset = offset as i64;
+        tokio::task::spawn_blocking(move || {
+            db.with(move |conn| {
+                let total: i64 =
+                    conn.query_row("SELECT COUNT(1) FROM audit_log", [], |r| r.get(0))?;
+                let mut stmt = conn.prepare(
+                    "SELECT id, ts, username, tenant, method, path, status, request_id \
+                     FROM audit_log ORDER BY id DESC LIMIT ?1 OFFSET ?2",
+                )?;
+                let rows = stmt.query_map(params![limit, offset], |r| {
+                    Ok(AuditRow {
+                        id: r.get(0)?,
+                        ts: r.get(1)?,
+                        username: r.get(2)?,
+                        tenant: r.get(3)?,
+                        method: r.get(4)?,
+                        path: r.get(5)?,
+                        status: r.get::<_, i64>(6)? as u16,
+                        request_id: r.get(7)?,
+                    })
+                })?;
+                let mut list = Vec::new();
+                for row in rows {
+                    list.push(row?);
+                }
+                Ok((list, total as u64))
+            })
+            .map_err(err_string)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -999,6 +1138,7 @@ mod tests {
         let never = Session {
             role: UserRole::Viewer,
             tenant_id: "default".to_string(),
+            username: "never".to_string(),
             expires_at: None,
         };
         assert!(!never.is_expired(0), "expires_at=None 永不过期");
@@ -1007,6 +1147,7 @@ mod tests {
         let s = Session {
             role: UserRole::Operator,
             tenant_id: "default".to_string(),
+            username: "s".to_string(),
             expires_at: Some(1_000),
         };
         assert!(!s.is_expired(999), "now < expires_at 未过期");
@@ -1200,6 +1341,74 @@ mod tests {
         // 删除用户：会话随之消失
         store.delete(&user.id).await.expect("delete");
         assert_eq!(store.role_of(&t4), None);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------- T7 审计日志：写入 / 倒序 / 分页窗口（store 层往返） ----------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn audit_insert_and_list_pagination_roundtrip() {
+        let dir = tmp_dir("audit");
+        let path = dir.join("data.db");
+        let store = UserStore::open(open_db(&path), 0).expect("open");
+
+        for i in 0..7u32 {
+            store
+                .audit_insert(
+                    Some(format!("u{}", i)),
+                    Some("default".to_string()),
+                    "POST".to_string(),
+                    format!("/p/{}", i),
+                    201,
+                    Some(format!("req-{}", i)),
+                )
+                .await
+                .expect("audit insert");
+        }
+
+        // 第一页：最新在前（id 倒序），六元组原样往返
+        let (rows, total) = store.list_audit(0, 3).await.expect("list p1");
+        assert_eq!(total, 7);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].path, "/p/6");
+        assert_eq!(rows[0].username.as_deref(), Some("u6"));
+        assert_eq!(rows[0].tenant.as_deref(), Some("default"));
+        assert_eq!(rows[0].method, "POST");
+        assert_eq!(rows[0].status, 201);
+        assert_eq!(rows[0].request_id.as_deref(), Some("req-6"));
+        assert!(rows[0].ts > 0, "ts 由存储层盖章");
+
+        // 中间页与最后一页
+        let (rows2, total2) = store.list_audit(3, 3).await.expect("list p2");
+        assert_eq!(total2, 7);
+        assert_eq!(rows2.len(), 3);
+        assert_eq!(rows2[0].path, "/p/3");
+        let (rows3, _) = store.list_audit(6, 3).await.expect("list p3");
+        assert_eq!(rows3.len(), 1);
+        assert_eq!(rows3[0].path, "/p/0");
+        // 越界窗口：空页、total 不变
+        let (rows4, total4) = store.list_audit(100, 3).await.expect("list p4");
+        assert!(rows4.is_empty());
+        assert_eq!(total4, 7);
+
+        // username=None（无身份可记时）正常往返
+        store
+            .audit_insert(
+                None,
+                Some("*".to_string()),
+                "GET".to_string(),
+                "/x".to_string(),
+                401,
+                None,
+            )
+            .await
+            .expect("audit insert anonymous");
+        let (rows5, total5) = store.list_audit(0, 10).await.expect("list p5");
+        assert_eq!(total5, 8);
+        assert_eq!(rows5[0].username, None);
+        assert_eq!(rows5[0].tenant.as_deref(), Some("*"));
 
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);

@@ -9,6 +9,7 @@ use gateway_sdk::{Group, GroupSubscription, NodeId, NodeKind, NodeState, PluginC
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::api::dto::{AuditDto, Page, PageParams};
 use crate::api::ApiError;
 use crate::backup;
 use crate::logging;
@@ -378,6 +379,30 @@ pub async fn delete_tenant(
         .await
         .map_err(ApiError::bad_request)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------- Audit ----------
+/// 审计日志分页查询（T7，Admin-only，见 required_role 的 audit 分支）。
+/// 分页写法沿用 handlers_page.rs：validate_page → clamp → offset，窗口在 SQL 端完成
+///（审计表追加型增长，不做全量取回后内存截断）。按 id 倒序（最新在前）。
+pub async fn list_audit(
+    State(state): State<AppState>,
+    Query(p): Query<PageParams>,
+) -> Result<Json<Page<AuditDto>>, ApiError> {
+    p.validate_page()?;
+    let page_size = p.clamped_page_size();
+    let offset = p.offset();
+    let (rows, total) = state
+        .user_store
+        .list_audit(offset, page_size)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(Page::new(
+        rows.into_iter().map(AuditDto::from).collect(),
+        total,
+        p.page,
+        page_size,
+    )))
 }
 
 // ---------- Version ----------

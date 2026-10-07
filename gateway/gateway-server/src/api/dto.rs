@@ -305,6 +305,41 @@ pub struct ValueDto {
 }
 
 // ---------------------------------------------------------------------------
+// AuditDto
+// ---------------------------------------------------------------------------
+
+/// 审计日志行（GET /api/audit，Admin-only）。只含请求元数据，不含请求体/响应体。
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditDto {
+    pub id: i64,
+    /// UNIX 秒
+    pub ts: i64,
+    pub username: Option<String>,
+    /// 请求者域：具体租户 id，或 All 作用域的 "*"
+    pub tenant: Option<String>,
+    pub method: String,
+    pub path: String,
+    pub status: u16,
+    pub request_id: Option<String>,
+}
+
+impl From<crate::users::AuditRow> for AuditDto {
+    fn from(r: crate::users::AuditRow) -> Self {
+        Self {
+            id: r.id,
+            ts: r.ts,
+            username: r.username,
+            tenant: r.tenant,
+            method: r.method,
+            path: r.path,
+            status: r.status,
+            request_id: r.request_id,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Error
 // ---------------------------------------------------------------------------
 
