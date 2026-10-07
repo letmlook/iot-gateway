@@ -15,7 +15,7 @@
 mod ffi;
 
 use gateway_plugin_common::config::{
-    config_bool, config_str, config_u64, config_usize, queue_path_for_node,
+    config_bool, config_str, config_u64, config_usize, default_cache_dir, queue_path_for_node,
     DEFAULT_CACHE_MEMORY_SIZE, DEFAULT_CACHE_SYNC_INTERVAL_MS,
 };
 use gateway_plugin_common::format::{
@@ -151,7 +151,12 @@ impl NorthPlugin for KafkaPlugin {
             DEFAULT_CACHE_SYNC_INTERVAL_MS,
         );
         let cache_persist = config_bool(&config, "cache_persist", true);
-        let cache_dir = config_str(&config, "cache_dir", DEFAULT_CACHE_DIR_KAFKA);
+        // 缺省目录：优先 <GATEWAY_DATA_DIR>/kafka-queue，未设置该环境变量时保持原默认（CWD 相对）
+        let cache_dir = config_str(
+            &config,
+            "cache_dir",
+            &default_cache_dir("kafka-queue", DEFAULT_CACHE_DIR_KAFKA),
+        );
 
         log::info(node_id, format!("open kafka: brokers={}", brokers));
 
@@ -362,30 +367,21 @@ impl NorthPlugin for KafkaPlugin {
 
         #[cfg(feature = "kafka-client")]
         {
-            let (connected, tx_opt) = {
-                let cs = node_state.connection_status.read().await;
-                (cs.connected, node_state.tx.clone())
-            };
-            if !connected {
-                // 未连接：进离线队列，不阻塞回调
-                enqueue(node_state, topic, payload).await;
-                return Ok(());
-            }
-            if let Some(tx) = tx_opt {
-                let rec = Record { topic, payload };
+            // 缺陷①修复（worker 引导死锁）：无论 connected 与否都把记录交给 worker，
+            // 由 worker 统一负责发送/入队/重试。旧逻辑在 !connected 时直接入队，
+            // 而 worker 的记录唯一来源是 mpsc 通道、connected 又只能由「投递成功」置位
+            // → 通道永远空、首条消息永远发不出。
+            if let Some(tx) = node_state.tx.clone() {
+                let rec = Record {
+                    topic: topic.clone(),
+                    payload: payload.clone(),
+                };
                 if tx.try_send(rec).is_err() {
                     // 通道满：进离线队列（保序）
-                    let topic = topic_from_template(
-                        "gateway/data/${node_id}/${group_id}",
-                        data.node_id,
-                        data.group_id,
-                        data.node_name.as_deref(),
-                        data.group_name.as_deref(),
-                        data.ts,
-                    );
-                    let payload = payload_for_format(&data, DEFAULT_UPLOAD_FORMAT);
                     enqueue(node_state, topic, payload).await;
                 }
+            } else {
+                enqueue(node_state, topic, payload).await;
             }
         }
 
@@ -463,7 +459,10 @@ async fn run_kafka_worker(
     let interval = Duration::from_millis(cache_sync_interval_ms.max(10));
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(30);
-    let mut healthy = true;
+    // 缺陷①修复：初始即武装补发分支（healthy=false）——
+    // worker 启动时就会尝试补发离线队列（含磁盘恢复的记录），而不是等「第一条投递成功」；
+    // 之后 healthy 由「离线队列是否清空」维护：非空则保持重试，清空即解除。
+    let mut healthy = false;
 
     loop {
         tokio::select! {
@@ -474,32 +473,38 @@ async fn run_kafka_worker(
             rec = record_rx.recv() => {
                 match rec {
                     Some(record) => {
-                        let topic = record.topic.clone();
-                        let payload = record.payload.clone();
-                        let conn_status_clone2 = connection_status.clone();
-                        let producer_clone = producer.clone();
-                        // rdkafka FutureProducer::send 返回 Future，等待得到 delivery 结果
-                        // delivery 失败（librdkafka 内部重试耗尽）只计数不回灌队列（避免乱序/重复风暴）
-                        tokio::spawn(async move {
-                            match producer_clone.send(
-                                FutureRecord::to(&topic).payload(&payload).key(&topic),
+                        // rdkafka FutureProducer::send 返回 Future，同步等待 delivery 结果
+                        // （与 http/influxdb/tdengine 的 worker 同构：发送结果必须能驱动
+                        // healthy/退避/离线队列补发状态机——旧实现 tokio::spawn 把 delivery
+                        // 丢到后台，worker 的 healthy 与之完全脱节，离线队列无人消费）。
+                        // delivery 失败（librdkafka 内部重试耗尽）只计数不回灌离线队列（避免乱序/重复风暴）
+                        let delivery = producer
+                            .send(
+                                FutureRecord::to(&record.topic)
+                                    .payload(&record.payload)
+                                    .key(&record.topic),
                                 Duration::from_millis(message_timeout_ms),
-                            ).await {
-                                Ok(_) => {
-                                    let mut cs = conn_status_clone2.write().await;
-                                    cs.connected = true;
-                                    cs.last_error = None;
-                                }
-                                Err((e, _)) => {
-                                    let mut cs = conn_status_clone2.write().await;
-                                    cs.connected = false;
-                                    cs.last_error = Some(e.to_string());
-                                    cs.dropped_delivery += 1;
-                                    tracing::warn!(node_id = ?node_id, error = %e,
-                                        "kafka delivery failed after retries, counted as dropped_delivery");
-                                }
+                            )
+                            .await;
+                        match delivery {
+                            Ok(_) => {
+                                backoff = Duration::from_secs(1);
+                                let mut cs = connection_status.write().await;
+                                cs.connected = true;
+                                cs.last_error = None;
                             }
-                        });
+                            Err((e, _)) => {
+                                backoff = Duration::from_secs(1);
+                                let mut cs = connection_status.write().await;
+                                cs.connected = false;
+                                cs.last_error = Some(e.to_string());
+                                cs.dropped_delivery += 1;
+                                tracing::warn!(node_id = ?node_id, error = %e,
+                                    "kafka delivery failed after retries, counted as dropped_delivery");
+                            }
+                        }
+                        // 队列非空时保持补发分支武装（即使本次投递成功），清空后解除
+                        healthy = queue.lock().await.is_empty();
                     }
                     None => break,
                 }
@@ -508,10 +513,17 @@ async fn run_kafka_worker(
                 let restored = replenish_queue(
                     &queue, &producer, message_timeout_ms, interval,
                 ).await;
-                if restored > 0 {
+                let empty = queue.lock().await.is_empty();
+                if empty {
+                    if restored > 0 {
+                        // 补发成功即证明 broker 可达：connected 语义必须真实反映这一点
+                        let mut cs = connection_status.write().await;
+                        cs.connected = true;
+                        cs.last_error = None;
+                        log::info(node_id, format!("kafka offline queue flushed {} record(s)", restored));
+                    }
                     healthy = true;
                     backoff = Duration::from_secs(1);
-                    log::info(node_id, format!("kafka offline queue flushed {} record(s)", restored));
                 } else {
                     backoff = (backoff * 2).min(max_backoff);
                 }
@@ -686,8 +698,8 @@ fn config_schema() -> gateway_sdk::ConfigSchema {
             name_zh: Some("离线队列目录".to_string()),
             name_en: Some("Offline Queue Directory".to_string()),
             description: Some("Directory for per-node offline queue files.".to_string()),
-            description_zh: Some(format!("每个节点一个文件，默认 {}", DEFAULT_CACHE_DIR_KAFKA).to_string()),
-            description_en: Some("Directory for per-node offline queue files.".to_string()),
+            description_zh: Some(format!("每个节点一个文件，默认 {}（未显式配置时优先取 GATEWAY_DATA_DIR 环境变量，即 <GATEWAY_DATA_DIR>/kafka-queue）", DEFAULT_CACHE_DIR_KAFKA).to_string()),
+            description_en: Some("Directory for per-node offline queue files. Defaults to <GATEWAY_DATA_DIR>/kafka-queue when the env var is set, otherwise the built-in default.".to_string()),
             attribute: ParamAttribute::Optional,
             ty: ParamType::String,
             default: Some(serde_json::json!(DEFAULT_CACHE_DIR_KAFKA)),
@@ -778,7 +790,10 @@ mod tests {
     }
 
     // ---- Stub 行为测试（no kafka-client feature）----
+    // 这些用例断言的是「未编译 kafka-client」时的降级行为，必须按 feature 门控，
+    // 否则开 kafka-client 时会走真实 client 路径而误报失败。
 
+    #[cfg(not(feature = "kafka-client"))]
     #[tokio::test]
     async fn stub_open_creates_state_without_client() {
         let plugin = KafkaPlugin::new();
@@ -795,6 +810,7 @@ mod tests {
         assert_eq!(s["dropped_no_client"], serde_json::json!(0));
     }
 
+    #[cfg(not(feature = "kafka-client"))]
     #[tokio::test]
     async fn stub_on_group_data_discards_without_enqueuing() {
         let plugin = KafkaPlugin::new();
@@ -812,6 +828,7 @@ mod tests {
         assert_eq!(status["queue_len"], serde_json::json!(0));
     }
 
+    #[cfg(not(feature = "kafka-client"))]
     #[tokio::test]
     async fn stub_multiple_on_group_data_counts_correctly() {
         let plugin = KafkaPlugin::new();
@@ -945,5 +962,86 @@ mod tests {
 
         let result = plugin.on_group_data(node_id, make_group_data()).await;
         assert!(result.is_ok()); // 不报错，只是跳过
+    }
+
+    // ---- 回归测试（docs/联调记录-2026-10-07.md §5.1 缺陷①：北向 worker 引导死锁）----
+
+    /// 回归测试（缺陷①，stub 模式）：记录到达 sink 判定点必须计 dropped_no_client，
+    /// 绝不允许滞留/堆积进离线队列（缺陷①下未连接的记录只进队列、queue_len 持续增长）。
+    #[cfg(not(feature = "kafka-client"))]
+    #[tokio::test]
+    async fn stub_record_reaches_sink_without_queue_growth() {
+        let plugin = KafkaPlugin::new();
+        let node_id = make_node_id();
+        plugin
+            .open(node_id, make_config(std::collections::HashMap::new()))
+            .await
+            .unwrap();
+
+        // 首条记录（缺陷①场景：connected=false 时记录只进离线队列、永不投递）
+        plugin
+            .on_group_data(node_id, make_group_data())
+            .await
+            .unwrap();
+
+        let status = plugin.connection_status(node_id).await.unwrap();
+        assert_eq!(
+            status["dropped_no_client"],
+            serde_json::json!(1),
+            "record must reach the sink decision point and be counted"
+        );
+        assert_eq!(
+            status["queue_len"],
+            serde_json::json!(0),
+            "no record may pile into the offline queue"
+        );
+        assert_eq!(status["connected"], serde_json::json!(false));
+    }
+
+    /// 回归测试（缺陷①核心，需 `--features kafka-client`）：
+    /// broker 不可达时，记录必须到达 worker 的投递路径（delivery 超时后计 dropped_delivery），
+    /// 而不是滞留在离线队列——缺陷①下 queue_len==1 且 dropped_delivery 永远为 0、永不投递。
+    #[cfg(feature = "kafka-client")]
+    #[tokio::test]
+    async fn kafka_client_record_reaches_delivery_path_not_offline_queue() {
+        let plugin = KafkaPlugin::new();
+        let node_id = make_node_id();
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert("brokers", serde_json::json!("127.0.0.1:1")); // 不可达端口
+        overrides.insert("message_timeout_ms", serde_json::json!(1500)); // 1.5s 后 delivery 失败
+        plugin.open(node_id, make_config(overrides)).await.unwrap();
+
+        let status = plugin.connection_status(node_id).await.unwrap();
+        assert_eq!(status["connected"], serde_json::json!(false));
+
+        plugin
+            .on_group_data(node_id, make_group_data())
+            .await
+            .unwrap();
+
+        // 记录必须到达 worker 的投递路径：delivery 失败后被计数（而非困在离线队列）
+        let mut attempted = false;
+        for _ in 0..100 {
+            let st = plugin.connection_status(node_id).await.unwrap();
+            if st["dropped_delivery"].as_u64().unwrap_or(0) >= 1 {
+                attempted = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            attempted,
+            "record must reach the worker delivery path (dropped_delivery counted after timeout)"
+        );
+
+        let st = plugin.connection_status(node_id).await.unwrap();
+        assert_eq!(
+            st["queue_len"],
+            serde_json::json!(0),
+            "record must not pile into the offline queue"
+        );
+        assert_eq!(st["connected"], serde_json::json!(false));
+
+        plugin.close(node_id).await.unwrap();
     }
 }

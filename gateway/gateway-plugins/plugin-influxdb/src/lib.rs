@@ -4,7 +4,7 @@
 mod ffi;
 
 use gateway_plugin_common::config::{
-    config_bool, config_str, config_u64, config_usize, queue_path_for_node,
+    config_bool, config_str, config_u64, config_usize, default_cache_dir, queue_path_for_node,
     DEFAULT_CACHE_MEMORY_SIZE, DEFAULT_CACHE_SYNC_INTERVAL_MS,
 };
 use gateway_plugin_common::http::{HttpClass, HttpClass as CommonHttpClass};
@@ -116,7 +116,12 @@ impl NorthPlugin for InfluxDbPlugin {
             DEFAULT_CACHE_SYNC_INTERVAL_MS,
         );
         let cache_persist = config_bool(&config, "cache_persist", true);
-        let cache_dir = config_str(&config, "cache_dir", DEFAULT_CACHE_DIR_INFLUXDB);
+        // 缺省目录：优先 <GATEWAY_DATA_DIR>/influxdb-queue，未设置该环境变量时保持原默认（CWD 相对）
+        let cache_dir = config_str(
+            &config,
+            "cache_dir",
+            &default_cache_dir("influxdb-queue", DEFAULT_CACHE_DIR_INFLUXDB),
+        );
         let insecure_skip_verify = config_bool(&config, "insecure_skip_verify", false);
         let ca_file = config_str(&config, "ca_file", "");
 
@@ -403,23 +408,22 @@ impl NorthPlugin for InfluxDbPlugin {
 
         #[cfg(feature = "http-client")]
         {
-            let (connected, tx_opt) = {
-                let cs = node_state.connection_status.read().await;
-                (cs.connected, node_state.tx.clone())
-            };
+            // 缺陷①修复（worker 引导死锁）：无论 connected 与否都把记录交给 worker，
+            // 由 worker 统一负责发送/入队/重试。旧逻辑在 !connected 时直接入队，
+            // 而 worker 的记录唯一来源是 mpsc 通道、connected 又只能由「发送成功」置位
+            // → 通道永远空、首条消息永远发不出。
             let payload_bytes = line.into_bytes();
-            if !connected {
-                enqueue(node_state, payload_bytes).await;
-                return Ok(());
-            }
-            if let Some(tx) = tx_opt {
+            if let Some(tx) = node_state.tx.clone() {
                 let rec = Record {
                     topic: String::new(),
                     payload: payload_bytes.clone(),
                 };
                 if tx.try_send(rec).is_err() {
+                    // 通道满：进离线队列（保序）
                     enqueue(node_state, payload_bytes).await;
                 }
+            } else {
+                enqueue(node_state, payload_bytes).await;
             }
         }
 
@@ -488,7 +492,10 @@ async fn run_influxdb_worker(
     let batch_interval = Duration::from_millis(batch_interval_ms);
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(30);
-    let mut healthy = true;
+    // 缺陷①修复：初始即武装补发分支（healthy=false）——
+    // worker 启动时就会尝试投递离线队列（含磁盘恢复的记录），而不是等「第一条发送成功」；
+    // 之后 healthy 由「离线队列是否清空」维护：非空则保持重试，清空即解除。
+    let mut healthy = false;
     // 攒批 buffer
     let mut batch = Vec::with_capacity(batch_max_lines);
 
@@ -503,25 +510,36 @@ async fn run_influxdb_worker(
                     Some(record) => {
                         batch.push(record);
                         if batch.len() >= batch_max_lines || batch_interval == Duration::ZERO {
-                            let body = join_payloads(batch.drain(..).map(|r| r.payload).collect());
+                            let records: Vec<Record> = std::mem::take(&mut batch);
+                            let body = join_payloads(records.iter().map(|r| r.payload.clone()).collect());
                             let class = send_lines(&client, &url, &org, &bucket, &token, &precision, body).await;
-                            handle_class(class, &connection_status, interval, &mut healthy, &mut backoff, max_backoff).await;
+                            handle_class(class, &connection_status, &mut backoff).await;
+                            settle_batch(&queue, class, records, &mut healthy).await;
                         }
                     }
                     None => break,
                 }
             }
             _ = tokio::time::sleep(batch_interval), if !batch.is_empty() && batch_interval > Duration::ZERO => {
-                let body = join_payloads(batch.drain(..).map(|r| r.payload).collect());
+                let records: Vec<Record> = std::mem::take(&mut batch);
+                let body = join_payloads(records.iter().map(|r| r.payload.clone()).collect());
                 let class = send_lines(&client, &url, &org, &bucket, &token, &precision, body).await;
-                handle_class(class, &connection_status, interval, &mut healthy, &mut backoff, max_backoff).await;
+                handle_class(class, &connection_status, &mut backoff).await;
+                settle_batch(&queue, class, records, &mut healthy).await;
             }
             _ = tokio::time::sleep(backoff), if !healthy => {
                 let restored = replenish_queue(&queue, &client, &url, &org, &bucket, &token, &precision, interval).await;
-                if restored > 0 {
+                let empty = queue.lock().await.is_empty();
+                if empty {
+                    if restored > 0 {
+                        // 补发成功即证明服务可达：connected 语义必须真实反映这一点
+                        let mut cs = connection_status.write().await;
+                        cs.connected = true;
+                        cs.last_error = None;
+                        log::info(node_id, format!("influxdb offline queue flushed {} record(s)", restored));
+                    }
                     healthy = true;
                     backoff = Duration::from_secs(1);
-                    log::info(node_id, format!("influxdb offline queue flushed {} record(s)", restored));
                 } else {
                     backoff = (backoff * 2).min(max_backoff);
                 }
@@ -533,21 +551,16 @@ async fn run_influxdb_worker(
 async fn handle_class(
     class: HttpClass,
     connection_status: &Arc<RwLock<InfluxDbConnectionStatus>>,
-    _interval: Duration,
-    healthy: &mut bool,
     backoff: &mut Duration,
-    _max_backoff: Duration,
 ) {
     match class {
         CommonHttpClass::Delivered => {
-            *healthy = true;
             *backoff = Duration::from_secs(1);
             let mut cs = connection_status.write().await;
             cs.connected = true;
             cs.last_error = None;
         }
         CommonHttpClass::Retryable => {
-            *healthy = false;
             *backoff = Duration::from_secs(1);
             let mut cs = connection_status.write().await;
             cs.connected = false;
@@ -557,6 +570,24 @@ async fn handle_class(
             cs.dropped_rejected += 1;
         }
     }
+}
+
+/// 批量发送结果落地（缺陷①修复：发送失败可靠入队）。
+/// Retryable 时整批按序回灌离线队列，等待补发分支重试；
+/// healthy 由「离线队列是否清空」决定——非空则保持补发分支武装（即使本次发送成功）。
+async fn settle_batch(
+    queue: &Arc<tokio::sync::Mutex<OfflineQueue>>,
+    class: CommonHttpClass,
+    records: Vec<Record>,
+    healthy: &mut bool,
+) {
+    let mut q = queue.lock().await;
+    if matches!(class, CommonHttpClass::Retryable) {
+        for r in records {
+            q.push(r);
+        }
+    }
+    *healthy = q.is_empty();
 }
 
 async fn send_lines(
@@ -786,8 +817,8 @@ fn config_schema() -> gateway_sdk::ConfigSchema {
         .param(ParamSchema {
             name: "cache_dir".to_string(), name_zh: Some("离线队列目录".to_string()), name_en: Some("Offline Queue Directory".to_string()),
             description: Some("Directory for per-node offline queue files.".to_string()),
-            description_zh: Some(format!("每个节点一个文件，默认 {}", DEFAULT_CACHE_DIR_INFLUXDB).to_string()),
-            description_en: Some("Directory for per-node offline queue files.".to_string()),
+            description_zh: Some(format!("每个节点一个文件，默认 {}（未显式配置时优先取 GATEWAY_DATA_DIR 环境变量，即 <GATEWAY_DATA_DIR>/influxdb-queue）", DEFAULT_CACHE_DIR_INFLUXDB).to_string()),
+            description_en: Some("Directory for per-node offline queue files. Defaults to <GATEWAY_DATA_DIR>/influxdb-queue when the env var is set, otherwise the built-in default.".to_string()),
             attribute: ParamAttribute::Optional, ty: ParamType::String,
             default: Some(serde_json::json!(DEFAULT_CACHE_DIR_INFLUXDB)), valid: None,
             ..Default::default()
@@ -1163,5 +1194,286 @@ mod tests {
         ));
         assert_eq!(class, gateway_plugin_common::http::HttpClass::Retryable);
         handle.join().unwrap();
+    }
+
+    // ---------------------------------------------------------------------------
+    // 回归测试（docs/联调记录-2026-10-07.md §5.1 缺陷①：北向 worker 引导死锁）
+    //
+    // 缺陷①下：on_group_data 在 !connected 时直接入队且从不唤醒 worker，
+    // InfluxDB 查询 0 点、queue_len 持续增长。以下测试用本地 TCP 服务端验证：
+    // 首条数据真实写出、发送失败可靠入队、服务恢复后补发。
+    // ---------------------------------------------------------------------------
+
+    fn make_node_id() -> NodeId {
+        NodeId(uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap())
+    }
+
+    fn make_group_id() -> gateway_sdk::GroupId {
+        gateway_sdk::GroupId(uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap())
+    }
+
+    fn make_group_data() -> Arc<GroupData> {
+        use gateway_sdk::types::{DataValue, TagId};
+        let node_id = make_node_id();
+        let group_id = make_group_id();
+        let ts = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2024, 1, 1, 0, 0, 0).unwrap();
+        let mut tag_names = std::collections::HashMap::new();
+        tag_names.insert(
+            TagId(uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap()),
+            "temperature".to_string(),
+        );
+        Arc::new(GroupData {
+            node_id,
+            group_id,
+            ts,
+            values: vec![(
+                TagId(uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap()),
+                DataValue::Float64(25.6),
+            )],
+            node_name: Some("sensor-01".to_string()),
+            group_name: Some("env".to_string()),
+            tag_names: Some(tag_names),
+        })
+    }
+
+    fn influx_config(
+        url: &str,
+        overrides: std::collections::HashMap<&str, serde_json::Value>,
+    ) -> PluginConfig {
+        let mut cfg: PluginConfig = std::collections::HashMap::new();
+        cfg.insert("url".to_string(), serde_json::json!(url));
+        cfg.insert("org".to_string(), serde_json::json!("itest"));
+        cfg.insert("bucket".to_string(), serde_json::json!("gateway"));
+        cfg.insert("token".to_string(), serde_json::json!("0123456789abcdef"));
+        cfg.insert(
+            "measurement_template".to_string(),
+            serde_json::json!("${node_name}"),
+        );
+        // 单条立即发送，保证测试时序确定
+        cfg.insert("batch_max_lines".to_string(), serde_json::json!(1));
+        cfg.insert("cache_persist".to_string(), serde_json::json!(false));
+        cfg.insert("cache_sync_interval_ms".to_string(), serde_json::json!(50));
+        for (k, v) in overrides {
+            cfg.insert(k.to_string(), v);
+        }
+        cfg
+    }
+
+    fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    /// 读完一个 HTTP 请求（头 + Content-Length body），返回原文
+    fn read_request(stream: &mut std::net::TcpStream) -> std::io::Result<String> {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 1024];
+        let header_end = loop {
+            let n = stream.read(&mut chunk)?;
+            if n == 0 {
+                break buf.len();
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if let Some(pos) = find_subsequence(&buf, b"\r\n\r\n") {
+                break pos + 4;
+            }
+        };
+        let head = String::from_utf8_lossy(&buf[..header_end.min(buf.len())]).to_string();
+        let content_length = head
+            .to_ascii_lowercase()
+            .lines()
+            .find_map(|l| {
+                l.strip_prefix("content-length:")
+                    .map(|v| v.trim().to_string())
+            })
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0);
+        while buf.len() < header_end + content_length {
+            let n = stream.read(&mut chunk)?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        Ok(String::from_utf8_lossy(&buf).to_string())
+    }
+
+    fn split_request(req: &str) -> (String, String) {
+        let header_end = req.find("\r\n\r\n").unwrap_or(req.len());
+        let head = &req[..header_end];
+        let path = head
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or_default()
+            .to_string();
+        let body = req[header_end..].trim_start_matches("\r\n\r\n").to_string();
+        (path, body)
+    }
+
+    /// 极简 HTTP 服务端：串行 accept，全部应答 204（Connection: close 防止连接复用），
+    /// 每个请求以 (路径, body) 推入 channel。
+    fn spawn_line_server(
+        listener: std::net::TcpListener,
+    ) -> std::sync::mpsc::Receiver<(String, String)> {
+        use std::io::Write;
+        let (tx, rx) = std::sync::mpsc::channel::<(String, String)>();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let Ok(req) = read_request(&mut stream) else {
+                    continue;
+                };
+                let resp =
+                    "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+                let (path, body) = split_request(&req);
+                if tx.send((path, body)).is_err() {
+                    break;
+                }
+            }
+        });
+        rx
+    }
+
+    async fn wait_for_status<F: Fn(&serde_json::Value) -> bool>(
+        plugin: &InfluxDbPlugin,
+        node_id: NodeId,
+        pred: F,
+        timeout: std::time::Duration,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while tokio::time::Instant::now() < deadline {
+            if let Some(st) = plugin.connection_status(node_id).await {
+                if pred(&st) {
+                    return true;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        false
+    }
+
+    /// 回归测试（缺陷①核心）：节点启动后第一条数据必须真实写到服务端。
+    /// 缺陷①下 InfluxDB 0 点、queue_len 持续增长，本测试会在此失败。
+    #[tokio::test]
+    async fn first_record_reaches_real_server_and_sets_connected() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let rx = spawn_line_server(listener);
+
+        let plugin = InfluxDbPlugin::new();
+        let node_id = make_node_id();
+        plugin
+            .open(
+                node_id,
+                influx_config(&format!("http://{addr}"), Default::default()),
+            )
+            .await
+            .unwrap();
+
+        // 无连接层反馈（reqwest 无连接回调），connected 由首条成功写入置位，初始为 false
+        let st = plugin.connection_status(node_id).await.unwrap();
+        assert_eq!(st["connected"], serde_json::json!(false));
+
+        plugin
+            .on_group_data(node_id, make_group_data())
+            .await
+            .unwrap();
+
+        // 首条行协议必须真实到达服务端
+        let (path, body) = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("first record must be delivered to the real server (defect ① regression)");
+        assert!(
+            path.starts_with("/api/v2/write?"),
+            "unexpected path: {}",
+            path
+        );
+        assert!(path.contains("org=itest") && path.contains("bucket=gateway"));
+        assert!(
+            body.contains("sensor-01") && body.contains("temperature=25.6"),
+            "line protocol should carry measurement/tags/fields: {}",
+            body
+        );
+
+        // 首条成功写入后 connected 置位、队列不积压
+        assert!(
+            wait_for_status(
+                &plugin,
+                node_id,
+                |st| st["connected"] == serde_json::json!(true),
+                std::time::Duration::from_secs(5)
+            )
+            .await,
+            "connected should become true after first successful delivery"
+        );
+        let st = plugin.connection_status(node_id).await.unwrap();
+        assert_eq!(
+            st["queue_len"],
+            serde_json::json!(0),
+            "no backlog after delivery"
+        );
+
+        plugin.close(node_id).await.unwrap();
+    }
+
+    /// 发送失败（服务不可用）必须可靠入队；服务恢复后由补发分支按序清空离线队列
+    #[tokio::test]
+    async fn failed_send_is_enqueued_and_replayed_after_recovery() {
+        use std::net::TcpListener;
+
+        // 先占端口再释放：写入端在恢复前连接被拒（Retryable）
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let plugin = InfluxDbPlugin::new();
+        let node_id = make_node_id();
+        plugin
+            .open(
+                node_id,
+                influx_config(&format!("http://{addr}"), Default::default()),
+            )
+            .await
+            .unwrap();
+
+        plugin
+            .on_group_data(node_id, make_group_data())
+            .await
+            .unwrap();
+        assert!(
+            wait_for_status(
+                &plugin,
+                node_id,
+                |st| st["queue_len"] == serde_json::json!(1),
+                std::time::Duration::from_secs(5)
+            )
+            .await,
+            "failed record must be reliably enqueued (queue_len == 1)"
+        );
+
+        // 服务恢复 → 补发分支应清空离线队列并保持 connected
+        let rx = spawn_line_server(TcpListener::bind(addr).unwrap());
+        assert!(
+            wait_for_status(
+                &plugin,
+                node_id,
+                |st| st["queue_len"] == serde_json::json!(0)
+                    && st["connected"] == serde_json::json!(true),
+                std::time::Duration::from_secs(10)
+            )
+            .await,
+            "offline queue must be flushed after recovery"
+        );
+        let (path, body) = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("queued record must be replayed to the server");
+        assert!(path.starts_with("/api/v2/write?"));
+        assert!(body.contains("temperature=25.6"));
+
+        plugin.close(node_id).await.unwrap();
     }
 }
