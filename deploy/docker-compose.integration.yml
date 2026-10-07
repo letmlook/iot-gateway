@@ -1,0 +1,94 @@
+# 北向插件真机联调被测服务（仅供 docs/联调记录-2026-10-07.md 的联调流程使用）
+#
+#   docker compose -f deploy/docker-compose.integration.yml up -d
+#
+# 设计约束：
+# - 只含被测服务，不含网关（网关用 cargo build --release 产物原生运行）；
+# - 主机端口全部避开 docker-compose.yml（3000/1883/9090），见下表；
+# - 不定义 volumes，联调数据即用即弃（复核时重建即可）。
+#
+# 端口表（主机 → 容器）：
+#   mosquitto        18830 → 1883   (MQTT)
+#   wiremock         18831 → 8080   (HTTP echo，请求 Journal 可查收到的报文)
+#   influxdb         18832 → 8086   (InfluxDB v2，/api/v2/write)
+#   tdengine         16030 → 6030   (taosd)
+#   tdengine         16041 → 6041   (taosAdapter REST / SQL / influxdb 兼容写)
+#   kafka            19092 → 9092   (KRaft 单节点；对外 advertised localhost:19092)
+#                    29092 为容器内部 listener（容器内 CLI 消费用），不映射主机
+
+name: iotgw-itest
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: iotgw-itest-mosquitto
+    restart: unless-stopped
+    ports:
+      - "18830:1883"
+    command: ["mosquitto", "-c", "/mosquitto-no-auth.conf"]
+
+  # HTTP echo：Wiremock 记录每个请求（含 body），可经 GET /__admin/rooms 之外
+  # 的 /__admin/requests 查询，作为「POST 真实到达」的服务侧证据。
+  http-echo:
+    # Docker Hub 上 wiremock/wiremock 无 "3" 大版本 tag（docker pull 验证 not found），用 latest
+    image: wiremock/wiremock:latest
+    container_name: iotgw-itest-http-echo
+    restart: unless-stopped
+    ports:
+      - "18831:8080"
+    # 默认开启请求 Journal（含请求体），无需额外参数
+
+  influxdb:
+    image: influxdb:2
+    container_name: iotgw-itest-influxdb
+    restart: unless-stopped
+    ports:
+      - "18832:8086"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: itest-admin-passwd
+      DOCKER_INFLUXDB_INIT_ORG: itest
+      DOCKER_INFLUXDB_INIT_BUCKET: gateway
+      # 自定义 token 需 ≥64 字符；联调固定值，便于网关节点配置与复核复现
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+  tdengine:
+    image: tdengine/tdengine:3.3.2.0
+    container_name: iotgw-itest-tdengine
+    restart: unless-stopped
+    ports:
+      - "16030:6030"
+      - "16041:6041"
+
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: iotgw-itest-kafka
+    restart: unless-stopped
+    ports:
+      - "19092:9092"
+    environment:
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,INTERNAL://:29092,CONTROLLER://:9093"
+      # 主机上的网关连 localhost:19092；容器内 CLI 消费连 localhost:29092
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://localhost:19092,INTERNAL://kafka:29092"
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+  # 南向 modbus-tcp 插件联调对象：Modbus TCP 从站模拟器（保持寄存器可写）
+  # 镜像用法见 https://hub.docker.com/r/oitc/modbus-server
+  modbus-server:
+    image: oitc/modbus-server:latest
+    container_name: iotgw-itest-modbus-server
+    restart: unless-stopped
+    ports:
+      - "15020:5020"
