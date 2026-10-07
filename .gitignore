@@ -7,6 +7,9 @@
 /plugins/*.dll
 
 # Runtime data
+# /data/ 整目录不入库：队列/持久化文件由运行中的网关实例持续追加
+# （曾因只忽略 /data/*.db 等顶层模式，导致 *.queue 子目录被误提交并反复膨胀）
+/data/
 /data/*.db
 /data/*.db.bak
 /data/*.json
