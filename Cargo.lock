@@ -900,6 +900,7 @@ dependencies = [
  "plugin-http",
  "plugin-iec104",
  "plugin-influxdb",
+ "plugin-kafka",
  "plugin-modbus-rtu",
  "plugin-modbus-tcp",
  "plugin-mqtt",
@@ -2048,8 +2049,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "gateway-core",
  "gateway-plugin-common",
  "gateway-sdk",
+ "libloading",
  "rdkafka",
  "serde",
  "serde_json",

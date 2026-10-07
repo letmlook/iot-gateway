@@ -16,6 +16,11 @@ path = "src/main.rs"
 name = "export-openapi"
 path = "src/bin/export-openapi.rs"
 
+# 透传：启用后 builtin 注册的 kafka 由 stub 升级为完整 rdkafka 生产者客户端
+# （缺陷④：默认构建注册 stub，schema 明确标注；rdkafka 为重 C 库，不进默认 feature）
+[features]
+kafka-client = ["plugin-kafka/kafka-client"]
+
 [dependencies]
 gateway-sdk = { path = "../gateway-sdk" }
 gateway-core = { path = "../gateway-core" }
@@ -24,6 +29,7 @@ plugin-mqtt = { path = "../gateway-plugins/plugin-mqtt" }
 plugin-http = { path = "../gateway-plugins/plugin-http" }
 plugin-influxdb = { path = "../gateway-plugins/plugin-influxdb" }
 plugin-tdengine = { path = "../gateway-plugins/plugin-tdengine" }
+plugin-kafka = { path = "../gateway-plugins/plugin-kafka" }
 plugin-modbus-tcp = { path = "../gateway-plugins/plugin-modbus-tcp" }
 plugin-modbus-rtu = { path = "../gateway-plugins/plugin-modbus-rtu" }
 plugin-s7 = { path = "../gateway-plugins/plugin-s7" }

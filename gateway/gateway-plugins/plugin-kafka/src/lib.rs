@@ -60,12 +60,17 @@ struct KafkaConnectionStatus {
     dropped_rejected: u64,
     dropped_no_client: u64,
     dropped_delivery: u64,
+    /// 最近一次 on_group_data 实际渲染出的 topic（诊断/测试用：证明节点配置的
+    /// topic_template 在数据路径生效，而不是落在硬编码模板上）
+    last_topic: Option<String>,
 }
 
-/// 每节点状态（kafka-client 开启时）
+/// 每节点状态（stub 与 kafka-client 两种构建都用）
 struct NodeKafkaState {
     queue: Arc<tokio::sync::Mutex<OfflineQueue>>,
     connection_status: Arc<RwLock<KafkaConnectionStatus>>,
+    /// 本节点生效的 topic 模板（节点配置 topic_template，缺省 DEFAULT_TOPIC_TEMPLATE）
+    topic_template: String,
     #[cfg(feature = "kafka-client")]
     tx: Option<mpsc::Sender<Record>>,
     #[cfg(feature = "kafka-client")]
@@ -128,7 +133,7 @@ impl NorthPlugin for KafkaPlugin {
                 "brokers is required",
             ));
         }
-        let _topic_template = config_str(&config, "topic_template", DEFAULT_TOPIC_TEMPLATE);
+        let topic_template = config_str(&config, "topic_template", DEFAULT_TOPIC_TEMPLATE);
         let _message_timeout_ms =
             config_u64(&config, "message_timeout_ms", DEFAULT_MESSAGE_TIMEOUT_MS);
         let _stats_interval_ms =
@@ -195,6 +200,7 @@ impl NorthPlugin for KafkaPlugin {
             dropped_rejected: 0,
             dropped_no_client: 0,
             dropped_delivery: 0,
+            last_topic: None,
         }));
 
         #[cfg(feature = "kafka-client")]
@@ -206,7 +212,7 @@ impl NorthPlugin for KafkaPlugin {
             let conn_status_clone = connection_status.clone();
             let node_id_worker = node_id;
             let brokers_worker = brokers.clone();
-            let topic_template_worker = _topic_template.clone();
+            let topic_template_worker = topic_template.clone();
             let message_timeout_ms_worker = _message_timeout_ms;
             let stats_interval_ms_worker = _stats_interval_ms;
             let extra_config_json_worker = extra_config_json.clone();
@@ -237,6 +243,7 @@ impl NorthPlugin for KafkaPlugin {
                 NodeKafkaState {
                     queue,
                     connection_status,
+                    topic_template,
                     tx: Some(record_tx),
                     cancel_tx: Some(cancel_tx),
                     event_loop_handle: Some(handle),
@@ -252,6 +259,7 @@ impl NorthPlugin for KafkaPlugin {
                 NodeKafkaState {
                     queue,
                     connection_status,
+                    topic_template,
                 },
             );
         }
@@ -337,6 +345,7 @@ impl NorthPlugin for KafkaPlugin {
         Some(serde_json::json!({
             "connected": st.connected,
             "last_error": st.last_error,
+            "last_topic": st.last_topic,
             "queue_len": q.queued,
             "queue_dropped_overflow": q.dropped_overflow,
             "queue_recovered": q.recovered,
@@ -355,8 +364,10 @@ impl NorthPlugin for KafkaPlugin {
             return Ok(());
         };
 
+        // 主题必须来自节点配置的 topic_template（open 时已存入节点状态，缺省
+        // DEFAULT_TOPIC_TEMPLATE 向后兼容）——此前硬编码，配置不生效（联调记录 §5 其他）
         let topic = topic_from_template(
-            "gateway/data/${node_id}/${group_id}",
+            &node_state.topic_template,
             data.node_id,
             data.group_id,
             data.node_name.as_deref(),
@@ -364,6 +375,12 @@ impl NorthPlugin for KafkaPlugin {
             data.ts,
         );
         let payload = payload_for_format(&data, DEFAULT_UPLOAD_FORMAT);
+
+        // 实际渲染的 topic 透出到 connection_status.last_topic：可观测、可测试
+        {
+            let mut cs = node_state.connection_status.write().await;
+            cs.last_topic = Some(topic.clone());
+        }
 
         #[cfg(feature = "kafka-client")]
         {
@@ -387,10 +404,10 @@ impl NorthPlugin for KafkaPlugin {
 
         #[cfg(not(feature = "kafka-client"))]
         {
-            let _ = (topic, payload);
+            let _ = payload;
             let mut cs = node_state.connection_status.write().await;
             cs.dropped_no_client += 1;
-            tracing::info!(node_id = ?node_id, "kafka (no client): would produce");
+            tracing::info!(node_id = ?node_id, topic = %topic, "kafka (no client): would produce");
         }
 
         Ok(())
@@ -577,14 +594,37 @@ fn config_schema() -> gateway_sdk::ConfigSchema {
     use gateway_sdk::schema::{ParamAttribute, ParamOption, ParamSchema, ParamType, ParamValid};
     use gateway_sdk::ConfigSchema;
 
+    // 缺陷④（docs/联调记录-2026-10-07.md §5.4）：默认构建（未编 kafka-client）注册的是
+    // stub 模式——schema 必须明确标注，否则用户会以为数据真的发到了 Kafka（静默丢数据）。
+    // 标注挂在首个（必填）参数 brokers 的描述上，前端配置表单必然可见。
+    let brokers_desc = "Kafka bootstrap servers, comma-separated host:port".to_string();
+    let brokers_desc_zh = "Kafka bootstrap servers，逗号分隔的 host:port".to_string();
+    let brokers_desc_en = "Kafka bootstrap servers, comma-separated host:port".to_string();
+    #[cfg(not(feature = "kafka-client"))]
+    let brokers_desc = format!(
+        "[STUB] 当前构建为 stub，需 kafka-client feature 才真实发送：本构建可创建节点、\
+         connection_status 可观测（dropped_no_client 计数），但不会真实发送到 Kafka。{brokers_desc}"
+    );
+    #[cfg(not(feature = "kafka-client"))]
+    let brokers_desc_zh = format!(
+        "[STUB] 当前构建为 stub，需 kafka-client feature 才真实发送：本构建可创建节点、\
+         connection_status 可观测（dropped_no_client 计数），但不会真实发送到 Kafka。{brokers_desc_zh}"
+    );
+    #[cfg(not(feature = "kafka-client"))]
+    let brokers_desc_en = format!(
+        "[STUB] This build is a stub; the kafka-client feature is required for real delivery. \
+         Nodes can be created and observed via connection_status (dropped_no_client counter), \
+         but nothing is actually sent to Kafka. {brokers_desc_en}"
+    );
+
     ConfigSchema::new()
         .param(ParamSchema {
             name: "brokers".to_string(),
             name_zh: Some("Broker 地址".to_string()),
             name_en: Some("Brokers".to_string()),
-            description: Some("Kafka bootstrap servers, comma-separated host:port".to_string()),
-            description_zh: Some("Kafka bootstrap servers，逗号分隔的 host:port".to_string()),
-            description_en: Some("Kafka bootstrap servers, comma-separated host:port".to_string()),
+            description: Some(brokers_desc),
+            description_zh: Some(brokers_desc_zh),
+            description_en: Some(brokers_desc_en),
             attribute: ParamAttribute::Required,
             ty: ParamType::String,
             default: Some(serde_json::json!(DEFAULT_BROKERS)),
@@ -850,6 +890,107 @@ mod tests {
         assert_eq!(status["queue_len"], serde_json::json!(0));
     }
 
+    // ---- topic_template 生效测试（联调记录 §5 其他：on_group_data 曾硬编码主题模板）----
+
+    /// 节点配置的 topic_template 必须存入节点状态并覆盖默认模板
+    #[tokio::test]
+    async fn open_stores_configured_topic_template_on_node_state() {
+        let plugin = KafkaPlugin::new();
+        let node_id = make_node_id();
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "topic_template",
+            serde_json::json!("custom/${node_name}/${group_name}"),
+        );
+        plugin.open(node_id, make_config(overrides)).await.unwrap();
+
+        let state = plugin.state.read().await;
+        let node_state = state.nodes.get(&node_id).unwrap();
+        assert_eq!(
+            node_state.topic_template, "custom/${node_name}/${group_name}",
+            "open must persist the node-configured topic_template"
+        );
+    }
+
+    /// 缺省值保持现值（向后兼容）：未配置 topic_template 时用 DEFAULT_TOPIC_TEMPLATE
+    #[cfg(not(feature = "kafka-client"))]
+    #[tokio::test]
+    async fn stub_on_group_data_uses_configured_topic_template() {
+        let plugin = KafkaPlugin::new();
+        let node_id = make_node_id();
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "topic_template",
+            serde_json::json!("custom/${node_name}/${group_name}"),
+        );
+        plugin.open(node_id, make_config(overrides)).await.unwrap();
+
+        plugin
+            .on_group_data(node_id, make_group_data())
+            .await
+            .unwrap();
+
+        let status = plugin.connection_status(node_id).await.unwrap();
+        assert_eq!(
+            status["last_topic"],
+            serde_json::json!("custom/sensor-01/env-data"),
+            "on_group_data must render the topic from the node-configured template"
+        );
+    }
+
+    /// 未配置时缺省模板生效（${node_id} 在节点名可用时渲染为节点名，与 mqtt 同一实现）
+    #[cfg(not(feature = "kafka-client"))]
+    #[tokio::test]
+    async fn stub_on_group_data_falls_back_to_default_topic_template() {
+        let plugin = KafkaPlugin::new();
+        let node_id = make_node_id();
+        let mut config = make_config(std::collections::HashMap::new());
+        config.remove("topic_template");
+        plugin.open(node_id, config).await.unwrap();
+
+        plugin
+            .on_group_data(node_id, make_group_data())
+            .await
+            .unwrap();
+
+        let status = plugin.connection_status(node_id).await.unwrap();
+        assert_eq!(
+            status["last_topic"],
+            serde_json::json!("gateway/data/sensor-01/env-data"),
+            "without an explicit topic_template the default template must render"
+        );
+    }
+
+    /// kafka-client 构建下同样走节点配置模板（last_topic 在交给 worker 前落账）
+    #[cfg(feature = "kafka-client")]
+    #[tokio::test]
+    async fn kafka_client_on_group_data_uses_configured_topic_template() {
+        let plugin = KafkaPlugin::new();
+        let node_id = make_node_id();
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert("brokers", serde_json::json!("127.0.0.1:1"));
+        overrides.insert("message_timeout_ms", serde_json::json!(1500));
+        overrides.insert(
+            "topic_template",
+            serde_json::json!("custom/${node_name}/${group_name}"),
+        );
+        plugin.open(node_id, make_config(overrides)).await.unwrap();
+
+        plugin
+            .on_group_data(node_id, make_group_data())
+            .await
+            .unwrap();
+
+        let status = plugin.connection_status(node_id).await.unwrap();
+        assert_eq!(
+            status["last_topic"],
+            serde_json::json!("custom/sensor-01/env-data"),
+            "the record handed to the worker must carry the configured topic"
+        );
+
+        plugin.close(node_id).await.unwrap();
+    }
+
     // ---- ConfigSchema 测试 ----
 
     #[tokio::test]
@@ -910,6 +1051,44 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    /// 缺陷④（联调记录 §5.4）：默认构建为 stub 模式，config_schema 必须明确标注
+    /// 「当前构建为 stub，需 kafka-client feature 才真实发送」，否则用户无法从
+    /// schema 得知数据不会被真实发送（静默丢数据不可观测）。
+    #[cfg(not(feature = "kafka-client"))]
+    #[test]
+    fn config_schema_marks_stub_build() {
+        let schema = config_schema();
+        let brokers = schema
+            .params
+            .iter()
+            .find(|p| p.name == "brokers")
+            .expect("brokers param must exist");
+        let desc = [
+            brokers.description.as_deref().unwrap_or_default(),
+            brokers.description_zh.as_deref().unwrap_or_default(),
+            brokers.description_en.as_deref().unwrap_or_default(),
+        ]
+        .join("|");
+        assert!(
+            desc.contains("STUB") && desc.contains("kafka-client"),
+            "stub build schema must mark itself clearly, got: {desc}"
+        );
+    }
+
+    /// kafka-client 构建下 schema 不带 STUB 标注（真实客户端不存在降级，标注反而误导）
+    #[cfg(feature = "kafka-client")]
+    #[test]
+    fn config_schema_does_not_mark_stub_when_client_enabled() {
+        let schema = config_schema();
+        let brokers = schema
+            .params
+            .iter()
+            .find(|p| p.name == "brokers")
+            .expect("brokers param must exist");
+        let desc = brokers.description.as_deref().unwrap_or_default();
+        assert!(!desc.contains("STUB"), "got: {desc}");
+    }
+
     // ---- connection_status 键完整性测试 ----
 
     #[tokio::test]
@@ -922,9 +1101,10 @@ mod tests {
             .unwrap();
 
         let status = plugin.connection_status(node_id).await.unwrap();
-        // 与 mqtt 同组的 7 个键 + dropped_rejected + dropped_no_client + dropped_delivery
+        // 与 mqtt 同组的 7 个键 + dropped_rejected + dropped_no_client + dropped_delivery + last_topic
         assert!(status.get("connected").is_some());
         assert!(status.get("last_error").is_some());
+        assert!(status.get("last_topic").is_some());
         assert!(status.get("queue_len").is_some());
         assert!(status.get("queue_dropped_overflow").is_some());
         assert!(status.get("queue_recovered").is_some());

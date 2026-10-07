@@ -45,6 +45,39 @@ fn plugin_host_bin(config: &crate::config::Config) -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from(name))
 }
 
+/// 注册内置静态插件（无 plugins 目录 / 目录为空 / 加载失败时的兜底，也是默认部署形态）。
+fn register_builtin_plugins(mgr: &mut gateway_core::Manager) {
+    // 2026-10-05 批：全部 8 个新插件均已启用 builtin 注册。
+    use plugin_bacnet::BacnetPlugin;
+    use plugin_ethernet_ip::EthernetIpPlugin;
+    use plugin_http::HttpPlugin;
+    use plugin_iec104::Iec104Plugin;
+    use plugin_influxdb::InfluxDbPlugin;
+    use plugin_modbus_rtu::ModbusRtuPlugin;
+    use plugin_modbus_tcp::ModbusTcpPlugin;
+    use plugin_mqtt::MqttPlugin;
+    use plugin_s7::S7Plugin;
+    use plugin_sim::SimPlugin;
+    mgr.register_south("sim", Arc::new(SimPlugin::new()));
+    mgr.register_south("s7", Arc::new(S7Plugin::new()));
+    mgr.register_south("bacnet", Arc::new(BacnetPlugin::new()));
+    mgr.register_south("ethernet-ip", Arc::new(EthernetIpPlugin::new()));
+    mgr.register_south("iec104", Arc::new(Iec104Plugin::new()));
+    mgr.register_south("modbus-tcp", Arc::new(ModbusTcpPlugin::new()));
+    mgr.register_south("modbus-rtu", Arc::new(ModbusRtuPlugin::new()));
+    // 北向
+    mgr.register_north("mqtt", Arc::new(MqttPlugin::new()));
+    mgr.register_north("http", Arc::new(HttpPlugin::new()));
+    mgr.register_north("influxdb", Arc::new(InfluxDbPlugin::new()));
+    mgr.register_north("tdengine", Arc::new(plugin_tdengine::TdEnginePlugin::new()));
+    // 缺陷④（docs/联调记录-2026-10-07.md §5.4）：kafka 纳入 builtin——默认构建
+    // （无 kafka-client feature）注册的是 stub 模式：节点可创建、connection_status
+    // 可观测（dropped_no_client 计数），config_schema 明确标注「当前构建为 stub，
+    // 需 kafka-client feature 才真实发送」。kafka-client 不进默认 feature（rdkafka
+    // 为重 C 库）；以 `--features kafka-client` 构建时这里注册的就是完整生产者客户端。
+    mgr.register_north("kafka", Arc::new(plugin_kafka::KafkaPlugin::new()));
+}
+
 #[tokio::main]
 
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -58,36 +91,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut mgr = Manager::with_limits(config.bus_capacity, config.max_concurrent_polls);
     let mut loader_opt: Option<PluginLoader> = None;
 
-    // 从 plugins_dir 加载动态库插件（Windows: .dll，Unix: .so）；若无目录或加载后无插件则使用内置
-    fn register_builtin_plugins(mgr: &mut gateway_core::Manager) {
-        // 2026-10-05 批：全部 8 个新插件均已启用 builtin 注册。
-        use plugin_bacnet::BacnetPlugin;
-        use plugin_ethernet_ip::EthernetIpPlugin;
-        use plugin_http::HttpPlugin;
-        use plugin_iec104::Iec104Plugin;
-        use plugin_influxdb::InfluxDbPlugin;
-        use plugin_modbus_rtu::ModbusRtuPlugin;
-        use plugin_modbus_tcp::ModbusTcpPlugin;
-        use plugin_mqtt::MqttPlugin;
-        use plugin_s7::S7Plugin;
-        use plugin_sim::SimPlugin;
-        mgr.register_south("sim", Arc::new(SimPlugin::new()));
-        mgr.register_south("s7", Arc::new(S7Plugin::new()));
-        mgr.register_south("bacnet", Arc::new(BacnetPlugin::new()));
-        mgr.register_south("ethernet-ip", Arc::new(EthernetIpPlugin::new()));
-        mgr.register_south("iec104", Arc::new(Iec104Plugin::new()));
-        mgr.register_south("modbus-tcp", Arc::new(ModbusTcpPlugin::new()));
-        mgr.register_south("modbus-rtu", Arc::new(ModbusRtuPlugin::new()));
-        // 北向（kafka 不进 builtin：需要 librdkafka C 库，仅 .so 部署）
-        mgr.register_north("mqtt", Arc::new(MqttPlugin::new()));
-        mgr.register_north("http", Arc::new(HttpPlugin::new()));
-        mgr.register_north("influxdb", Arc::new(InfluxDbPlugin::new()));
-        mgr.register_north("tdengine", Arc::new(plugin_tdengine::TdEnginePlugin::new()));
-    }
-
     // 进程隔离模式下持有加载器：重启计数要从它这里读（见 /api/metrics）
     let mut isolated_loader: Option<Arc<ProcessPluginLoader>> = None;
 
+    // 从 plugins_dir 加载动态库插件（Windows: .dll，Unix: .so）；若无目录或加载后无插件则使用内置
     if config.plugins_dir.exists() {
         if config.plugin_isolation.eq_ignore_ascii_case("process") {
             // 进程级隔离：每个插件一个子进程，插件 abort/段错误不会带走网关
@@ -466,4 +473,67 @@ async fn shutdown_signal(state: AppState) {
     // 共享连接上做一次 PRAGMA optimize（幂等、廉价，维护统计信息）
     state.optimize_db().await;
     tracing::info!("gateway stopped");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 缺陷④回归（docs/联调记录-2026-10-07.md §5.4）：
+    /// builtin 必须注册 kafka 北向插件（默认构建为 stub 模式），且注册后即可建节点、
+    /// connection_status 可查（dropped_no_client 可观测）、config_schema 标注构建形态。
+    #[tokio::test]
+    async fn builtin_kafka_registered_and_stub_node_status_observable() {
+        let mut mgr = gateway_core::Manager::new();
+        register_builtin_plugins(&mut mgr);
+
+        let plugin = mgr
+            .north_plugin("kafka")
+            .expect("kafka must be registered as a builtin north plugin");
+        assert_eq!(plugin.meta().name, "kafka");
+
+        // config_schema 必须标注构建形态：stub 构建明确标 STUB，
+        // kafka-client 构建则不得带 STUB（避免误导）
+        let schema = plugin
+            .config_schema()
+            .expect("kafka must expose a config schema");
+        let brokers = schema
+            .params
+            .iter()
+            .find(|p| p.name == "brokers")
+            .expect("brokers param must exist");
+        let desc = [
+            brokers.description.as_deref().unwrap_or_default(),
+            brokers.description_zh.as_deref().unwrap_or_default(),
+            brokers.description_en.as_deref().unwrap_or_default(),
+        ]
+        .join("|");
+        if cfg!(feature = "kafka-client") {
+            assert!(
+                !desc.contains("STUB"),
+                "full-client build schema must not claim STUB, got: {desc}"
+            );
+        } else {
+            assert!(
+                desc.contains("STUB") && desc.contains("kafka-client"),
+                "stub build schema must state \"当前构建为 stub，需 kafka-client feature 才真实发送\", got: {desc}"
+            );
+        }
+
+        // stub 模式：建节点 → connection_status 可查，dropped_no_client 键可观测
+        let node_id = gateway_sdk::NodeId::new();
+        let mut config = gateway_sdk::PluginConfig::new();
+        config.insert("brokers".to_string(), serde_json::json!("localhost:9092"));
+        plugin
+            .open(node_id, config)
+            .await
+            .expect("creating a kafka node must succeed in the default (stub) build");
+        let status = plugin
+            .connection_status(node_id)
+            .await
+            .expect("connection_status must be available after open");
+        assert_eq!(status["connected"], serde_json::json!(false));
+        assert_eq!(status["dropped_no_client"], serde_json::json!(0));
+        plugin.close(node_id).await.expect("close kafka node");
+    }
 }

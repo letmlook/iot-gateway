@@ -29,3 +29,8 @@ chrono = { version = "0.4", features = ["serde"] }
 # cmake-build is REQUIRED on Windows (rdkafka-sys build.rs: non-cmake path is configure/make which doesn't work on Windows)
 # libz-static avoids Windows runtime zlib DLL dependency
 rdkafka = { version = "0.39", default-features = false, features = ["tokio", "cmake-build", "libz-static"], optional = true }
+
+[dev-dependencies]
+# FFI 导出符号存在性测试（tests/ffi_exports.rs）：用真实宿主 loader 验证 cdylib 可被加载注册
+gateway-core = { path = "../../gateway-core" }
+libloading = "0.8"
