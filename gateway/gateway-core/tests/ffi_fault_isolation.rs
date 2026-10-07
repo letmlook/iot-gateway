@@ -14,6 +14,12 @@
 //!
 //! 夹具动态库由 workspace 构建顺带产出（夹具 crate 的 `default` 已包含 `ffi` feature），
 //! 因此 `cargo test --workspace` 可直接运行；单独跑 `-p gateway-core` 时若夹具缺失会给出提示。
+//!
+//! 平台口径（docs/review/优化方案总览-2026-09-26.md §16.4 Q2）：发布与运行目标为 Linux，
+//! 本测试由 Linux CI 覆盖，Windows 开发机跳过——注入的 panic 虽被插件侧按设计捕获，
+//! 但进程在后续加载/卸载夹具阶段仍以 STATUS_ACCESS_VIOLATION（0xC0000005）崩溃。
+
+#![cfg(not(windows))]
 
 use gateway_core::{Manager, PluginLoader};
 use gateway_sdk::types::DataValue;
