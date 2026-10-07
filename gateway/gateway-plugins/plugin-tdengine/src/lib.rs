@@ -202,57 +202,92 @@ impl NorthPlugin for TdEnginePlugin {
         // Basic auth header
         let basic_auth = base64_encode(&format!("{}:{}", username, password));
 
-        // 自动建库（失败只 warn 不阻塞）
+        // 自动建库（失败只 warn 不阻塞，但如实写入 last_error，绝不假报 ensured —— 缺陷②）
+        // taosAdapter（TDengine 3.x）的 /rest/sql 期望**裸 SQL 字符串体**（JSON 信封会被当 SQL
+        // 执行报 code=9728），且响应是 HTTP 200 + JSON `{"code":N,"desc":"..."}`，
+        // code=0 才算成功，SQL 级失败不能只看 HTTP 状态码。
+        let mut create_db_error: Option<String> = None;
         if auto_create_db {
             let db_url = format!("{}{}?db={}", url, TAOS_SQL_PATH, database);
             let create_sql = format!("CREATE DATABASE IF NOT EXISTS {} PRECISION 'ms'", database);
             let req = http_client
                 .post(&db_url)
                 .header("Authorization", format!("Basic {}", basic_auth))
-                .header("Content-Type", "application/json")
-                .body(serde_json::json!({ "sql": create_sql }).to_string());
+                .header("Content-Type", "text/plain; charset=utf-8")
+                .body(create_sql);
             match req.send().await {
                 Ok(resp) => {
                     let status = resp.status().as_u16();
-                    if status == 200 {
-                        log::info(node_id, format!("tdengine database '{}' ensured", database));
-                    } else {
-                        let body = resp.text().await.unwrap_or_default();
-                        log::warn(
-                            node_id,
-                            format!(
-                                "tdengine create database failed (status {}): {}",
-                                status,
-                                &body[..body.len().min(200)]
-                            ),
-                        );
+                    let body = resp.text().await.unwrap_or_default();
+                    match parse_taos_code(&body) {
+                        Some((0, _)) if status == 200 => {
+                            log::info(node_id, format!("tdengine database '{}' ensured", database));
+                        }
+                        Some((code, desc)) => {
+                            let msg = format!(
+                                "tdengine create database failed (HTTP {status}, code={code}): {desc}"
+                            );
+                            log::warn(node_id, msg.clone());
+                            create_db_error = Some(msg);
+                        }
+                        None => {
+                            let msg = format!(
+                                "tdengine create database failed (HTTP {status}): {}",
+                                truncate_for_log(&body, 200)
+                            );
+                            log::warn(node_id, msg.clone());
+                            create_db_error = Some(msg);
+                        }
                     }
                 }
                 Err(e) => {
-                    log::warn(
-                        node_id,
-                        format!(
-                            "tdengine create database request failed (will retry on write): {}",
-                            e
-                        ),
+                    let msg = format!(
+                        "tdengine create database request failed (will retry on write): {e}"
                     );
+                    log::warn(node_id, msg.clone());
+                    create_db_error = Some(msg);
                 }
             }
         }
 
-        // 探活版本
+        // 探活版本（裸 SQL；code=0 才视为成功，SQL 级错误如实告警 —— 缺陷②）
         let version_url = format!("{}{}", url, TAOS_SQL_PATH);
         let req = http_client
             .post(&version_url)
             .header("Authorization", format!("Basic {}", basic_auth))
-            .header("Content-Type", "application/json")
-            .body(r#"{"sql":"SELECT server_version()"}"#.to_string());
+            .header("Content-Type", "text/plain; charset=utf-8")
+            .body("SELECT server_version()".to_string());
         if let Ok(resp) = req.send().await {
-            if resp.status().as_u16() == 200 {
-                if let Ok(body) = resp.text().await {
-                    log::info(node_id, format!("tdengine server_version: {}", body));
+            let status = resp.status().as_u16();
+            if let Ok(body) = resp.text().await {
+                match parse_taos_code(&body) {
+                    Some((0, _)) if status == 200 => {
+                        log::info(node_id, format!("tdengine server_version: {}", body));
+                    }
+                    Some((code, desc)) => {
+                        log::warn(
+                            node_id,
+                            format!(
+                                "tdengine server_version probe failed (HTTP {status}, code={code}): {desc}"
+                            ),
+                        );
+                    }
+                    None => {
+                        log::warn(
+                            node_id,
+                            format!(
+                                "tdengine server_version probe failed (HTTP {status}): {}",
+                                truncate_for_log(&body, 200)
+                            ),
+                        );
+                    }
                 }
             }
+        }
+
+        // 建库失败如实反映到连接状态（首个成功写入会清除）
+        if let Some(err) = create_db_error {
+            connection_status.write().await.last_error = Some(err);
         }
 
         let (record_tx, record_rx) = mpsc::channel::<Record>(1000);
@@ -406,7 +441,11 @@ impl NorthPlugin for TdEnginePlugin {
             .group_name
             .clone()
             .unwrap_or_else(|| data.group_id.0.to_string());
-        let measurement = "${node_name}".replace("${node_name}", &node_name);
+        // 缺陷③修复：measurement（超表名）与子表名 gateway_table 一致做消毒。
+        // 策略：**替换非法字符**——非 [A-Za-z0-9_] 一律替换为 '_'（与 sanitize_table_name
+        // /子表名同一规则），而不是拒绝；节点名含 '-'（如 "sim-itest"）时不再产生
+        // 行协议语法错误（taosAdapter code=9728）。
+        let measurement = sanitize_table_name(&node_name);
 
         // 合成 gateway_table tag（table_name_key 指定的 tag 作为子表名）
         let gateway_table = format!(
@@ -491,7 +530,7 @@ impl NorthPlugin for TdEnginePlugin {
     }
 }
 
-/// 清理字符串为 [A-Za-z0-9_]+（用于 gateway_table tag 值）
+/// 清理字符串为 [A-Za-z0-9_]+（用于 measurement 超表名与 gateway_table 子表名 tag 值）
 fn sanitize_table_name(s: &str) -> String {
     s.chars()
         .map(|c| {
@@ -502,6 +541,53 @@ fn sanitize_table_name(s: &str) -> String {
             }
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// taosAdapter 响应解析与错误分类（缺陷②/③）
+// ---------------------------------------------------------------------------
+
+/// taosAdapter REST 的 SQL/行协议语法解析错误（0x2600），payload 级永久错误
+const TAOS_CODE_SYNTAX_ERROR: i64 = 9728;
+
+/// 日志截断（按字符截断，避免多字节 UTF-8 切出 panic）
+fn truncate_for_log(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        s.chars().take(max_chars).collect()
+    }
+}
+
+/// 解析 taosAdapter 响应体：HTTP 200 + JSON `{"code":N,"desc":"..."}`。
+/// 返回 Some((code, desc))；响应体不含合法 code（空体/非 JSON）时返回 None，
+/// 此时由调用方回退到 HTTP 状态码分类（向后兼容无 body 的 2xx 响应）。
+fn parse_taos_code(body: &str) -> Option<(i64, String)> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let code = value.get("code")?.as_i64()?;
+    let desc = value
+        .get("desc")
+        .and_then(|d| d.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Some((code, desc))
+}
+
+/// taosAdapter SQL 级错误的分类策略（缺陷②/③）：
+///
+/// - code=0：成功（Delivered）——由调用方在 parse 层处理；
+/// - code=9728（0x2600，TSC SQL/行协议语法解析错误）或 desc 命中语法错误特征 →
+///   **Rejected**：payload 级永久错误，重试同一 payload 无意义，按 4xx 语义丢弃并计数
+///   （计 dropped_rejected），避免在离线队列里无限重试；
+/// - 其余非 0 错误（如 904 Database not exist 等服务端状态问题）→
+///   **Retryable**：进离线队列按退避重试，服务端状态恢复（如建库成功）后可补发，不静默丢数据。
+fn classify_taos_code(code: i64, desc: &str) -> HttpClass {
+    let syntax_like = desc.contains("syntax error") || desc.contains("unrecognized token");
+    if code == TAOS_CODE_SYNTAX_ERROR || syntax_like {
+        HttpClass::Rejected
+    } else {
+        HttpClass::Retryable
+    }
 }
 
 async fn enqueue(node_state: &NodeTdEngineState, payload: Vec<u8>) {
@@ -576,8 +662,8 @@ async fn run_tdengine_worker(
                         if batch.len() >= batch_max_lines || batch_interval == Duration::ZERO {
                             let records: Vec<Record> = std::mem::take(&mut batch);
                             let body = join_payloads(records.iter().map(|r| r.payload.clone()).collect());
-                            let class = send_lines(&client, &url, &database, &table_name_key, &basic_auth, body).await;
-                            handle_class(class, &connection_status, &mut backoff).await;
+                            let (class, detail) = send_lines(&client, &url, &database, &table_name_key, &basic_auth, body).await;
+                            handle_class(node_id, class, detail, &connection_status, &mut backoff).await;
                             settle_batch(&queue, class, records, &mut healthy).await;
                         }
                     }
@@ -587,20 +673,28 @@ async fn run_tdengine_worker(
             _ = tokio::time::sleep(batch_interval), if !batch.is_empty() && batch_interval > Duration::ZERO => {
                 let records: Vec<Record> = std::mem::take(&mut batch);
                 let body = join_payloads(records.iter().map(|r| r.payload.clone()).collect());
-                let class = send_lines(&client, &url, &database, &table_name_key, &basic_auth, body).await;
-                handle_class(class, &connection_status, &mut backoff).await;
+                let (class, detail) = send_lines(&client, &url, &database, &table_name_key, &basic_auth, body).await;
+                handle_class(node_id, class, detail, &connection_status, &mut backoff).await;
                 settle_batch(&queue, class, records, &mut healthy).await;
             }
             _ = tokio::time::sleep(backoff), if !healthy => {
-                let restored = replenish_queue(&queue, &client, &url, &database, &table_name_key, &basic_auth, interval).await;
+                let (restored, rejected) = replenish_queue(&queue, &client, &url, &database, &table_name_key, &basic_auth, interval).await;
                 let empty = queue.lock().await.is_empty();
                 if empty {
-                    if restored > 0 {
-                        // 补发成功即证明服务可达：connected 语义必须真实反映这一点
-                        let mut cs = connection_status.write().await;
-                        cs.connected = true;
-                        cs.last_error = None;
-                        log::info(node_id, format!("tdengine offline queue flushed {} record(s)", restored));
+                    if restored > 0 || rejected > 0 {
+                        if restored > 0 {
+                            // 补发成功即证明服务可达：connected 语义必须真实反映这一点
+                            let mut cs = connection_status.write().await;
+                            cs.connected = true;
+                            cs.last_error = None;
+                        }
+                        if rejected > 0 {
+                            let mut cs = connection_status.write().await;
+                            cs.dropped_rejected += rejected;
+                            log::info(node_id, format!("tdengine offline queue: {} record(s) flushed, {} rejected and dropped", restored, rejected));
+                        } else {
+                            log::info(node_id, format!("tdengine offline queue flushed {} record(s)", restored));
+                        }
                     }
                     healthy = true;
                     backoff = Duration::from_secs(1);
@@ -613,7 +707,9 @@ async fn run_tdengine_worker(
 }
 
 async fn handle_class(
+    node_id: NodeId,
     class: HttpClass,
+    detail: Option<String>,
     connection_status: &Arc<RwLock<TdEngineConnectionStatus>>,
     backoff: &mut Duration,
 ) {
@@ -628,10 +724,20 @@ async fn handle_class(
             *backoff = Duration::from_secs(1);
             let mut cs = connection_status.write().await;
             cs.connected = false;
+            if let Some(d) = detail {
+                // 如实反映 taos SQL 级错误（含 HTTP 200 + code≠0 的失败）
+                cs.last_error = Some(d.clone());
+                log::warn(node_id, format!("tdengine write failed (retryable): {d}"));
+            }
         }
         CommonHttpClass::Rejected => {
             let mut cs = connection_status.write().await;
             cs.dropped_rejected += 1;
+            if let Some(d) = detail {
+                // 如实计数/日志：被 200 包住的 SQL 级拒绝（如 9728）不再计为已送达
+                cs.last_error = Some(d.clone());
+                log::warn(node_id, format!("tdengine write rejected and dropped: {d}"));
+            }
         }
     }
 }
@@ -654,7 +760,12 @@ async fn settle_batch(
     *healthy = q.is_empty();
 }
 
-/// 发送行协议到 taosAdapter /influxdb/v1/write
+/// 发送行协议到 taosAdapter /influxdb/v1/write。
+/// 返回 (分类, 错误详情)：taosAdapter 把 SQL/行协议级错误包在 HTTP 200 + JSON
+/// `{"code":N,"desc":"..."}` 里，只看 HTTP 状态码会把写入失败计为已送达（缺陷③），
+/// 因此 2xx 响应必须再解析 JSON code：code=0 才是 Delivered，code≠0 按
+/// classify_taos_code 进入 Retryable/Rejected 并携带详情（用于 last_error/日志）。
+/// 响应体不含 code（空体/非 JSON）时回退 HTTP 状态码分类（向后兼容）。
 async fn send_lines(
     client: &reqwest::Client,
     url: &str,
@@ -662,7 +773,7 @@ async fn send_lines(
     table_name_key: &str,
     basic_auth: &str,
     body: Vec<u8>,
-) -> HttpClass {
+) -> (HttpClass, Option<String>) {
     let write_url = format!(
         "{}{}?db={}&precision=ms&table_name_key={}",
         url, TAOS_WRITE_PATH, database, table_name_key
@@ -672,12 +783,24 @@ async fn send_lines(
     req = req.header("Content-Type", "text/plain; charset=utf-8");
     req = req.body(body);
     match req.send().await {
-        Ok(resp) => HttpClass::from_status_code(resp.status().as_u16()),
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let resp_body = resp.text().await.unwrap_or_default();
+            match parse_taos_code(&resp_body) {
+                Some((0, _)) if (200..300).contains(&status) => (HttpClass::Delivered, None),
+                Some((code, desc)) if (200..300).contains(&status) => {
+                    let class = classify_taos_code(code, &desc);
+                    (class, Some(format!("taos error code={code} desc={desc}")))
+                }
+                // 空 body / 非 JSON：回退 HTTP 状态码分类
+                _ => (HttpClass::from_status_code(status), None),
+            }
+        }
         Err(e) => {
             if e.is_timeout() || e.is_connect() {
-                HttpClass::Retryable
+                (HttpClass::Retryable, None)
             } else {
-                HttpClass::Rejected
+                (HttpClass::Rejected, None)
             }
         }
     }
@@ -692,15 +815,16 @@ async fn replenish_queue(
     table_name_key: &str,
     basic_auth: &str,
     interval: Duration,
-) -> u64 {
+) -> (u64, u64) {
     let mut restored = 0u64;
+    let mut rejected = 0u64;
     loop {
         let record = {
             let mut q = queue.lock().await;
             q.pop_front()
         };
         let Some(record) = record else { break };
-        let class = send_lines(
+        let (class, detail) = send_lines(
             client,
             url,
             database,
@@ -719,10 +843,16 @@ async fn replenish_queue(
                 q.push_front(record);
                 break;
             }
-            CommonHttpClass::Rejected => {}
+            CommonHttpClass::Rejected => {
+                // 语义性拒绝：如实计数（含 taos SQL 级 9728 等被 200 包住的失败）
+                rejected += 1;
+                if let Some(d) = detail {
+                    tracing::warn!(error = %d, "tdengine offline flush record rejected and dropped");
+                }
+            }
         }
     }
-    restored
+    (restored, rejected)
 }
 
 fn build_http_client(
@@ -951,6 +1081,7 @@ fn config_schema() -> gateway_sdk::ConfigSchema {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicI64, Ordering};
 
     // -------------------------------------------------------------------------
     // Database name whitelist validation
@@ -1256,6 +1387,10 @@ mod tests {
     }
 
     fn make_group_data() -> Arc<GroupData> {
+        make_group_data_named("sensor-01")
+    }
+
+    fn make_group_data_named(node_name: &str) -> Arc<GroupData> {
         use gateway_sdk::types::{DataValue, TagId};
         let node_id = make_node_id();
         let group_id = make_group_id();
@@ -1273,7 +1408,7 @@ mod tests {
                 TagId(uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap()),
                 DataValue::Float64(25.6),
             )],
-            node_name: Some("sensor-01".to_string()),
+            node_name: Some(node_name.to_string()),
             group_name: Some("env".to_string()),
             tag_names: Some(tag_names),
         })
@@ -1393,6 +1528,51 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
         false
+    }
+
+    /// taosAdapter 模拟服务端（缺陷②/③错误路径用）：
+    /// /rest/sql 与 /influxdb/v1/write 分别按 sql_code / write_code 返回
+    /// HTTP 200 + JSON `{"code":N,"desc":"..."}`（真实 taosAdapter 的 SQL 级失败也包在 200 里），
+    /// desc 按常用错误码取真实样例；每个请求以 (路径, body) 推入 channel。
+    fn spawn_taos_server(
+        listener: std::net::TcpListener,
+        sql_code: Arc<AtomicI64>,
+        write_code: Arc<AtomicI64>,
+    ) -> std::sync::mpsc::Receiver<(String, String)> {
+        use std::io::Write;
+        let (tx, rx) = std::sync::mpsc::channel::<(String, String)>();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let Ok(req) = read_request(&mut stream) else {
+                    continue;
+                };
+                let (path, body) = split_request(&req);
+                let code = if path.starts_with("/rest/sql") {
+                    sql_code.load(Ordering::SeqCst)
+                } else {
+                    write_code.load(Ordering::SeqCst)
+                };
+                let desc = match code {
+                    0 => "success",
+                    9728 => "syntax error near \"-itest_default\"",
+                    904 => "Database not exist",
+                    _ => "mock error",
+                };
+                let payload = serde_json::json!({ "code": code, "desc": desc }).to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+                if tx.send((path, body)).is_err() {
+                    break;
+                }
+            }
+        });
+        rx
     }
 
     /// 回归测试（缺陷①核心）：节点启动后第一条数据必须真实写到服务端。
@@ -1523,6 +1703,331 @@ mod tests {
             .expect("queued record must be replayed to the server");
         assert!(path.starts_with("/influxdb/v1/write?"));
         assert!(body.contains("temperature=25.6"));
+
+        plugin.close(node_id).await.unwrap();
+    }
+
+    // -------------------------------------------------------------------------
+    // 缺陷②（docs/联调记录-2026-10-07.md §5.2）：taosAdapter 期望裸 SQL 体，
+    // 且响应是 HTTP 200 + JSON code —— code≠0 不得被当成成功。
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn parse_taos_code_extracts_code_and_desc() {
+        assert_eq!(
+            parse_taos_code(r#"{"code":9728,"desc":"syntax error near \"-itest_default\""}"#),
+            Some((9728, "syntax error near \"-itest_default\"".to_string()))
+        );
+        assert_eq!(
+            parse_taos_code(r#"{"code":0,"desc":"success"}"#),
+            Some((0, "success".to_string()))
+        );
+        // 空 body / 非 JSON / 缺 code 字段 → None（调用方回退 HTTP 状态码分类）
+        assert_eq!(parse_taos_code(""), None);
+        assert_eq!(parse_taos_code("not json"), None);
+        assert_eq!(parse_taos_code(r#"{"no_code":1}"#), None);
+    }
+
+    #[test]
+    fn classify_taos_code_maps_syntax_to_rejected_and_state_to_retryable() {
+        // 9728（0x2600，TSC 语法解析错误）→ payload 级永久错误 → Rejected
+        assert_eq!(classify_taos_code(9728, ""), HttpClass::Rejected);
+        // desc 命中语法错误特征同样 Rejected（防其他码值的同族错误）
+        assert_eq!(
+            classify_taos_code(1234, "syntax error near \"1\""),
+            HttpClass::Rejected
+        );
+        assert_eq!(
+            classify_taos_code(1234, "unrecognized token: \"x\""),
+            HttpClass::Rejected
+        );
+        // 服务端状态类（如 904 Database not exist）→ Retryable（建库成功后可补发）
+        assert_eq!(
+            classify_taos_code(904, "Database not exist"),
+            HttpClass::Retryable
+        );
+        assert_eq!(classify_taos_code(-1, ""), HttpClass::Retryable);
+    }
+
+    /// 建库 + 探活必须发送裸 SQL（而非 JSON 信封）；code=0 才报 ensured
+    #[tokio::test]
+    async fn create_db_and_probe_send_bare_sql_and_code0_is_ensured() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let rx = spawn_taos_server(
+            listener,
+            Arc::new(AtomicI64::new(0)),
+            Arc::new(AtomicI64::new(0)),
+        );
+
+        let plugin = TdEnginePlugin::new();
+        let node_id = make_node_id();
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert("auto_create_db", serde_json::json!(true));
+        plugin
+            .open(node_id, td_config(&format!("http://{addr}"), overrides))
+            .await
+            .unwrap();
+
+        // open() 恰好发出两个 /rest/sql 请求：建库 + 版本探活
+        let mut create_body = None;
+        let mut probe_body = None;
+        for _ in 0..2 {
+            let (path, body) = rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("open() requests must reach the server");
+            assert!(path.starts_with("/rest/sql"), "unexpected path: {path}");
+            if body.starts_with("CREATE DATABASE") {
+                create_body = Some(body);
+            } else if body.starts_with("SELECT server_version()") {
+                probe_body = Some(body);
+            }
+        }
+        // 缺陷②核心断言：请求体必须是裸 SQL 字符串，而非 {"sql":...} JSON 信封
+        assert_eq!(
+            create_body.as_deref(),
+            Some("CREATE DATABASE IF NOT EXISTS gateway PRECISION 'ms'"),
+            "create database must send bare SQL (defect ② regression)"
+        );
+        assert_eq!(
+            probe_body.as_deref(),
+            Some("SELECT server_version()"),
+            "version probe must send bare SQL (defect ② regression)"
+        );
+
+        // code=0 → 如实 ensured，不产生 last_error
+        let st = plugin.connection_status(node_id).await.unwrap();
+        assert_eq!(
+            st["last_error"],
+            serde_json::Value::Null,
+            "code=0 must not produce last_error"
+        );
+
+        plugin.close(node_id).await.unwrap();
+    }
+
+    /// 建库响应 HTTP 200 + code=9728 时不得假报「ensured」，
+    /// 失败必须如实进入 last_error（缺陷②的假阳性回归）
+    #[tokio::test]
+    async fn create_db_code_9728_is_not_misjudged_as_ensured() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let rx = spawn_taos_server(
+            listener,
+            Arc::new(AtomicI64::new(9728)),
+            Arc::new(AtomicI64::new(0)),
+        );
+
+        let plugin = TdEnginePlugin::new();
+        let node_id = make_node_id();
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert("auto_create_db", serde_json::json!(true));
+        plugin
+            .open(node_id, td_config(&format!("http://{addr}"), overrides))
+            .await
+            .unwrap();
+
+        let (path, body) = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("create database request must reach the server");
+        assert!(path.starts_with("/rest/sql"));
+        assert!(
+            body.starts_with("CREATE DATABASE"),
+            "create database must send bare SQL, got: {body}"
+        );
+
+        let st = plugin.connection_status(node_id).await.unwrap();
+        let last_error = st["last_error"].as_str().unwrap_or_default();
+        assert!(
+            last_error.contains("create database failed") && last_error.contains("code=9728"),
+            "SQL-level create failure must be reported truthfully in last_error, got: {last_error:?}"
+        );
+
+        plugin.close(node_id).await.unwrap();
+    }
+
+    // -------------------------------------------------------------------------
+    // 缺陷③：行协议写入 HTTP 200 + code≠0 不得计为 Delivered；
+    // measurement（超表名）与子表名一致消毒，含 '-' 的节点名不再触发 9728。
+    // -------------------------------------------------------------------------
+
+    /// 写入被 200 + code=9728 包住的行协议错误：必须计为 Rejected（dropped_rejected），
+    /// 不得计为已送达（缺陷③回归：旧实现 connected=true / dropped_rejected=0）
+    #[tokio::test]
+    async fn write_code_9728_is_rejected_not_delivered() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _rx = spawn_taos_server(
+            listener,
+            Arc::new(AtomicI64::new(0)),
+            Arc::new(AtomicI64::new(9728)),
+        );
+
+        let plugin = TdEnginePlugin::new();
+        let node_id = make_node_id();
+        plugin
+            .open(
+                node_id,
+                td_config(&format!("http://{addr}"), Default::default()),
+            )
+            .await
+            .unwrap();
+
+        plugin
+            .on_group_data(node_id, make_group_data())
+            .await
+            .unwrap();
+
+        assert!(
+            wait_for_status(
+                &plugin,
+                node_id,
+                |st| st["dropped_rejected"] == serde_json::json!(1),
+                std::time::Duration::from_secs(5)
+            )
+            .await,
+            "write rejected with code=9728 must be counted (defect ③ regression)"
+        );
+        let st = plugin.connection_status(node_id).await.unwrap();
+        assert_eq!(
+            st["queue_len"],
+            serde_json::json!(0),
+            "syntax-rejected record must not be retried from the offline queue"
+        );
+        assert_eq!(
+            st["connected"],
+            serde_json::json!(false),
+            "a failed write must not flip connected to true"
+        );
+        let last_error = st["last_error"].as_str().unwrap_or_default();
+        assert!(
+            last_error.contains("code=9728"),
+            "rejected write must surface the taos error, got: {last_error:?}"
+        );
+
+        plugin.close(node_id).await.unwrap();
+    }
+
+    /// 写入 200 + code=904（Database not exist，服务端状态问题）→ Retryable：
+    /// 必须可靠入队而非丢失；服务端恢复（code=0）后补发成功且 connected 翻转
+    #[tokio::test]
+    async fn write_code_904_is_retryable_then_flushed_after_recovery() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let write_code = Arc::new(AtomicI64::new(904));
+        let _rx = spawn_taos_server(listener, Arc::new(AtomicI64::new(0)), write_code.clone());
+
+        let plugin = TdEnginePlugin::new();
+        let node_id = make_node_id();
+        plugin
+            .open(
+                node_id,
+                td_config(&format!("http://{addr}"), Default::default()),
+            )
+            .await
+            .unwrap();
+
+        plugin
+            .on_group_data(node_id, make_group_data())
+            .await
+            .unwrap();
+        assert!(
+            wait_for_status(
+                &plugin,
+                node_id,
+                |st| st["queue_len"] == serde_json::json!(1),
+                std::time::Duration::from_secs(5)
+            )
+            .await,
+            "code=904 is a server-state error: record must be enqueued, not dropped"
+        );
+        let st = plugin.connection_status(node_id).await.unwrap();
+        assert_eq!(st["connected"], serde_json::json!(false));
+        let last_error = st["last_error"].as_str().unwrap_or_default();
+        assert!(
+            last_error.contains("code=904"),
+            "retryable write failure must surface the taos error, got: {last_error:?}"
+        );
+
+        // 服务端状态恢复（数据库已建）→ 补发成功
+        write_code.store(0, Ordering::SeqCst);
+        assert!(
+            wait_for_status(
+                &plugin,
+                node_id,
+                |st| st["queue_len"] == serde_json::json!(0)
+                    && st["connected"] == serde_json::json!(true),
+                std::time::Duration::from_secs(10)
+            )
+            .await,
+            "queued record must be flushed after the server-state error resolves"
+        );
+
+        plugin.close(node_id).await.unwrap();
+    }
+
+    /// 含 '-' 的节点名：measurement（超表名）消毒后写入契约成立（不再触发 9728）
+    #[tokio::test]
+    async fn measurement_with_hyphen_is_sanitized_in_write_contract() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let rx = spawn_taos_server(
+            listener,
+            Arc::new(AtomicI64::new(0)),
+            Arc::new(AtomicI64::new(0)),
+        );
+
+        let plugin = TdEnginePlugin::new();
+        let node_id = make_node_id();
+        plugin
+            .open(
+                node_id,
+                td_config(&format!("http://{addr}"), Default::default()),
+            )
+            .await
+            .unwrap();
+
+        // 复刻联调记录 §4.4 现象 B：node_name "sim-itest"（含 '-'）
+        plugin
+            .on_group_data(node_id, make_group_data_named("sim-itest"))
+            .await
+            .unwrap();
+
+        let mut write_body = None;
+        for _ in 0..3 {
+            let (path, body) = rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("write request must reach the server");
+            if path.starts_with("/influxdb/v1/write") {
+                write_body = Some(body);
+                break;
+            }
+        }
+        let body = write_body.expect("write request must be captured");
+        assert!(
+            body.starts_with("sim_itest,"),
+            "measurement must be sanitized to [A-Za-z0-9_] (defect ③ regression), got: {body}"
+        );
+        // tag 值保持原始名（消毒只针对表名/超表名）
+        assert!(body.contains("node=sim-itest"));
+        assert!(body.contains("gateway_table=sim_itest_env"));
+
+        // 写入成功（code=0）
+        assert!(
+            wait_for_status(
+                &plugin,
+                node_id,
+                |st| st["connected"] == serde_json::json!(true),
+                std::time::Duration::from_secs(5)
+            )
+            .await,
+            "sanitized write with code=0 must be delivered"
+        );
 
         plugin.close(node_id).await.unwrap();
     }
