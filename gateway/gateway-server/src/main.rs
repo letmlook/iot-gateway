@@ -438,6 +438,21 @@ async fn shutdown_signal(state: AppState) {
         .filter(|n| n.state == gateway_sdk::NodeState::Running)
         .map(|n| n.id())
         .collect();
+
+    // 第一步：向所有 WS 连接广播停机（Close 4002, "server shutting down"），
+    // 让客户端立即感知并尽快断开/重连其他实例；随后在有界窗口内等待连接任务退出，
+    // 保证关闭帧在停止节点（可能耗时较久）之前就已送达。
+    let remaining = state
+        .ws_shutdown
+        .notify_and_drain(ws::WS_SHUTDOWN_DRAIN_TIMEOUT)
+        .await;
+    if remaining > 0 {
+        tracing::warn!(
+            "shutdown drain: {} ws connection(s) did not close within the drain window",
+            remaining
+        );
+    }
+
     if !running.is_empty() {
         tracing::info!("stopping {} running node(s) before exit", running.len());
         for id in running {

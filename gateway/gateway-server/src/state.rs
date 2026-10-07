@@ -4,6 +4,7 @@ use crate::config::Config;
 use crate::license::FeatureManager;
 use crate::logging::NodeLogNameMap;
 use crate::users::UserStore;
+use crate::ws::WsShutdown;
 use gateway_core::proc_plugin::ProcessPluginLoader;
 use gateway_core::Db;
 use gateway_core::{persist_save_secret, Manager, PluginLoader};
@@ -28,6 +29,8 @@ pub struct AppState {
     _loader: Option<Arc<PluginLoader>>,
     /// 进程隔离模式下的插件加载器（含各子进程的重启计数）；inproc 模式为 None
     pub plugin_processes: Option<Arc<ProcessPluginLoader>>,
+    /// WS 停机广播：优雅停机时置位，所有 WS 连接任务向客户端发送 Close(4002) 后退出
+    pub ws_shutdown: WsShutdown,
 }
 
 impl AppState {
@@ -50,6 +53,7 @@ impl AppState {
             persist_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             _loader: loader.map(Arc::new),
             plugin_processes: None,
+            ws_shutdown: WsShutdown::new(),
         }
     }
 

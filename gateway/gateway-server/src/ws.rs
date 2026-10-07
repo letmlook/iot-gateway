@@ -7,6 +7,10 @@
 //!
 //! 数据推送：每连接独立的 bus.subscribe_all() tap，按订阅过滤器推送 values 帧；
 //! 节点状态每 ws_snapshot_interval_ms 推送一次全量快照。
+//!
+//! 优雅停机：main.rs 的停机序列在停止节点之前调用 WsShutdown::notify_and_drain()，
+//! 所有连接任务经 watch 广播被唤醒，向客户端发送 Close(4002, "server shutting down")
+//! 后立即退出；排水窗口有界，避免进程退出前关闭帧来不及送达。
 
 use axum::{
     extract::{
@@ -20,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::{interval, Instant};
 
 use crate::api::{resolve_bearer, ApiError};
@@ -208,6 +212,77 @@ fn ws_frames_dropped() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// 优雅停机广播：向所有 WS 连接发送 Close(4002)
+// ---------------------------------------------------------------------------
+
+/// 停机关闭帧的 code 与 reason：前端据此区分「服务停机」与普通断线。
+pub const WS_SHUTDOWN_CLOSE_CODE: u16 = 4002;
+pub const WS_SHUTDOWN_CLOSE_REASON: &str = "server shutting down";
+
+/// 优雅停机时等待 WS 连接退出的排水窗口（有界，避免进程退出前关闭帧来不及送达）
+pub const WS_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 排水轮询间隔
+const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// 停机广播句柄：`watch` 单槽信号（无队列，内存与连接数无关，不引入无界资源）。
+///
+/// `AppState` 持有 Sender 端；每个连接任务进入事件循环前 `subscribe()` 一个 Receiver。
+/// `notify()` 置位后，所有连接任务——包括置位之后才订阅的——都会立即观察到标志位，
+/// 随即向客户端发送 `Close(4002, "server shutting down")` 并退出。
+///
+/// 选择广播通道而非连接注册表：注册表需经每连接的出站通道投递关闭帧，
+/// 而关闭帧必须走 `handle_frames` 直接持有的 socket sender（与 4001 关闭路径一致），
+/// watch 广播让各连接任务自行发送，路径最短。
+#[derive(Clone)]
+pub struct WsShutdown {
+    tx: Arc<watch::Sender<bool>>,
+}
+
+impl Default for WsShutdown {
+    fn default() -> Self {
+        Self {
+            tx: Arc::new(watch::Sender::new(false)),
+        }
+    }
+}
+
+impl WsShutdown {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 置位停机标志，唤醒所有连接任务
+    pub fn notify(&self) {
+        self.tx.send_replace(true);
+    }
+
+    /// 连接任务订阅停机信号
+    pub fn subscribe(&self) -> watch::Receiver<bool> {
+        self.tx.subscribe()
+    }
+
+    /// 排水：等待全部连接任务退出（至多 `timeout`），返回超时后仍未断开的连接数。
+    /// 轮询进程级连接计数，窗口有界。
+    pub async fn drain(&self, timeout: Duration) -> u64 {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = ws_client_count();
+            if remaining == 0 || Instant::now() >= deadline {
+                return remaining;
+            }
+            tokio::time::sleep(DRAIN_POLL_INTERVAL).await;
+        }
+    }
+
+    /// 优雅停机入口：先广播停机（触发各连接发送 4002 关闭帧），再等待连接退出。
+    pub async fn notify_and_drain(&self, timeout: Duration) -> u64 {
+        self.notify();
+        self.drain(timeout).await
+    }
+}
+
+// ---------------------------------------------------------------------------
 // HTTP handler：WebSocket upgrade
 // ---------------------------------------------------------------------------
 
@@ -239,6 +314,9 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 const SERVER_PING_INTERVAL: Duration = Duration::from_secs(60);
 const CLIENT_PONG_TIMEOUT: Duration = Duration::from_secs(25);
 
+/// 认证失败（token 无效 / 未认证操作 / 认证超时）的关闭码
+const WS_AUTH_FAIL_CLOSE_CODE: u16 = 4001;
+
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     // 增加连接计数
     WS_CLIENT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -247,43 +325,12 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let bus = state.manager.bus();
     let (tap_id, mut bus_rx) = bus.subscribe_all();
 
-    // 出站通道（有界 256）
+    // 出站通道（有界 256）：批量帧（values/nodes 快照）先入队，由事件循环统一写 socket；
+    // 入队用 try_send，通道满时丢帧计数，绝不阻塞事件循环（无死锁、无无界积压）
     let (out_tx, mut out_rx) = mpsc::channel::<Message>(CHANNEL_CAPACITY);
-    let out_tx_for_write = out_tx.clone();
-
-    // 用于向写任务发送关闭信号
-    let (close_tx, _close_rx) = broadcast::channel::<()>(1);
-    let close_tx_for_write = close_tx.clone();
-
-    // 写任务：从 out_rx 取帧并发送
-    let write_task = tokio::spawn(async move {
-        let mut closed = close_tx_for_write.subscribe();
-        loop {
-            tokio::select! {
-                msg = out_rx.recv() => {
-                    match msg {
-                        Some(m) => {
-                            if out_tx_for_write.send(m).await.is_err() {
-                                break;
-                            }
-                            WS_FRAMES_SENT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        }
-                        None => break,
-                    }
-                }
-                _ = closed.recv() => {
-                    break;
-                }
-            }
-        }
-    });
 
     let (sender, receiver) = socket.split();
-    let result = handle_frames(sender, receiver, state, &mut bus_rx, out_tx).await;
-
-    // 关闭写任务
-    let _ = close_tx.send(());
-    let _ = write_task.await;
+    let result = handle_frames(sender, receiver, state, &mut bus_rx, out_tx, &mut out_rx).await;
 
     // 清理：注销 tap、减少计数
     bus.unsubscribe_all(tap_id);
@@ -298,12 +345,40 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
 // 帧处理循环
 // ---------------------------------------------------------------------------
 
+/// 直接写 socket 的控制帧（认证响应/错误/关闭/ping-pong），成功即计入已发送帧数。
+/// 控制帧不过出站队列：保证低延迟且不因队列满被丢弃。
+async fn send_control<S>(sender: &mut S, msg: Message)
+where
+    S: SinkExt<Message> + Unpin,
+{
+    if sender.send(msg).await.is_ok() {
+        WS_FRAMES_SENT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// 停机关闭帧 `Close(4002, "server shutting down")`
+fn shutdown_close_frame() -> Message {
+    Message::Close(Some(axum::extract::ws::CloseFrame {
+        code: WS_SHUTDOWN_CLOSE_CODE,
+        reason: WS_SHUTDOWN_CLOSE_REASON.into(),
+    }))
+}
+
+/// 认证失败关闭帧 `Close(4001, <原因>)`
+fn auth_fail_close_frame(reason: &str) -> Message {
+    Message::Close(Some(axum::extract::ws::CloseFrame {
+        code: WS_AUTH_FAIL_CLOSE_CODE,
+        reason: reason.to_string().into(),
+    }))
+}
+
 async fn handle_frames<S, R>(
     mut sender: S,
     mut receiver: R,
     state: Arc<AppState>,
     bus_rx: &mut broadcast::Receiver<Arc<gateway_sdk::GroupData>>,
     out_tx: mpsc::Sender<Message>,
+    out_rx: &mut mpsc::Receiver<Message>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     S: SinkExt<Message> + Unpin,
@@ -332,15 +407,44 @@ where
     let mut snapshot_timer = interval(Duration::from_millis(state.config.ws_snapshot_interval_ms));
     snapshot_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    // 停机信号：wait_for 对「订阅前标志已置位」的边界同样立即返回，不存在竞态窗口
+    let mut shutdown_rx = state.ws_shutdown.subscribe();
+
+    // interval 的首个 tick 立即完成：先消费掉，避免连接刚建立或刚认证时
+    // 立即触发服务器 ping / pong 超时判定（曾导致认证后连接被瞬间以
+    // Close(1000, "pong timeout") 关闭）/ 快照
+    ping_timer.tick().await;
+    pong_timer.tick().await;
+    snapshot_timer.tick().await;
+
     loop {
         tokio::select! {
+            // 优雅停机：立即向客户端发送 Close(4002) 并退出事件循环（不依赖认证状态）。
+            // 映射为 bool：watch::Ref 非 Send，不能作为 select 分支输出绑定后跨 await 存活。
+            shutdown = async { shutdown_rx.wait_for(|s| *s).await.is_ok() } => {
+                if shutdown {
+                    tracing::info!("WS: server shutting down, sending Close({})", WS_SHUTDOWN_CLOSE_CODE);
+                    send_control(&mut sender, shutdown_close_frame()).await;
+                }
+                break;
+            }
+
             // 客户端消息
             msg = receiver.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if let Err(e) = process_client_frame(&text, &state, &mut session, &out_tx).await {
+                        if let Err(e) = process_client_frame(&text, &state, &mut session, &mut sender).await {
                             tracing::warn!("WS client frame error: {}", e);
-                            let _ = sender.send(Message::Text(serde_json::to_string(&WsServerFrame::error(&e.to_string())).unwrap())).await;
+                            // 错误帧 + 4001 关闭帧都直接写 socket，客户端据此立即感知认证失败
+                            send_control(
+                                &mut sender,
+                                Message::Text(
+                                    serde_json::to_string(&WsServerFrame::error(&e.to_string()))
+                                        .unwrap(),
+                                ),
+                            )
+                            .await;
+                            send_control(&mut sender, auth_fail_close_frame(&e.to_string())).await;
                             // 认证失败时关闭连接
                             break;
                         }
@@ -368,7 +472,7 @@ where
             // 服务器定期 ping（认证后）
             _ = ping_timer.tick() => {
                 if session.authenticated {
-                    let _ = sender.send(Message::Text(serde_json::to_string(&WsServerFrame::ping()).unwrap())).await;
+                    send_control(&mut sender, Message::Text(serde_json::to_string(&WsServerFrame::ping()).unwrap())).await;
                     pong_timer.reset();
                 }
             }
@@ -377,7 +481,7 @@ where
             _ = pong_timer.tick() => {
                 if session.authenticated {
                     tracing::warn!("WS: client pong timeout, closing connection");
-                    let _ = sender.send(Message::Close(Some(axum::extract::ws::CloseFrame{
+                    send_control(&mut sender, Message::Close(Some(axum::extract::ws::CloseFrame{
                         code: 1000u16,
                         reason: "pong timeout".into(),
                     }))).await;
@@ -389,11 +493,8 @@ where
             _ = tokio::time::sleep(Duration::from_millis(500)) => {
                 if !session.authenticated && Instant::now() >= auth_deadline {
                     tracing::warn!("WS: auth timeout");
-                    let _ = sender.send(Message::Text(serde_json::to_string(&WsServerFrame::auth_fail("auth timeout")).unwrap())).await;
-                    let _ = sender.send(Message::Close(Some(axum::extract::ws::CloseFrame{
-                        code: 4001u16,
-                        reason: "auth timeout".into(),
-                    }))).await;
+                    send_control(&mut sender, Message::Text(serde_json::to_string(&WsServerFrame::auth_fail("auth timeout")).unwrap())).await;
+                    send_control(&mut sender, auth_fail_close_frame("auth timeout")).await;
                     break;
                 }
             }
@@ -404,10 +505,7 @@ where
                     let frame = build_nodes_frame(&state).await;
                     if let Some(f) = frame {
                         let text = serde_json::to_string(&f).unwrap_or_default();
-                        if out_tx.send(Message::Text(text)).await.is_err() {
-                            // 通道满，丢帧
-                            WS_FRAMES_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        }
+                        enqueue_frame(&out_tx, Message::Text(text));
                     }
                 }
             }
@@ -441,10 +539,7 @@ where
                             });
 
                             let text = serde_json::to_string(&frame).unwrap_or_default();
-                            if out_tx.send(Message::Text(text)).await.is_err() {
-                                // 通道满，丢帧
-                                WS_FRAMES_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            }
+                            enqueue_frame(&out_tx, Message::Text(text));
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -454,10 +549,38 @@ where
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
+
+            // 出站队列：values/快照帧经 out_tx 排队，由事件循环统一写 socket
+            msg = out_rx.recv() => {
+                match msg {
+                    Some(m) => {
+                        WS_FRAMES_SENT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if sender.send(m).await.is_err() {
+                            break;
+                        }
+                    }
+                    // 出站通道关闭：本循环持有唯一 sender，正常运行不可达，防御性退出
+                    None => break,
+                }
+            }
         }
     }
 
     Ok(())
+}
+
+/// 批量帧入站：非阻塞 try_send，通道满时丢帧并计数（有界队列，绝不阻塞事件循环）
+fn enqueue_frame(out_tx: &mpsc::Sender<Message>, msg: Message) {
+    match out_tx.try_send(msg) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            // 通道满，丢帧
+            WS_FRAMES_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            tracing::debug!("WS out channel closed, frame dropped");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -476,12 +599,15 @@ struct Session {
 // 处理单个客户端帧
 // ---------------------------------------------------------------------------
 
-async fn process_client_frame(
+async fn process_client_frame<S>(
     text: &str,
     state: &Arc<AppState>,
     session: &mut Session,
-    out_tx: &mpsc::Sender<Message>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    sender: &mut S,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: SinkExt<Message> + Unpin,
+{
     let frame: WsClientFrame = serde_json::from_str(text)?;
 
     match frame {
@@ -492,17 +618,17 @@ async fn process_client_frame(
                 session.username = ctx.username;
                 tracing::info!(username = ?session.username, "WS authenticated");
                 // 发送 auth success
-                let _ = out_tx
-                    .send(Message::Text(
-                        serde_json::to_string(&WsServerFrame::auth_ok()).unwrap(),
-                    ))
-                    .await;
+                send_control(
+                    sender,
+                    Message::Text(serde_json::to_string(&WsServerFrame::auth_ok()).unwrap()),
+                )
+                .await;
                 // 发送 hello
-                let _ = out_tx
-                    .send(Message::Text(
-                        serde_json::to_string(&WsServerFrame::hello()).unwrap(),
-                    ))
-                    .await;
+                send_control(
+                    sender,
+                    Message::Text(serde_json::to_string(&WsServerFrame::hello()).unwrap()),
+                )
+                .await;
             } else {
                 // 认证失败
                 return Err("invalid token".into());
