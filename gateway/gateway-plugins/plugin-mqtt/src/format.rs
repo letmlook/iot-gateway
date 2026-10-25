@@ -52,6 +52,10 @@ pub fn data_value_to_json_scalar(v: &DataValue) -> serde_json::Value {
     if let Some(b) = v.as_bool() {
         return serde_json::json!(b);
     }
+    // UInt64 先判：`as_i64` 对 >= 2^63 的值会回绕成负数（0xFFFF_FFFF_FFFF_FFFF → -1）
+    if let DataValue::UInt64(n) = v {
+        return serde_json::json!(n);
+    }
     if let Some(n) = v.as_i64() {
         return serde_json::json!(n);
     }
@@ -68,9 +72,16 @@ pub fn data_value_to_json_scalar(v: &DataValue) -> serde_json::Value {
 }
 
 /// 将 DataValue 转为 raw_data 用的数字数组（单值转 [f64]）
+///
+/// 整型必须能取到：`as_f64` 只覆盖 Float32/Float64/Int64/UInt64，
+/// 16/32 位整型（Modbus 的默认类型 uint16）落到兜底分支会变成 0 ——
+/// 上报方收到的是「值恒为 0」，且没有任何报错。
 pub fn data_value_to_number_array(v: &DataValue) -> Vec<f64> {
     if let Some(f) = v.as_f64() {
         return vec![f];
+    }
+    if let Some(n) = v.as_i64() {
+        return vec![n as f64];
     }
     if let Some(b) = v.as_bool() {
         return vec![if b { 1.0 } else { 0.0 }];
@@ -208,5 +219,41 @@ pub fn payload_for_format(data: &GroupData, upload_format: &str) -> Vec<u8> {
         serde_json::to_vec(&payload).unwrap_or_default()
     } else {
         serde_json::to_vec(data).unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// raw_data 格式必须能表达 16/32 位整型：
+    /// Modbus 点位默认就是 uint16，之前这些值全被兜底分支写成 0，
+    /// 订阅端收到的是「值恒为 0」且没有任何报错。
+    #[test]
+    fn raw_data_keeps_integer_values() {
+        assert_eq!(
+            data_value_to_number_array(&DataValue::UInt16(1234)),
+            vec![1234.0]
+        );
+        assert_eq!(
+            data_value_to_number_array(&DataValue::UInt32(70000)),
+            vec![70000.0]
+        );
+        assert_eq!(
+            data_value_to_number_array(&DataValue::Int16(-5)),
+            vec![-5.0]
+        );
+        assert_eq!(
+            data_value_to_number_array(&DataValue::Bool(true)),
+            vec![1.0]
+        );
+    }
+
+    /// UInt64 >= 2^63 不能回绕成负数。
+    #[test]
+    fn u64_above_i64_max_is_not_wrapped() {
+        let v = data_value_to_json_scalar(&DataValue::UInt64(u64::MAX));
+        assert_eq!(v.as_u64(), Some(u64::MAX));
+        assert_ne!(v.as_i64(), Some(-1));
     }
 }

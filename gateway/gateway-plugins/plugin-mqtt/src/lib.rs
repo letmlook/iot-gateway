@@ -196,6 +196,8 @@ impl NorthPlugin for MqttPlugin {
             let node_id_loop = node_id;
             let host_loop = host.clone();
             let port_loop = port;
+            // 补发任务的互斥标记：同一时刻只允许一个补发任务在跑
+            let flush_running = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let handle = std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -213,6 +215,7 @@ impl NorthPlugin for MqttPlugin {
                     retain,
                     sync_interval,
                     cancel_rx,
+                    flush_running.clone(),
                 ));
             });
             state.nodes.insert(
@@ -383,10 +386,12 @@ impl NorthPlugin for MqttPlugin {
                 return Ok(());
             }
             let qos = node_state.qos.to_rumqttc();
+            // 用 try_publish：请求通道满时 `publish().await` 会一直等下去，
+            // 把北向节点挂死（实时数据发不出去、close 也删不掉节点）。
+            // 通道满等价于「暂时发不出去」——进离线队列，数据不丢。
             match node_state
                 .client
-                .publish(&topic, qos, node_state.retain, payload.clone())
-                .await
+                .try_publish(&topic, qos, node_state.retain, payload.clone())
             {
                 Ok(()) => {}
                 Err(e) => {
@@ -438,6 +443,59 @@ async fn enqueue(node_id: NodeId, node_state: &NodeMqttState, topic: String, pay
     }
 }
 
+/// 补发离线队列：在**独立任务**中执行，事件循环保持 poll（心跳才能发出去）。
+///
+/// 用 `try_publish` 而不是 `publish().await`：请求通道是有界的，满时
+/// `publish` 会一直等下去（flume 的 SendFut 在满时返回 Pending），
+/// 把整个北向节点挂死。通道满时把记录放回队首，等下一次补发机会。
+#[cfg(feature = "mqtt-client")]
+async fn flush_offline_queue(
+    node_id: NodeId,
+    client: rumqttc::AsyncClient,
+    queue: Arc<tokio::sync::Mutex<crate::queue::OfflineQueue>>,
+    connection_status: Arc<RwLock<MqttConnectionStatus>>,
+    qos: rumqttc::QoS,
+    retain: bool,
+    interval: Duration,
+) {
+    let mut restored = 0u64;
+    loop {
+        // 先 peek、发布成功后再 pop：出队会触发文件压缩并把记录从文件里删掉，
+        // 发布失败再放回队首的话，记录只在内存里、文件里已经没有 ——
+        // 此时重启进程这条消息就永久丢了。
+        let (topic, payload) = {
+            let q = queue.lock().await;
+            let Some(rec) = q.peek_front() else { break };
+            (rec.topic.clone(), rec.payload.clone())
+        };
+        match client.try_publish(&topic, qos, retain, payload) {
+            Ok(()) => {
+                {
+                    let mut q = queue.lock().await;
+                    q.pop_front();
+                }
+                restored += 1;
+                tokio::time::sleep(interval).await;
+            }
+            Err(e) => {
+                log::warn(
+                    node_id,
+                    format!("offline flush publish failed: {} (topic={})", e, topic),
+                );
+                let mut st = connection_status.write().await;
+                st.last_error = Some(format!("offline flush failed: {}", e));
+                break;
+            }
+        }
+    }
+    if restored > 0 {
+        log::info(
+            node_id,
+            format!("offline queue flushed {} record(s)", restored),
+        );
+    }
+}
+
 #[cfg(feature = "mqtt-client")]
 #[allow(clippy::too_many_arguments)]
 async fn run_event_loop(
@@ -452,6 +510,8 @@ async fn run_event_loop(
     retain: bool,
     cache_sync_interval_ms: u64,
     mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
+    // 补发任务是否已在运行：避免重连时叠加多个补发任务
+    flush_running: Arc<std::sync::atomic::AtomicBool>,
 ) {
     use rumqttc::mqttbytes::v4::ConnectReturnCode;
     use rumqttc::{Event, Packet};
@@ -490,39 +550,30 @@ async fn run_event_loop(
                             st.connected = false;
                             st.last_error = Some(err_msg.clone());
                         }
-                        // 连接成功后补发离线队列（按原始顺序）
-                        let mut restored = 0u64;
-                        loop {
-                            let record = {
-                                let mut q = queue.lock().await;
-                                q.pop_front()
-                            };
-                            let Some(record) = record else { break };
-                            let p = record.payload.clone();
-                            if let Err(e) = client
-                                .publish(&record.topic, qos_r, retain, p)
-                                .await
-                            {
-                                log::warn(
+                        // 连接成功后补发离线队列（按原始顺序）。
+                        //
+                        // 补发放在**独立任务**里：补发期间 event loop 必须继续 poll，
+                        // 否则不会发 keepalive 心跳，Broker 会判定失联并断开；
+                        // 而且 `publish().await` 在请求通道满时会无限等待，
+                        // 整个事件循环就此卡死（节点再也删不掉、实时数据也发不出去）。
+                        if !flush_running.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                            let client = client.clone();
+                            let queue = queue.clone();
+                            let connection_status = connection_status.clone();
+                            let flush_running = flush_running.clone();
+                            tokio::spawn(async move {
+                                flush_offline_queue(
                                     node_id,
-                                    format!(
-                                        "offline flush publish failed: {} (topic={})",
-                                        e, record.topic
-                                    ),
-                                );
-                                // 放回队首，等下次连接成功再补发
-                                let mut q = queue.lock().await;
-                                q.push_front(record);
-                                break;
-                            }
-                            restored += 1;
-                            tokio::time::sleep(interval).await;
-                        }
-                        if restored > 0 {
-                            log::info(
-                                node_id,
-                                format!("offline queue flushed {} record(s)", restored),
-                            );
+                                    client,
+                                    queue,
+                                    connection_status,
+                                    qos_r,
+                                    retain,
+                                    interval,
+                                )
+                                .await;
+                                flush_running.store(false, std::sync::atomic::Ordering::SeqCst);
+                            });
                         }
                     }
                     Err(e) => {

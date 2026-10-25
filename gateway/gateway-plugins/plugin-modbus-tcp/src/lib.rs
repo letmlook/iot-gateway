@@ -29,6 +29,78 @@ use value::{register_to_value_ext, value_to_registers};
 #[cfg(feature = "modbus-client")]
 use std::time::Duration;
 
+/// Modbus 单次读保持/输入寄存器的上限（协议规定 0x03/0x04 最多 125 个寄存器）
+#[cfg(feature = "modbus-client")]
+const MAX_READ_REGS: u16 = 125;
+
+/// Modbus 单次读线圈/离散输入的上限（0x01/0x02 最多 2000 位）
+#[cfg(feature = "modbus-client")]
+const MAX_READ_BITS: u16 = 2000;
+
+/// 分段读取保持寄存器：单次请求不超过 [`MAX_READ_REGS`]。
+///
+/// 一次请求超过协议上限时，从站会回异常码 03（Illegal Data Value），
+/// 整个采集组随即失败 —— 同一组里其它正常点位也一并拿不到数据。
+/// （例如 `4x!1.252H` 这种 252 字节的 STRING 点位。）
+#[cfg(feature = "modbus-client")]
+async fn read_holding_chunked(
+    ctx: &mut tokio_modbus::client::Context,
+    start: u16,
+    count: u16,
+) -> Result<Vec<u16>, PluginError> {
+    use tokio_modbus::prelude::*;
+    let mut out: Vec<u16> = Vec::with_capacity(count as usize);
+    let mut addr = start;
+    let mut left = count;
+    while left > 0 {
+        let n = left.min(MAX_READ_REGS);
+        let regs = match ctx.read_holding_registers(addr, n).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                return Err(PluginError::msg(format!(
+                    "read_holding_registers exception: {}",
+                    e
+                )))
+            }
+            Err(e) => return Err(PluginError::msg(format!("read_holding_registers: {}", e))),
+        };
+        out.extend_from_slice(&regs);
+        addr = addr.wrapping_add(n);
+        left -= n;
+    }
+    Ok(out)
+}
+
+/// 分段读取输入寄存器：单次请求不超过 [`MAX_READ_REGS`]。
+#[cfg(feature = "modbus-client")]
+async fn read_input_chunked(
+    ctx: &mut tokio_modbus::client::Context,
+    start: u16,
+    count: u16,
+) -> Result<Vec<u16>, PluginError> {
+    use tokio_modbus::prelude::*;
+    let mut out: Vec<u16> = Vec::with_capacity(count as usize);
+    let mut addr = start;
+    let mut left = count;
+    while left > 0 {
+        let n = left.min(MAX_READ_REGS);
+        let regs = match ctx.read_input_registers(addr, n).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                return Err(PluginError::msg(format!(
+                    "read_input_registers exception: {}",
+                    e
+                )))
+            }
+            Err(e) => return Err(PluginError::msg(format!("read_input_registers: {}", e))),
+        };
+        out.extend_from_slice(&regs);
+        addr = addr.wrapping_add(n);
+        left -= n;
+    }
+    Ok(out)
+}
+
 /// 合并规划诊断（不建立连接，纯计算）：返回 `(批量读请求数, 逐点读请求数)`。
 ///
 /// 现场可用它评估一批点位地址的合并收益；性能基线压测也用它作为对照。
@@ -672,24 +744,42 @@ impl SouthPlugin for ModbusTcpPlugin {
                         Some(p) => {
                             let dt = tag.data_type.as_deref().unwrap_or("uint16");
                             match p.area {
-                                ModbusArea::Coil => match ctx.read_coils(p.start, p.count).await {
-                                    Ok(Ok(v)) => {
-                                        DataValue::Bool(v.first().copied().unwrap_or(false))
-                                    }
-                                    Ok(Err(e)) => {
+                                ModbusArea::Coil => {
+                                    if p.count > MAX_READ_BITS {
                                         failure = Some(PluginError::msg(format!(
-                                            "read_coils exception: {}",
-                                            e
+                                            "coil count {} exceeds the per-request limit {}",
+                                            p.count, MAX_READ_BITS
                                         )));
                                         break 'single;
                                     }
-                                    Err(e) => {
-                                        failure =
-                                            Some(PluginError::msg(format!("read_coils: {}", e)));
+                                    match ctx.read_coils(p.start, p.count).await {
+                                        Ok(Ok(v)) => {
+                                            DataValue::Bool(v.first().copied().unwrap_or(false))
+                                        }
+                                        Ok(Err(e)) => {
+                                            failure = Some(PluginError::msg(format!(
+                                                "read_coils exception: {}",
+                                                e
+                                            )));
+                                            break 'single;
+                                        }
+                                        Err(e) => {
+                                            failure = Some(PluginError::msg(format!(
+                                                "read_coils: {}",
+                                                e
+                                            )));
+                                            break 'single;
+                                        }
+                                    }
+                                }
+                                ModbusArea::DiscreteInput => {
+                                    if p.count > MAX_READ_BITS {
+                                        failure = Some(PluginError::msg(format!(
+                                            "discrete input count {} exceeds the per-request limit {}",
+                                            p.count, MAX_READ_BITS
+                                        )));
                                         break 'single;
                                     }
-                                },
-                                ModbusArea::DiscreteInput => {
                                     match ctx.read_discrete_inputs(p.start, p.count).await {
                                         Ok(Ok(v)) => {
                                             DataValue::Bool(v.first().copied().unwrap_or(false))
@@ -711,43 +801,23 @@ impl SouthPlugin for ModbusTcpPlugin {
                                     }
                                 }
                                 ModbusArea::InputRegister => {
-                                    match ctx.read_input_registers(p.start, p.count).await {
-                                        Ok(Ok(regs)) => {
+                                    match read_input_chunked(ctx, p.start, p.count).await {
+                                        Ok(regs) => {
                                             register_to_value_ext(&regs, dt, &p.endian, p.bit_index)
                                         }
-                                        Ok(Err(e)) => {
-                                            failure = Some(PluginError::msg(format!(
-                                                "read_input_registers exception: {}",
-                                                e
-                                            )));
-                                            break 'single;
-                                        }
                                         Err(e) => {
-                                            failure = Some(PluginError::msg(format!(
-                                                "read_input_registers: {}",
-                                                e
-                                            )));
+                                            failure = Some(e);
                                             break 'single;
                                         }
                                     }
                                 }
                                 ModbusArea::HoldingRegister => {
-                                    match ctx.read_holding_registers(p.start, p.count).await {
-                                        Ok(Ok(regs)) => {
+                                    match read_holding_chunked(ctx, p.start, p.count).await {
+                                        Ok(regs) => {
                                             register_to_value_ext(&regs, dt, &p.endian, p.bit_index)
                                         }
-                                        Ok(Err(e)) => {
-                                            failure = Some(PluginError::msg(format!(
-                                                "read_holding_registers exception: {}",
-                                                e
-                                            )));
-                                            break 'single;
-                                        }
                                         Err(e) => {
-                                            failure = Some(PluginError::msg(format!(
-                                                "read_holding_registers: {}",
-                                                e
-                                            )));
+                                            failure = Some(e);
                                             break 'single;
                                         }
                                     }

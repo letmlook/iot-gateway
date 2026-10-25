@@ -189,7 +189,19 @@ impl OfflineQueue {
         r
     }
 
-    /// 放回队首（补发失败时回滚）
+    /// 查看队首但不出队。
+    ///
+    /// 补发应当「先 peek、发布成功后再 pop」：出队会累计消费字节并触发文件压缩，
+    /// 压缩会把该条记录从文件里删掉；若发布失败再放回队首，放回的只是内存副本，
+    /// 文件里已经没有它了 —— 此时重启进程，这条消息就永久丢失。
+    pub fn peek_front(&self) -> Option<&Record> {
+        self.mem.front()
+    }
+
+    /// 放回队首（补发失败时回滚）。
+    ///
+    /// 注意：这里只恢复内存状态，**不会**把记录写回文件 ——
+    /// 需要持久化时请改用「peek + 发布成功后 pop」的顺序（见 `peek_front`）。
     pub fn push_front(&mut self, record: Record) {
         if self.consumed_bytes > 0 {
             let len = Self::record_len(&record) as u64;

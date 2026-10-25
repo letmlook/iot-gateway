@@ -293,7 +293,16 @@ impl SouthPlugin for VirbPlugin {
                                         }
                                     }
                                 }
-                                _ => {}
+                                Ok(_) => {}
+                                Err(e) => {
+                                    // UDP 接收错误不能吞：设备掉线 / IP 配错时，
+                                    // socket 会持续返回 Err，若不记日志，节点状态一直是
+                                    // Running，监控页却恒显示 0，运维无法判断是设备没数据还是网关坏了。
+                                    log::warn(
+                                        node_id,
+                                        format!("virb udp recv failed: {}", e),
+                                    );
+                                }
                             }
                         }
                     }
@@ -400,14 +409,30 @@ impl SouthPlugin for VirbPlugin {
             }
         }
 
+        // 周期内的聚合：每个通道取「各包时域最大值的最大」。
+        // 只看最后一个包的话，周期内的振动峰值会漏掉（峰值往往出现在别的包里）。
+        let mut agg_max: Vec<f64> = Vec::new();
+        for p in &packets {
+            for (i, v) in p.data_maxs.iter().enumerate() {
+                if i >= agg_max.len() {
+                    agg_max.resize(i + 1, f64::NEG_INFINITY);
+                }
+                if *v > agg_max[i] {
+                    agg_max[i] = *v;
+                }
+            }
+        }
+        if agg_max.is_empty() {
+            agg_max = vec![0.0; channels];
+        }
+
         let mut out = Vec::with_capacity(tags.len());
         for tag in tags {
             let ch_index = parse_address(&tag.address, channels).unwrap_or(0);
             let value = if packets.is_empty() {
                 0.0_f64
             } else {
-                let last = packets.last().unwrap();
-                last.data_maxs.get(ch_index).copied().unwrap_or(0.0) * unit_factor
+                agg_max.get(ch_index).copied().unwrap_or(0.0) * unit_factor
             };
             out.push((tag.id, DataValue::Float64(value)));
         }

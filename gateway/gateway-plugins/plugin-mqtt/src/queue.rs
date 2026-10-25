@@ -198,13 +198,13 @@ impl OfflineQueue {
         r
     }
 
-    /// 放回队首（补发失败时回滚）
-    pub fn push_front(&mut self, record: Record) {
-        if self.consumed_bytes > 0 {
-            let len = Self::record_len(&record) as u64;
-            self.consumed_bytes = self.consumed_bytes.saturating_sub(len);
-        }
-        self.mem.push_front(record);
+    /// 查看队首但不出队。
+    ///
+    /// 补发应当「先 peek、发布成功后再 pop」：出队会累计消费字节并触发文件压缩，
+    /// 压缩会把该条记录从文件里删掉；若发布失败再放回队首，放回的只是内存副本，
+    /// 文件里已经没有它了 —— 此时重启进程，这条消息就永久丢失。
+    pub fn peek_front(&self) -> Option<&Record> {
+        self.mem.front()
     }
 
     pub fn len(&self) -> usize {
@@ -448,15 +448,35 @@ mod tests {
     }
 
     #[test]
-    fn rollback_after_failed_flush_restores_order() {
+    fn peek_then_pop_keeps_record_on_failed_publish() {
         let mut q = OfflineQueue::memory_only(10);
         q.push(rec("a", "1"));
         q.push(rec("b", "2"));
-        let first = q.pop_front().unwrap();
-        // 补发失败 → 放回队首
-        q.push_front(first);
-        assert_eq!(q.pop_front(), Some(rec("a", "1")));
+        // 补发流程：先 peek（不消费），发布成功后才 pop
+        assert_eq!(q.peek_front().unwrap().topic, "a");
+        // 发布失败 → 不 pop，记录仍在队首，顺序不变
+        assert_eq!(q.peek_front().unwrap().topic, "a");
+        q.pop_front();
+        assert_eq!(q.peek_front().unwrap().topic, "b");
         assert_eq!(q.pop_front(), Some(rec("b", "2")));
+    }
+
+    #[test]
+    fn failed_flush_keeps_record_persisted_across_restart() {
+        let path = tmp_path("failed-flush");
+        {
+            let mut q = OfflineQueue::open(Some(path.clone()), 10);
+            q.push(rec("a", "1"));
+            // peek 后发布失败：不 pop，文件里必须还在
+            assert_eq!(q.peek_front().unwrap().topic, "a");
+        }
+        // 重启后记录仍在（否则补发失败 + 重启 = 数据永久丢失）
+        let q = OfflineQueue::open(Some(path.clone()), 10);
+        assert_eq!(
+            q.peek_front().map(|r| r.topic.clone()),
+            Some("a".to_string())
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
