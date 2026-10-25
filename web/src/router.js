@@ -1,5 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import { api } from './api.js'
+import { api, setUnauthorizedHandler } from './api.js'
 
 const routes = [
   {
@@ -149,6 +149,14 @@ router.beforeEach((to) => {
 
 router.onError((err) => {
   console.error('[router]', err)
+})
+
+// 会话失效（401）时由请求层回调跳登录页：本路由是 history 模式，
+// 改 location.hash 不会触发路由跳转，必须走 router。
+setUnauthorizedHandler(() => {
+  const current = router.currentRoute.value
+  if (current.path === '/login') return
+  router.replace({ path: '/login', query: { redirect: current.fullPath } })
 })
 
 export default router

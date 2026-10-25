@@ -45,6 +45,16 @@ async function parseErrorResponse(r, text) {
  * 用一个进程级标记避免并发请求把跳转叠加多次。
  */
 let redirecting = false
+let unauthorizedHandler = null
+
+/**
+ * 注册 401 后的跳转回调。由 router.js 在创建路由后调用。
+ * @param {(() => void)|null} handler
+ */
+export function setUnauthorizedHandler(handler) {
+  unauthorizedHandler = handler
+}
+
 function handleUnauthorized() {
   try {
     localStorage.removeItem(TOKEN_KEY)
@@ -53,11 +63,22 @@ function handleUnauthorized() {
   } catch (_) {}
   if (redirecting) return
   redirecting = true
-  // 使用 hash 路由，避免在任意子路径下刷新导致 404
-  if (!window.location.hash.startsWith('#/login')) {
-    window.location.hash = '#/login'
+  // 跳转交给 router.js 注册的回调：本路由用的是 history 模式，
+  // 改 location.hash 不会触发路由跳转，只会把登录页显示不出来、
+  // 把用户困在一个已失效的会话里。
+  if (unauthorizedHandler) {
+    unauthorizedHandler()
   }
   setTimeout(() => { redirecting = false }, 1000)
+}
+
+/**
+ * 构造带 Bearer 凭据的请求头。凡是绕过 `req()` 直接用 fetch 的接口
+ * （文件下载、二进制上传下载）都必须带上，否则后端一律 401。
+ */
+function authHeaders() {
+  const token = getStoredToken()
+  return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
 /**
@@ -140,7 +161,7 @@ export const api = {
   backup: (password) =>
     fetch(`${BASE}/backup`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify(password != null && password !== '' ? { password } : {}),
     }).then(async (r) => {
       if (!r.ok) throw await parseErrorResponse(r, await r.text())
@@ -153,6 +174,7 @@ export const api = {
   restore: (formData) =>
     fetch(`${BASE}/restore`, {
       method: 'POST',
+      headers: { ...authHeaders() },
       body: formData,
     }).then(async (r) => {
       const text = await r.text()
@@ -214,9 +236,7 @@ export const api = {
   uploadConfigFile: (file) => {
     const formData = new FormData()
     formData.append('file', file)
-    const token = getStoredToken()
-    const headers = token ? { Authorization: `Bearer ${token}` } : {}
-    return fetch(`${BASE}/upload`, { method: 'POST', headers, body: formData }).then(async (r) => {
+    return fetch(`${BASE}/upload`, { method: 'POST', headers: authHeaders(), body: formData }).then(async (r) => {
       const text = await r.text()
       if (!r.ok) throw await parseErrorResponse(r, text)
       const data = text ? JSON.parse(text) : null
@@ -227,19 +247,16 @@ export const api = {
   // 离线授权（完全离线，无网络请求）
   licenseMachineId: () => req('GET', '/license/machine-id'),
   licenseStatus: () => req('GET', '/license/status'),
-  uploadLicense: (formData) => {
-    const token = getStoredToken()
-    const headers = token ? { Authorization: `Bearer ${token}` } : {}
-    return fetch(`${BASE}/license/upload`, {
+  uploadLicense: (formData) =>
+    fetch(`${BASE}/license/upload`, {
       method: 'POST',
-      headers,
+      headers: authHeaders(),
       body: formData,
     }).then(async (r) => {
       const text = await r.text()
       if (!r.ok) throw await parseErrorResponse(r, text)
       return text ? JSON.parse(text) : null
-    })
-  },
+    }),
   resetLicense: () => req('POST', '/license/reset'),
 
   // 用户管理（需认证）
@@ -258,9 +275,7 @@ export const api = {
 
   // 日志管理
   downloadLog: (type = 'all') => {
-    const token = getStoredToken()
-    const headers = token ? { Authorization: `Bearer ${token}` } : {}
-    return fetch(`${BASE}/logs/download?type=${type}`, { headers }).then(async (r) => {
+    return fetch(`${BASE}/logs/download?type=${type}`, { headers: authHeaders() }).then(async (r) => {
       if (!r.ok) throw await parseErrorResponse(r, await r.text())
       const blob = await r.blob()
       const disposition = r.headers.get('Content-Disposition')

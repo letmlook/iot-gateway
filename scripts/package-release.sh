@@ -76,9 +76,6 @@ cp -R config "$OUT/config"
 # 授权文件与机器码绑定、私钥绝不能分发：从包里剔除（现场用 rotate/gen 脚本单独生成）
 rm -f "$OUT/config/license.dat"
 find "$OUT/config" -name "*.pem" -delete
-# 授权文件与机器码绑定、私钥绝不能分发：从包里剔除（现场用 rotate/gen 脚本单独生成）
-rm -f "$OUT/config/license.dat"
-find "$OUT/config" -name "*.pem" -delete
 cp -R deploy "$OUT/deploy"
 [ -f README.md ] && cp README.md "$OUT/"
 

@@ -19,6 +19,7 @@ const selectedGroup = ref('')
 const tags = ref([])
 const allTags = ref([])
 const tagValues = ref({})
+const valueTs = ref({})
 const loading = ref(false)
 const error = ref('')
 const autoRefresh = ref(false)
@@ -125,14 +126,51 @@ async function readValues() {
   try {
     const res = await api.nodeValues(selectedNode.value)
     const newValues = { ...tagValues.value }
+    const newTs = { ...valueTs.value }
     ;(res.values || []).forEach(v => {
-      if (v.available) newValues[v.tag_id] = v.value
+      // 采集链路失败时后端不会写入缓存（available=false）：必须清掉旧值，
+      // 否则设备已停仍显示最后一次成功值，看起来像「设备还活着但值不动」。
+      newValues[v.tag_id] = v.available ? v.value : null
+      newTs[v.tag_id] = v.available ? v.ts : null
     })
     tagValues.value = newValues
-    lastUpdateTime.value = new Date()
+    valueTs.value = newTs
+    // 「更新时间」用**数据本身的采集时刻**，而不是本次请求时刻：
+    // 设备停采后时间会停在原地，运维一眼能看出数据已陈旧。
+    lastUpdateTime.value = oldestValueTime(newTs)
   } catch (e) {
     console.error('读取实时值失败', e)
   }
+}
+
+// 页面展示的时间取所有点位里**最旧**的一个：只要有一个点位停采，
+// 整体数据就不再是新的，取最新值会掩盖陈旧数据。
+function oldestValueTime(tsMap) {
+  const times = Object.values(tsMap).filter(t => typeof t === 'number')
+  if (!times.length) return null
+  return new Date(Math.min(...times))
+}
+
+// 采集时刻距今超过该阈值即视为陈旧：按所在组的采集周期推算，取不到周期时用 10s。
+function staleThresholdMs(tag) {
+  const group = groups.value.find(g => g.id === tag.group_id)
+  const interval = Number(group?.interval_ms)
+  if (!Number.isFinite(interval) || interval <= 0) return 10000
+  return Math.max(3000, interval * 3)
+}
+
+// 该点位的值是否已陈旧（采集链路可能已失败/停止）
+function isStale(tag) {
+  const ts = valueTs.value[tag.id]
+  if (typeof ts !== 'number') return false
+  return Date.now() - ts > staleThresholdMs(tag)
+}
+
+// 悬浮提示：这个值是什么时候采到的（不是页面刷新时间）
+function valueTimeHint(tag) {
+  const ts = valueTs.value[tag.id]
+  if (typeof ts !== 'number') return t('monitor.noDataYet')
+  return t('monitor.valueTime', { time: new Date(ts).toLocaleTimeString() })
 }
 
 // 显式「立即读取设备」：会真实下发到设备，只在用户主动点击时使用
@@ -142,9 +180,15 @@ async function readFromDevice() {
     const ids = tags.value.map(t => t.id)
     const result = await api.readTags(selectedNode.value, ids)
     const newValues = { ...tagValues.value }
-    result.forEach(([tid, val]) => { newValues[tid] = val })
+    const newTs = { ...valueTs.value }
+    const now = Date.now()
+    result.forEach(([tid, val]) => {
+      newValues[tid] = val
+      newTs[tid] = now
+    })
     tagValues.value = newValues
-    lastUpdateTime.value = new Date()
+    valueTs.value = newTs
+    lastUpdateTime.value = oldestValueTime(newTs)
   } catch (e) {
     console.error('读取设备失败', e)
   }
@@ -155,6 +199,7 @@ function onNodeChange() {
   tags.value = []
   allTags.value = []
   tagValues.value = {}
+  valueTs.value = {}
   writeInputs.value = {}
   loadGroups()
   loadTags()
@@ -197,32 +242,53 @@ function getValueClass(val) {
   return 'value-normal'
 }
 
+// 整数/浮点的字面量校验：parseInt/parseFloat 对 "12abc" 会静默取前缀 12、
+// 对 "abc" 会返回 NaN（JSON.stringify 后变成 null），都会把非法值送到设备侧。
+const INT_RE = /^[+-]?\d+$/
+const FLOAT_RE = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/
+
+// 各整数类型的取值范围与 SDK 的 DataValue 变体名（用于写值前的本地校验）
+const INT_RANGE = {
+  int8: [-128, 127],
+  int16: [-32768, 32767],
+  int32: [-2147483648, 2147483647],
+  int64: [Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
+  uint8: [0, 255],
+  uint16: [0, 65535],
+  uint32: [0, 4294967295],
+  uint64: [0, Number.MAX_SAFE_INTEGER]
+}
+const INT_TYPE_NAME = {
+  int8: 'Int8', int16: 'Int16', int32: 'Int32', int64: 'Int64',
+  uint8: 'UInt8', uint16: 'UInt16', uint32: 'UInt32', uint64: 'UInt64'
+}
+
 function parseDataValue(dataType, raw) {
   if (raw === '' || raw === undefined || raw === null) return null
   const s = String(raw).trim()
   const t = (dataType || 'Float64').toLowerCase()
-  try {
-    if (t === 'bool' || t === 'boolean') {
-      const v = s.toLowerCase()
-      if (v === 'true' || v === '1') return { type: 'Bool', value: true }
-      if (v === 'false' || v === '0') return { type: 'Bool', value: false }
-      return null
-    }
-    if (t === 'int8') return { type: 'Int8', value: parseInt(s, 10) }
-    if (t === 'int16') return { type: 'Int16', value: parseInt(s, 10) }
-    if (t === 'int32') return { type: 'Int32', value: parseInt(s, 10) }
-    if (t === 'int64') return { type: 'Int64', value: parseInt(s, 10) }
-    if (t === 'uint8') return { type: 'UInt8', value: parseInt(s, 10) >>> 0 }
-    if (t === 'uint16') return { type: 'UInt16', value: parseInt(s, 10) >>> 0 }
-    if (t === 'uint32') return { type: 'UInt32', value: parseInt(s, 10) >>> 0 }
-    if (t === 'uint64') return { type: 'UInt64', value: parseInt(s, 10) }
-    if (t === 'float32') return { type: 'Float32', value: parseFloat(s) }
-    if (t === 'float64' || t === 'float') return { type: 'Float64', value: parseFloat(s) }
-    if (t === 'string') return { type: 'String', value: s }
-    return { type: 'Float64', value: parseFloat(s) }
-  } catch {
+  if (t === 'bool' || t === 'boolean') {
+    const v = s.toLowerCase()
+    if (v === 'true' || v === '1') return { type: 'Bool', value: true }
+    if (v === 'false' || v === '0') return { type: 'Bool', value: false }
     return null
   }
+  if (t === 'string') return { type: 'String', value: s }
+  if (INT_RANGE[t]) {
+    if (!INT_RE.test(s)) return null
+    const n = Number(s)
+    if (!Number.isSafeInteger(n)) return null // 超出 JS 安全整数范围：写下去会静默改值
+    const [lo, hi] = INT_RANGE[t]
+    if (n < lo || n > hi) return null
+    return { type: INT_TYPE_NAME[t], value: n }
+  }
+  if (t === 'float32' || t === 'float64' || t === 'float') {
+    if (!FLOAT_RE.test(s)) return null
+    const n = Number(s)
+    if (!Number.isFinite(n)) return null
+    return { type: t === 'float32' ? 'Float32' : 'Float64', value: n }
+  }
+  return null
 }
 
 async function writeTag(tag) {
@@ -415,9 +481,12 @@ onUnmounted(() => {
         </el-table-column>
         <el-table-column :label="t('monitor.value')" min-width="140">
           <template #default="{ row }">
-            <span :class="['value-cell', getValueClass(tagValues[row.id])]">
-              {{ formatValue(tagValues[row.id]) }}
-            </span>
+            <el-tooltip :content="valueTimeHint(row)" placement="top">
+              <span :class="['value-cell', getValueClass(tagValues[row.id]), { 'value-stale': isStale(row) }]">
+                {{ formatValue(tagValues[row.id]) }}
+                <span v-if="isStale(row)" class="stale-mark">{{ t('monitor.staleData') }}</span>
+              </span>
+            </el-tooltip>
           </template>
         </el-table-column>
         <el-table-column prop="description" :label="t('common.description')" min-width="100" show-overflow-tooltip>
@@ -640,6 +709,21 @@ onUnmounted(() => {
 
 .value-cell.value-empty {
   color: var(--text-muted);
+}
+
+/* 陈旧数据：采集时刻已明显落后，提示运维数据不可信 */
+.value-cell.value-stale {
+  color: var(--warning);
+}
+
+.stale-mark {
+  margin-left: 0.3rem;
+  font-size: 0.7rem;
+  padding: 0.05rem 0.3rem;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--warning);
+  color: var(--warning);
+  white-space: nowrap;
 }
 
 .value-cell.value-true {
