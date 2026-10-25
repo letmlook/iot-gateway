@@ -52,6 +52,24 @@ const DEFAULT_ADMIN_USERNAME: &str = "admin";
 const AUDIT_RETENTION_DAYS: i64 = 14;
 /// 连续登录失败达到该次数后临时锁定账号，防止暴力破解
 const MAX_FAILED_LOGINS: u32 = 5;
+/// 账号处于锁定状态时，两次口令校验之间的最小间隔（秒）。
+///
+/// 锁定用于限制「错误口令」的尝试速率（每次校验都是一次昂贵的 Argon2 运算），
+/// 但不应把「知道正确口令的人」也锁在门外——否则未认证的第三方只要持续发失败请求，
+/// 就能让管理员永久无法登录。因此锁定期间仍按该间隔放行一次校验机会：
+/// 正确口令照常登录成功，错误口令的速率被限制在约 2 次/分钟。
+const LOCK_VERIFY_INTERVAL_SECS: i64 = 30;
+
+/// 单个账号的登录尝试记录
+#[derive(Debug, Default, Clone, Copy)]
+struct LoginAttempts {
+    /// 连续失败次数
+    count: u32,
+    /// 最近一次失败时间（秒）
+    last_fail: i64,
+    /// 最近一次口令校验时间（秒）：锁定期间据此限速放行
+    last_check: i64,
+}
 /// 登录失败锁定时长（秒）
 const LOGIN_LOCK_SECS: i64 = 300;
 
@@ -185,13 +203,22 @@ fn err_string(e: PersistError) -> String {
 /// 经 `Db::with` 串行执行，保证 Send。当 open 失败时使用 empty()，此时所有接口返回空/假/错误，不阻塞启动。
 pub struct UserStore {
     db: Option<Arc<Db>>,
-    tokens: RwLock<std::collections::HashMap<String, Session>>,
+    /// token 会话缓存。
+    ///
+    /// 用 `std::sync::RwLock` 而非 tokio 的：tokio 版的 `try_read()` 在写者持锁时直接失败，
+    /// 会把「锁竞争」误判成「token 无效」，他人登录/改密的瞬间其他用户被随机踢下线（401）。
+    ///
+    /// 注意：std 的读写守卫是 `!Send`，**不能出现在 async 函数的栈帧里**
+    /// （否则 future 变成 !Send，axum 的 Handler 约束直接不满足）。
+    /// 因此所有访问都走 `tokens_read` / `tokens_write` 这两个同步辅助函数——
+    /// 守卫只存在于它们的栈上，不会进入调用方的 async 状态机。
+    tokens: std::sync::RwLock<std::collections::HashMap<String, Session>>,
     /// 会话绝对过期秒数；0 = 永不过期
     session_ttl_secs: u64,
     /// 首次初始化时生成的随机管理员口令（供启动日志/文件输出，取走后清空）
     initial_password: std::sync::OnceLock<String>,
     /// 登录失败计数：username -> (失败次数, 最近失败时间戳秒)
-    failed_logins: RwLock<std::collections::HashMap<String, (u32, i64)>>,
+    failed_logins: RwLock<std::collections::HashMap<String, LoginAttempts>>,
 }
 
 impl UserStore {
@@ -199,7 +226,7 @@ impl UserStore {
     pub fn empty() -> Self {
         Self {
             db: None,
-            tokens: RwLock::new(std::collections::HashMap::new()),
+            tokens: std::sync::RwLock::new(std::collections::HashMap::new()),
             session_ttl_secs: 0,
             initial_password: std::sync::OnceLock::new(),
             failed_logins: RwLock::new(std::collections::HashMap::new()),
@@ -387,7 +414,7 @@ impl UserStore {
         }
         Ok(Self {
             db: Some(db),
-            tokens: RwLock::new(tokens),
+            tokens: std::sync::RwLock::new(tokens),
             session_ttl_secs,
             initial_password,
             failed_logins: RwLock::new(std::collections::HashMap::new()),
@@ -423,21 +450,32 @@ impl UserStore {
             tracing::warn!("login failed: username is empty");
             return Err("username required".into());
         }
-        // 登录失败限流：连续失败达到阈值后临时锁定，防止暴力破解
+        // 登录失败限流：连续失败达到阈值后临时锁定，防止暴力破解。
+        //
+        // 两个要点：
+        // 1. **计数在校验口令之前原子完成**：否则并发的 N 个请求会全部通过阈值检查，
+        //    实际尝试次数远超阈值，限流形同虚设。
+        // 2. **锁定期间仍放行「每 LOCK_VERIFY_INTERVAL_SECS 一次」的校验机会**：
+        //    正确口令不会被永远锁在门外（未认证攻击者否则可以用低频失败把管理员锁死），
+        //    同时错误口令的尝试速率被限制住，Argon2 的 CPU 开销有界。
         {
             let now = now_secs();
-            let fl = self.failed_logins.read().await;
-            if let Some((count, last)) = fl.get(username.as_str()) {
-                if *count >= MAX_FAILED_LOGINS && now - *last < LOGIN_LOCK_SECS {
-                    let left = LOGIN_LOCK_SECS - (now - *last);
-                    tracing::warn!(
-                        "login blocked: account '{}' locked ({}s left)",
-                        username,
-                        left
-                    );
-                    return Err(format!("account temporarily locked, retry after {}s", left));
-                }
+            let mut fl = self.failed_logins.write().await;
+            let entry = fl.entry(username.clone()).or_default();
+            let locked =
+                entry.count >= MAX_FAILED_LOGINS && now - entry.last_fail < LOGIN_LOCK_SECS;
+            if locked && now - entry.last_check < LOCK_VERIFY_INTERVAL_SECS {
+                let left = LOGIN_LOCK_SECS - (now - entry.last_fail);
+                tracing::warn!(
+                    "login blocked: account '{}' locked ({}s left)",
+                    username,
+                    left
+                );
+                return Err(format!("account temporarily locked, retry after {}s", left));
             }
+            entry.count += 1;
+            entry.last_check = now;
+            entry.last_fail = now;
         }
         let password = password.to_string();
         let self_ttl = self.session_ttl_secs;
@@ -510,37 +548,40 @@ impl UserStore {
         .map_err(|e| e.to_string())?;
         match result {
             Ok((token, expires_at, user, old_token)) => {
-                let mut tokens = self.tokens.write().await;
-                if let Some(t) = old_token {
-                    if !t.is_empty() {
-                        tokens.remove(&t);
+                self.tokens_write(|tokens| {
+                    if let Some(t) = old_token {
+                        if !t.is_empty() {
+                            tokens.remove(&t);
+                        }
                     }
-                }
-                // 顶号：旧 token 已移除；新 token 按登录时刻签发绝对过期
-                tokens.insert(
-                    token.clone(),
-                    Session {
-                        role: user.role,
-                        tenant_id: user.tenant_id.clone(),
-                        username: user.username.clone(),
-                        expires_at,
-                    },
-                );
-                drop(tokens);
+                    // 顶号：旧 token 已移除；新 token 按登录时刻签发绝对过期
+                    tokens.insert(
+                        token.clone(),
+                        Session {
+                            role: user.role,
+                            tenant_id: user.tenant_id.clone(),
+                            username: user.username.clone(),
+                            expires_at,
+                        },
+                    );
+                });
                 self.failed_logins.write().await.remove(&user_key);
                 Ok((token, expires_at, user))
             }
             Err(e) => {
-                let now = now_secs();
-                let mut fl = self.failed_logins.write().await;
-                let entry = fl.entry(user_key.clone()).or_insert((0, now));
-                entry.0 += 1;
-                entry.1 = now;
+                // 失败次数已在口令校验之前原子记账（见上），这里只补日志
+                let count = self
+                    .failed_logins
+                    .read()
+                    .await
+                    .get(&user_key)
+                    .map(|a| a.count)
+                    .unwrap_or(0);
                 tracing::warn!(
                     "login failed for '{}': {} consecutive failure(s), {} left before lock",
                     user_key,
-                    entry.0,
-                    MAX_FAILED_LOGINS.saturating_sub(entry.0)
+                    count,
+                    MAX_FAILED_LOGINS.saturating_sub(count)
                 );
                 Err(e)
             }
@@ -549,7 +590,9 @@ impl UserStore {
 
     /// 登出：使该 token 立即失效（清空 DB 中的 token 并移出内存缓存）
     pub async fn logout(&self, token: &str) -> Result<(), String> {
-        self.tokens.write().await.remove(token);
+        self.tokens_write(|tokens| {
+            tokens.remove(token);
+        });
         let db = match self.db() {
             Some(d) => d,
             None => return Ok(()),
@@ -570,11 +613,28 @@ impl UserStore {
         Ok(())
     }
 
+    /// 读 token 会话缓存（同步）。
+    ///
+    /// 守卫只活在本函数的栈上：调用方即使是 async 函数，其 future 也不会因此变成 !Send。
+    fn tokens_read<R>(
+        &self,
+        f: impl FnOnce(&std::collections::HashMap<String, Session>) -> R,
+    ) -> R {
+        let t = self.tokens.read().unwrap_or_else(|e| e.into_inner());
+        f(&t)
+    }
+
+    /// 写 token 会话缓存（同步）。同样只在同步栈上持有守卫。
+    fn tokens_write(&self, f: impl FnOnce(&mut std::collections::HashMap<String, Session>)) {
+        let mut t = self.tokens.write().unwrap_or_else(|e| e.into_inner());
+        f(&mut t);
+    }
+
     /// 取 token 对应用户的角色与租户，供授权（RBAC）与租户判定使用。
     /// 过期判定收敛在此处：过期会话按未知 token 处理（认证中间件据此返回 401），
     /// 过期条目不在此处删除（需要写锁；条目数 = 用户数，每用户单 token，由下次登录顶号时惰性清出）。
     pub fn auth_of(&self, token: &str) -> Option<(UserRole, String)> {
-        self.tokens.try_read().ok().and_then(|t| {
+        self.tokens_read(|t| {
             let s = t.get(token)?;
             if s.is_expired(now_secs()) {
                 None
@@ -590,10 +650,17 @@ impl UserStore {
         self.auth_of(token).map(|(role, _)| role)
     }
 
+    /// 解除某账号的登录锁定（管理员操作）：清空失败计数。
+    /// 用于账号被锁定后由管理员手动恢复，避免只能靠重启服务解锁。
+    pub async fn unlock(&self, username: &str) -> bool {
+        let key = username.trim();
+        self.failed_logins.write().await.remove(key).is_some()
+    }
+
     /// 取 token 对应用户的用户名（T7 审计六元组用），语义与 auth_of 一致：
     /// 未知或已过期 token 返回 None。
     pub fn username_of(&self, token: &str) -> Option<String> {
-        self.tokens.try_read().ok().and_then(|t| {
+        self.tokens_read(|t| {
             let s = t.get(token)?;
             if s.is_expired(now_secs()) {
                 None
@@ -801,7 +868,9 @@ impl UserStore {
         .map_err(|e| e.to_string())??;
         if let Some(t) = old_token {
             if !t.is_empty() {
-                self.tokens.write().await.remove(&t);
+                self.tokens_write(|tokens| {
+                    tokens.remove(&t);
+                });
             }
         }
         Ok(deleted)
@@ -842,10 +911,21 @@ impl UserStore {
         .map_err(|e| e.to_string())??;
         if let Some(t) = old_token {
             if !t.is_empty() {
-                self.tokens.write().await.remove(&t);
+                self.tokens_write(|tokens| {
+                    tokens.remove(&t);
+                });
             }
         }
         Ok(())
+    }
+
+    /// 用户库是否可用。
+    ///
+    /// false = DB 打不开（open 失败后回退到 empty()）。此时**不能**把「无法查询用户数」
+    /// 当成「没有用户」：认证中间件会用它决定是否给匿名请求放行 Admin，
+    /// 两者混同就等于「数据库一坏 → 认证整体消失」的后门。
+    pub fn is_available(&self) -> bool {
+        self.db().is_some()
     }
 
     pub async fn has_any_user(&self) -> Result<bool, String> {
@@ -1181,13 +1261,7 @@ mod tests {
         );
 
         // 内存条目与 DB 列一致
-        let mem = store
-            .tokens
-            .read()
-            .await
-            .get(&token)
-            .expect("session cached")
-            .clone();
+        let mem = store.tokens_read(|t| t.get(&token).expect("session cached").clone());
         assert_eq!(mem.role, UserRole::Viewer);
         assert_eq!(mem.expires_at, Some(exp));
         let db: Option<i64> = Connection::open(&path)
@@ -1271,13 +1345,7 @@ mod tests {
             None,
             "token_expiry 为 NULL 的存量旧 token 视为已过期（安全优先）"
         );
-        let mem = store
-            .tokens
-            .read()
-            .await
-            .get("tok-future")
-            .expect("loaded")
-            .clone();
+        let mem = store.tokens_read(|t| t.get("tok-future").expect("loaded").clone());
         assert_eq!(
             mem.expires_at,
             Some(now + 3_600),

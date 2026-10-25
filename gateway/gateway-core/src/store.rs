@@ -31,7 +31,22 @@ impl Store {
         self.nodes.insert(node.id(), node);
     }
 
+    /// 删除节点，并**级联删除**它名下的组与点位。
+    ///
+    /// 不级联的话，点位会留在 `tags` / `tag_location` 里：
+    /// 授权配额按 `tags.len()` 统计 → 删除节点后额度仍被占用；
+    /// 且已删除节点的点位仍能被 API 写入设备。
     pub fn node_remove(&self, id: NodeId) -> Option<crate::node::Node> {
+        // 先摘掉该节点的全部组与点位
+        let group_ids: Vec<GroupId> = self
+            .groups
+            .iter()
+            .filter(|e| e.key().0 == id)
+            .map(|e| e.key().1)
+            .collect();
+        for gid in group_ids {
+            let _ = self.group_remove(id, gid);
+        }
         self.nodes.remove(&id).map(|(_, v)| v)
     }
 
@@ -82,8 +97,18 @@ impl Store {
         self.groups.insert((node_id, g.id), g);
     }
 
+    /// 删除组，并**级联删除**该组下的点位（否则点位会成为孤儿：
+    /// 列表接口看不到，但仍占授权额度、仍可被写入设备）。
     pub fn group_remove(&self, node_id: NodeId, group_id: GroupId) -> Option<Group> {
-        self.group_tags.remove(&(node_id, group_id));
+        let tag_ids = self
+            .group_tags
+            .remove(&(node_id, group_id))
+            .map(|(_, v)| v)
+            .unwrap_or_default();
+        for tid in tag_ids {
+            self.tags.remove(&tid);
+            self.tag_location.remove(&tid);
+        }
         self.groups.remove(&(node_id, group_id)).map(|(_, v)| v)
     }
 

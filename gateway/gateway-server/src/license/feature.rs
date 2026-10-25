@@ -57,13 +57,36 @@ impl FeatureManager {
         Some((expiry - chrono::Utc::now().date_naive()).num_days())
     }
 
+    /// 授权是否仍然有效（未过期）。
+    ///
+    /// 到期判定必须**在运行时**做，不能只在启动加载时做一次：一份
+    /// `expiry_date = 2026-10-25` 的授权在当天启动后一直运行到第二天，
+    /// 期间收费功能仍会被放行、点位数仍按授权上限放行。
+    fn payload_active(p: &crate::license::LicensePayload) -> bool {
+        let expiry = match chrono::NaiveDate::parse_from_str(p.expiry_date.trim(), "%Y-%m-%d") {
+            Ok(d) => d,
+            Err(e) => {
+                // 日期无法解析：按无效处理（fail-closed），不放行收费功能
+                tracing::warn!("license expiry_date invalid ({}), treating as expired", e);
+                return false;
+            }
+        };
+        // 与加载时的判定口径一致：`expiry < 今天` 才算过期（到期日当天仍有效）
+        expiry >= chrono::Utc::now().date_naive()
+    }
+
     /// 判断当前授权是否允许访问指定功能。
     /// 通过解析授权文件中的 features 数组：若包含 feature_name 则返回 true。
-    /// 无授权或未包含该功能名时返回 false（免费版不可用）。
+    /// 无授权、未包含该功能名、或授权已过期时返回 false（免费版不可用）。
     pub fn can_access(&self, feature_name: &str) -> bool {
         match self.inner.read() {
             Ok(guard) => match &*guard {
-                Some(p) => p.features.iter().any(|f| f == feature_name),
+                Some(p) => {
+                    if !Self::payload_active(p) {
+                        return false;
+                    }
+                    p.features.iter().any(|f| f == feature_name)
+                }
                 None => false,
             },
             Err(_) => false,
@@ -102,6 +125,9 @@ impl FeatureManager {
         match self.inner.read() {
             Ok(guard) => match &*guard {
                 Some(p) => {
+                    if !Self::payload_active(p) {
+                        return false;
+                    }
                     // 检查是否有 all_plugins 授权
                     if p.features.iter().any(|f| f == "all_plugins") {
                         return true;
@@ -155,8 +181,9 @@ impl FeatureManager {
     pub fn max_tags(&self) -> Option<u64> {
         match self.inner.read() {
             Ok(guard) => match &*guard {
-                Some(p) => p.max_tags.filter(|&n| n > 0),
-                None => Some(FREE_MODE_MAX_TAGS), // 免费模式限制 50 个点位
+                // 授权过期后按免费模式限额（与 can_use_plugin 同一口径）
+                Some(p) if Self::payload_active(p) => p.max_tags.filter(|&n| n > 0),
+                _ => Some(FREE_MODE_MAX_TAGS), // 免费模式限制 50 个点位
             },
             Err(_) => Some(FREE_MODE_MAX_TAGS),
         }

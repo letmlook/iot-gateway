@@ -429,7 +429,22 @@ impl Config {
         }
         if let Ok(s) = std::env::var("GATEWAY_HISTORY_RETENTION_HOURS") {
             if let Ok(n) = s.parse::<u64>() {
-                c.history_retention_hours = n;
+                // 0 会被当成「清空整库」、超大值会让毫秒换算溢出：
+                // 两者都会把保留期算成负数/未来，结果是历史库被周期性删空。
+                let clamped = n.clamp(1, crate::history::MAX_RETENTION_HOURS);
+                if clamped != n {
+                    tracing::warn!(
+                        "GATEWAY_HISTORY_RETENTION_HOURS={} out of range, clamped to {}",
+                        n,
+                        clamped
+                    );
+                }
+                c.history_retention_hours = clamped;
+            } else {
+                tracing::warn!(
+                    "GATEWAY_HISTORY_RETENTION_HOURS is not a valid number, ignored: {}",
+                    s
+                );
             }
         }
         if let Ok(s) = std::env::var("GATEWAY_HISTORY_FLUSH_MS") {

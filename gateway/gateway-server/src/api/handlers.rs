@@ -311,6 +311,35 @@ pub async fn change_password(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// 解除账号的登录锁定（管理员）。
+///
+/// 账号连续登录失败达到阈值后会被临时锁定；锁定期内正确口令同样被拒。
+/// 没有解锁入口时，被锁死的账号只能靠重启服务（`GATEWAY_RESET_ADMIN_PASSWORD=1`）恢复，
+/// 现场排障成本很高。
+pub async fn unlock_user(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = parse_user_id(&id)?;
+    let user = state
+        .user_store
+        .get(&id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("user not found"))?;
+    let had_failures = state.user_store.unlock(&user.username).await;
+    tracing::info!(
+        "login lock cleared for user '{}' (had_failures={})",
+        user.username,
+        had_failures
+    );
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "username": user.username,
+        "had_failures": had_failures,
+    })))
+}
+
 // ---------- Tenants ----------
 /// 租户列表：Admin 返回所有租户；Operator/Viewer 仅返回自身租户（按 id/name 形式）。
 pub async fn list_tenants(
@@ -517,13 +546,24 @@ pub async fn upload_license(
         std::fs::create_dir_all(parent)
             .map_err(|e| ApiError::internal(format!("create dir failed: {}", e)))?;
     }
-    std::fs::write(&license_path, &data)
+    // 先写临时文件、校验通过后再原子替换正式授权文件。
+    //
+    // 直接覆盖正式文件再校验是有风险的：校验失败时旧的有效授权已经被覆盖，
+    // 而「删掉失败的文件」会把正式授权一并删掉 —— 现场表现为「一次误传，
+    // 重启后付费插件全没了」，且原授权不可恢复。
+    let tmp_path = license_path.with_extension("dat.tmp");
+    std::fs::write(&tmp_path, &data)
         .map_err(|e| ApiError::internal(format!("write license failed: {}", e)))?;
 
-    // 验证授权文件
-    match crate::license::load_and_verify_license(&license_path) {
+    // 验证授权文件（针对临时文件）
+    match crate::license::load_and_verify_license(&tmp_path) {
         Ok(payload) => {
             let features = payload.features.clone();
+            // 校验通过：原子替换正式授权文件
+            std::fs::rename(&tmp_path, &license_path).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp_path);
+                ApiError::internal(format!("replace license failed: {}", e))
+            })?;
             state.feature_manager.update_license(payload);
             tracing::info!("license uploaded and activated, features: {:?}", features);
             Ok(Json(serde_json::json!({
@@ -533,8 +573,8 @@ pub async fn upload_license(
             })))
         }
         Err(e) => {
-            // 验证失败，删除上传的文件
-            let _ = std::fs::remove_file(&license_path);
+            // 验证失败：只删临时文件，正式授权保持原样
+            let _ = std::fs::remove_file(&tmp_path);
             tracing::warn!("license upload failed: {}", e);
             Err(ApiError::bad_request(format!(
                 "license validation failed: {}",
@@ -1609,7 +1649,7 @@ pub async fn remove_tag(
     let tag_id = parse_tag_id(&tid)?;
     state
         .manager
-        .tag_remove(tag_id)
+        .tag_remove(nid, tag_id)
         .ok_or_else(|| ApiError::not_found("tag not found"))?;
     state.persist().await;
     Ok(StatusCode::NO_CONTENT)

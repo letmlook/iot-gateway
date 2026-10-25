@@ -189,8 +189,15 @@ impl Manager {
         self.store.rule_get(id)
     }
 
+    /// 新增/更新规则。
+    ///
+    /// 运行期状态（是否已触发、去抖计时）一并重置：规则内容变了（阈值、动作、
+    /// for_ms/clear_ms）却沿用旧的 `fired=true`，会让新动作永远不执行——
+    /// 界面上还显示「已触发」，看不出规则其实已经失效。
     pub fn rule_insert(&self, rule: crate::rules::Rule) {
+        let rule_id = rule.id.clone();
         self.store.rule_insert(rule);
+        crate::rules::engine().forget(&rule_id);
     }
 
     /// 删除规则，同时清掉它的运行期状态
@@ -237,9 +244,13 @@ impl Manager {
         match kind {
             gateway_sdk::NodeKind::South => {
                 let p = plugin_south.as_ref().ok_or("south plugin not found")?;
-                p.open(id, config.clone())
-                    .await
-                    .map_err(|e| e.to_string())?;
+                if let Err(e) = p.open(id, config.clone()).await {
+                    // open 失败同样要回滚：否则 store 里留下一个「幽灵节点」，
+                    // 调用方只拿到错误串、拿不到节点 id，连删都删不掉，
+                    // 还会被后续 persist 写进数据库。
+                    let _ = self.store.node_remove(id);
+                    return Err(e.to_string());
+                }
                 if let Err(e) = p.init(id).await {
                     let _ = p.close(id).await;
                     let _ = self.store.node_remove(id);
@@ -324,6 +335,10 @@ impl Manager {
         let Some(north) = self.store.node_get(north_node_id) else {
             return Vec::new();
         };
+        // 去重：同一 (南向节点, 组) 订阅两次会让总线在同一分区上挂两个接收器，
+        // 同一条数据被转发两次到北向插件（MQTT 侧表现为同 topic 发两条）。
+        let mut seen: std::collections::HashSet<(NodeId, gateway_sdk::GroupId)> =
+            std::collections::HashSet::new();
         subs.into_iter()
             .filter(|s| {
                 let Some(n) = self.store.node_get(s.south_node_id) else {
@@ -336,7 +351,10 @@ impl Manager {
                     return false;
                 }
                 // 同域校验：两端域由迁移保证非空，恒可比
-                north.config.tenant_id == n.config.tenant_id
+                if north.config.tenant_id != n.config.tenant_id {
+                    return false;
+                }
+                seen.insert((s.south_node_id, s.group_id))
             })
             .collect()
     }
@@ -625,6 +643,26 @@ impl Manager {
     /// 应用持久化快照（清空后填入），并对每个节点调用插件 open、init。
     /// 恢复保存的运行状态：快照中为 Running 的节点会自动启动。
     pub async fn apply_snapshot(&self, s: &Snapshot) {
+        // 恢复前先把**当前正在跑的节点全部停掉**：
+        // 1) 只清 store 不停任务的话，被快照删掉的节点仍在轮询（每 200ms 空转一轮），
+        //    插件侧的设备连接也一直挂着；
+        // 2) 快照里仍存在的节点会被 node_start 再起一套调度任务，旧任务还在跑 ——
+        //    同一组被两个任务重复采集，重复数据被发到总线，北向收到双份。
+        let running: Vec<NodeId> = self
+            .store
+            .nodes_list()
+            .into_iter()
+            .filter(|n| n.state == NodeState::Running)
+            .map(|n| n.id())
+            .collect();
+        for nid in running {
+            if let Err(e) = self.node_stop(nid).await {
+                tracing::warn!(node_id = ?nid, "apply_snapshot node_stop failed: {}", e);
+            }
+        }
+        // 规则引擎的运行期状态也一并清空：恢复后规则应从「未触发」重新开始
+        crate::rules::engine().clear();
+
         self.store.clear();
         apply_to_store(&self.store, s);
         let mut t = self.subscriptions.write().await;
@@ -728,6 +766,13 @@ impl Manager {
         node_id: NodeId,
         group_id: gateway_sdk::GroupId,
     ) -> Option<Group> {
+        // 先取组内点位（store 里的删除是级联的），用于清理最近值缓存
+        let group_tag_ids: Vec<gateway_sdk::TagId> = self
+            .store
+            .tags_by_group(node_id, group_id)
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
         let g = self.store.group_remove(node_id, group_id);
         if g.is_some() {
             self.remove_subscriptions_ref_group(node_id, group_id).await;
@@ -735,6 +780,11 @@ impl Manager {
             self.bus.forget_group(&(node_id, group_id));
             // 过滤状态与窗口状态按组清零
             crate::filters::forget_group(node_id, group_id);
+            // 组下的点位已被级联删除：最近值缓存里的对应条目也要清掉，
+            // 否则长期「导入点位→删组」会让缓存只增不减。
+            for tid in group_tag_ids {
+                self.last_values.remove(&(node_id, tid));
+            }
         }
         g
     }
@@ -821,6 +871,14 @@ impl Manager {
 
     /// 校验通过后再添加 tag。同组内标签名唯一，重复返回 Err。
     pub async fn tag_add_validated(&self, node_id: NodeId, t: Tag) -> Result<(), String> {
+        // 组必须属于本节点：否则会挂出 (节点A, 节点B的组) 这样的错位键，
+        // 该点位既在 A 的标签列表里看不到，也永远不会被采集，却占着授权点位额度。
+        if self.store.group_get(node_id, t.group_id).is_none() {
+            return Err(format!(
+                "group {:?} does not belong to this node",
+                t.group_id
+            ));
+        }
         if self
             .store
             .tag_get_by_name(node_id, t.group_id, &t.name)
@@ -883,8 +941,21 @@ impl Manager {
         Ok(out)
     }
 
-    pub fn tag_remove(&self, tag_id: gateway_sdk::TagId) -> Option<Tag> {
-        self.store.tag_remove(tag_id)
+    /// 删除点位（校验归属）：标签必须属于该节点，否则不删。
+    ///
+    /// 不校验归属的话，`DELETE /nodes/{A}/tags/{B的标签}` 会把 **B 节点**的点位删掉，
+    /// 而调用方以为删的是 A 的——跨节点误删且无法从 A 的接口侧看出来。
+    pub fn tag_remove(&self, node_id: NodeId, tag_id: gateway_sdk::TagId) -> Option<Tag> {
+        let (nid, _) = self.store.tag_location_get(tag_id)?;
+        if nid != node_id {
+            return None;
+        }
+        let removed = self.store.tag_remove(tag_id);
+        if removed.is_some() {
+            // 最近值缓存同步清理，避免删除的点位在缓存里长期残留
+            self.last_values.remove(&(node_id, tag_id));
+        }
+        removed
     }
 
     pub fn tags_by_group(&self, node_id: NodeId, group_id: gateway_sdk::GroupId) -> Vec<Tag> {

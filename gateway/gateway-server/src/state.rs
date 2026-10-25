@@ -26,6 +26,12 @@ pub struct AppState {
     pub db: Option<Arc<Db>>,
     /// 持久化脏标记：true 表示内存中已有尚未落盘的变更
     persist_dirty: Arc<std::sync::atomic::AtomicBool>,
+    /// 落盘串行锁：保证「清标记 → 取快照 → 写库」是一个原子步骤。
+    ///
+    /// 两个并发 flush 各自取快照再写库时，后写者会用自己的快照覆盖先写者；
+    /// 若先写的快照更旧（B 先取、A 后取），较新的变更就被回退了，而脏标记
+    /// 已被清零 —— 该变更直到下次变更或重启前都不会再落盘。
+    persist_lock: Arc<tokio::sync::Mutex<()>>,
     _loader: Option<Arc<PluginLoader>>,
     /// 进程隔离模式下的插件加载器（含各子进程的重启计数）；inproc 模式为 None
     pub plugin_processes: Option<Arc<ProcessPluginLoader>>,
@@ -51,6 +57,7 @@ impl AppState {
             node_log_names,
             db,
             persist_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            persist_lock: Arc::new(tokio::sync::Mutex::new(())),
             _loader: loader.map(Arc::new),
             plugin_processes: None,
             ws_shutdown: WsShutdown::new(),
@@ -92,6 +99,8 @@ impl AppState {
     /// 落盘失败时保留脏标记，交由下一次触发重试。
     pub async fn flush(&self) {
         use std::sync::atomic::Ordering;
+        // 整个「清标记 → 取快照 → 写库」串行执行：并发 flush 不会互相覆盖
+        let _guard = self.persist_lock.lock().await;
         if !self.persist_dirty.swap(false, Ordering::Relaxed) {
             return;
         }

@@ -342,7 +342,11 @@ pub async fn evaluate_and_fire(
                 let tag = store.tag_get_by_name(node_id, group_id, tag_name);
                 match tag {
                     Some(tag) => {
-                        let payload = [(tag, gateway_sdk::types::DataValue::Float64(*value))];
+                        // 必须按目标点位的 data_type 装箱：写值插件按 DataValue 变体分派，
+                        // 一律用 Float64 的话，线圈会写成 false（报警永远置不起来），
+                        // 16 位寄存器会被当成 32 位浮点写 4 个寄存器（覆盖相邻工艺数据）。
+                        let dv = value_for_tag(&tag, *value);
+                        let payload = [(tag, dv)];
                         match plugin.write_tags(node_id, &payload).await {
                             Ok(()) => tracing::info!(
                                 rule = %rule.name,
@@ -373,6 +377,35 @@ pub async fn evaluate_and_fire(
         }
     }
     (fired, failed)
+}
+
+/// 按点位声明的数据类型把规则里的 f64 阈值转换成对应的 DataValue。
+///
+/// 规则里的值本身是数值（阈值/设定值），但写值插件按 DataValue 的**变体**分派
+/// （线圈看 Bool、保持寄存器按整型/浮点宽度拆分），变体选错就会写错值，
+/// 甚至多写几个寄存器覆盖掉相邻点位。
+pub fn value_for_tag(tag: &gateway_sdk::types::Tag, value: f64) -> gateway_sdk::types::DataValue {
+    use gateway_sdk::types::DataValue;
+    let dt = tag
+        .data_type
+        .as_deref()
+        .unwrap_or("float64")
+        .to_ascii_lowercase();
+    match dt.as_str() {
+        "bool" | "boolean" => DataValue::Bool(value != 0.0),
+        "int8" => DataValue::Int8(value as i8),
+        "int16" => DataValue::Int16(value as i16),
+        "int32" => DataValue::Int32(value as i32),
+        "int64" => DataValue::Int64(value as i64),
+        "uint8" => DataValue::UInt8(value as u8),
+        "uint16" => DataValue::UInt16(value as u16),
+        "uint32" => DataValue::UInt32(value as u32),
+        "uint64" => DataValue::UInt64(value as u64),
+        "float32" => DataValue::Float32(value as f32),
+        "string" => DataValue::String(format!("{}", value)),
+        // float64 及其它未声明类型
+        _ => DataValue::Float64(value),
+    }
 }
 
 /// 从 `(TagId, DataValue)` 列表构造 `tag_name -> f64`，非数值点位跳过

@@ -410,10 +410,18 @@ fn write_batch(conn: &Connection, batch: &[Sample]) -> rusqlite::Result<u64> {
     Ok(batch.len() as u64)
 }
 
+/// 保留时长上限（小时）：3 年。超出该值的配置视为无效，
+/// 否则毫秒换算会溢出，cutoff 落到「未来」反而把整库删空。
+pub const MAX_RETENTION_HOURS: u64 = 24 * 365 * 3;
+
 /// 按保留时长与行数上限清理历史
 fn prune(conn: &Connection, cfg: &HistoryConfig) -> rusqlite::Result<u64> {
     let mut removed = 0u64;
-    let cutoff = now_ms() - (cfg.retention_hours as i64) * 3_600_000;
+    // 保留时长必须落在合理区间：`retention_hours = 0`（常被当成"不限制"）
+    // 会让 cutoff = now，把整库删空；超大值则会让毫秒乘法溢出，
+    // cutoff 落到"未来"，同样把整库删空。
+    let retention_hours = cfg.retention_hours.clamp(1, MAX_RETENTION_HOURS) as i64;
+    let cutoff = now_ms().saturating_sub(retention_hours.saturating_mul(3_600_000));
     removed += conn.execute("DELETE FROM samples WHERE ts < ?1", params![cutoff])? as u64;
 
     // 行数上限：分批删除最旧的，避免一次删太多长时间持锁
@@ -471,10 +479,15 @@ pub struct SeriesQuery {
 }
 
 /// 桶宽度：把区间切成不超过 `max_points` 个桶，最小 1ms
+///
+/// 全程用饱和运算：`from/to` 来自查询串，可以是 i64 极值。
+/// 若 `span + n - 1` 溢出回绕成负数，除法截断为 0，桶宽会退化成 1ms ——
+/// `GROUP BY ts` 于是返回「每个样本一个桶」，一个只读请求就能让响应体膨胀到
+/// 百 MB 级（上限是 max_rows）。
 pub fn bucket_ms(from_ms: i64, to_ms: i64, max_points: u32) -> i64 {
-    let span = (to_ms - from_ms).max(1);
+    let span = to_ms.saturating_sub(from_ms).max(1);
     let n = max_points.max(1) as i64;
-    ((span + n - 1) / n).max(1)
+    span.saturating_add(n - 1).saturating_div(n).max(1)
 }
 
 /// 查询降采样序列：SQL 侧分桶聚合，返回的点数不超过 `max_points`

@@ -222,9 +222,15 @@ impl PluginProcess {
             }
         }
         let shared = self.spawn_child().await?;
-        *self.shared.lock().await = Some(shared.clone());
+        // 先完成生命周期重放，**再**把通道发布出去。
+        //
+        // 早发布的话，其它任务会在重放还没做完时就通过 acquire() 拿到通道并发出
+        // 自己的 RPC 帧，该帧可能插到 open/init/start 之间 —— 插件侧节点还没
+        // open 完，采集直接失败，节点被误判为错误。崩溃后第一轮采集必命中。
+        //
         // 首次启动时表为空，重放是空操作；真正的重启才是它存在的意义
         self.replay(&shared).await;
+        *self.shared.lock().await = Some(shared.clone());
         Ok(shared)
     }
 
@@ -324,10 +330,20 @@ impl PluginProcess {
     async fn call(&self, op: &str, args: serde_json::Value) -> Result<serde_json::Value, String> {
         let shared = self.acquire().await?;
         let out = self.call_on(&shared, op, args.clone()).await;
-        if out.is_ok() {
-            self.record_lifecycle(op, &args).await;
+        // 生命周期类调用**无论成功与否都要更新记录**：
+        // 只在成功时记录的话，close/stop 失败（例如子进程正好崩溃）会让已删除的
+        // 节点仍留在重放表里，下一次子进程重启时又被 open+start 起来 ——
+        // 插件侧重新连上一台已经下线的设备，而网关侧再也发不出 close。
+        match out {
+            Ok(v) => {
+                self.record_lifecycle(op, &args, true).await;
+                Ok(v)
+            }
+            Err(e) => {
+                self.record_lifecycle(op, &args, false).await;
+                Err(e)
+            }
         }
-        out
     }
 
     /// 在既有通道上发起 RPC（不做 acquire，也不会触发重放；供重放自身使用）
@@ -381,8 +397,12 @@ impl PluginProcess {
         }
     }
 
-    /// 记录会影响插件内存状态的生命周期调用（成功后才记）
-    async fn record_lifecycle(&self, op: &str, args: &serde_json::Value) {
+    /// 记录会影响插件内存状态的生命周期调用。
+    ///
+    /// `ok=false` 表示该次 RPC 失败：对 `close`/`stop` 仍然要落到「已关闭/已停止」，
+    /// 否则子进程重启后会把已经删除的节点重新 open+start（设备连接泄漏）。
+    /// 对 `open` 则相反：失败时不记录，避免重放一个从未成功打开的节点。
+    async fn record_lifecycle(&self, op: &str, args: &serde_json::Value, ok: bool) {
         let node_key = args
             .get("node_id")
             .and_then(|v| v.as_str().map(|s| s.to_string()))
@@ -396,6 +416,9 @@ impl PluginProcess {
         let mut map = self.runtimes.lock().await;
         match op {
             "open" => {
+                if !ok {
+                    return;
+                }
                 map.insert(
                     node_key,
                     NodeRuntime {
@@ -405,6 +428,7 @@ impl PluginProcess {
                 );
             }
             "close" => {
+                // 失败也要摘除：节点已被网关侧删除，重放它只会重新连上已下线的设备
                 map.remove(&node_key);
             }
             "setting" => {
@@ -414,7 +438,7 @@ impl PluginProcess {
             }
             "start" => {
                 if let Some(rt) = map.get_mut(&node_key) {
-                    rt.started = true;
+                    rt.started = ok;
                 }
             }
             "stop" => {

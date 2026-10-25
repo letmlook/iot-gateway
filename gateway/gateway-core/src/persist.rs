@@ -918,6 +918,9 @@ pub async fn save_secret(
             &path_buf,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
         )?;
+        // 数据库里存着设备连接凭据（未设 GATEWAY_SECRET_KEY 时还是明文）：
+        // SQLite 默认按 0644 创建文件，本机任意用户都能读走。显式收紧到 0600。
+        restrict_permissions(&path_buf);
         ensure_schema(&conn)?;
         // 备份改为节流执行（默认每小时一次）且使用一致性快照，
         // 不再「每次保存都整文件 copy」造成 O(库大小) 开销。
@@ -972,8 +975,28 @@ fn maybe_backup(conn: &Connection, path: &Path) -> Result<(), PersistError> {
         "VACUUM INTO ?1",
         [backup_path.to_string_lossy().to_string()],
     )?;
+    // 备份与主库同样含凭据，权限一并收紧
+    restrict_permissions(&backup_path);
     info!(path = %backup_path.display(), "database snapshot created");
     Ok(())
+}
+
+/// 把文件权限收紧到仅属主可读写（0600）。
+///
+/// SQLite 默认按进程 umask 创建数据文件（通常是 0644），其中存着设备连接的
+/// 账号口令；同机其它用户可以直接读取。备份文件同理。
+fn restrict_permissions(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!("restrict permissions on {} failed: {}", path.display(), e);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
 }
 
 // ---------- 共享连接（Db）：data.db 的进程内单长连接 ----------

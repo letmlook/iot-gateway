@@ -112,8 +112,8 @@ pub fn remove_node_log_file(
 /// 避免长期运行的现场把磁盘写满。
 const NODE_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
-/// 缓存条目：(当前使用的文件名 base, 文件句柄)
-type WriterCache = HashMap<String, (String, std::fs::File)>;
+/// 缓存条目：(当前使用的文件名 base, 文件句柄, 已写字节数)
+type WriterCache = HashMap<String, (String, std::fs::File, u64)>;
 
 /// 按 node_id 将事件写入对应节点日志文件的 Layer；文件名统一用 node_log_names 中的节点名
 struct NodeFileLayer {
@@ -150,29 +150,53 @@ impl NodeFileLayer {
         if !too_big {
             return;
         }
+        self.rotate_file(path);
+        if let Ok(mut map) = self.writers.lock() {
+            map.remove(node_id);
+        }
+    }
+
+    /// 把当前文件轮转为 `.log.1`（仅保留一代）
+    fn rotate_file(&self, path: &std::path::Path) {
         let rotated = path.with_extension("log.1");
         let _ = std::fs::remove_file(&rotated);
         let _ = std::fs::rename(path, &rotated);
+    }
+
+    /// 记录本次写入的字节数（轮转判断用，避免每行都做一次 stat）
+    fn note_written(&self, node_id: &str, n: usize) {
         if let Ok(mut map) = self.writers.lock() {
-            map.remove(node_id);
+            if let Some(entry) = map.get_mut(node_id) {
+                entry.2 = entry.2.saturating_add(n as u64);
+            }
         }
     }
 
     fn writer_for(&self, node_id: &str) -> std::io::Result<std::fs::File> {
         let base = self.filename_base_for(node_id);
         let mut map = self.writers.lock().unwrap();
-        if let Some((cached_base, f)) = map.get_mut(node_id) {
+        if let Some((cached_base, f, written)) = map.get_mut(node_id) {
             if *cached_base == base {
-                return f.try_clone();
+                // 缓存命中时也要检查大小：否则 10MB 上限只在首次打开文件时判定一次，
+                // 句柄一旦进缓存就再不复查 —— 日志文件会一路涨到撑满磁盘，
+                // 连带 SQLite 写入与历史落库一起失败。
+                if *written < NODE_LOG_MAX_BYTES {
+                    return f.try_clone();
+                }
+                // 超限：先轮转（丢弃缓存句柄），再重建
+                let path = self.dir.join(format!("{}.log", base));
+                self.rotate_file(&path);
+                map.remove(node_id);
+            } else {
+                // 节点重命名，移除旧条目，使用新文件名
+                map.remove(node_id);
             }
-            // 节点重命名，移除旧条目，使用新文件名
-            map.remove(node_id);
         }
         let path = self.dir.join(format!("{}.log", base));
         drop(map);
         self.rotate_if_needed(node_id, &path);
         let mut map = self.writers.lock().unwrap();
-        if let Some((cached_base, f)) = map.get_mut(node_id) {
+        if let Some((cached_base, f, _)) = map.get_mut(node_id) {
             if *cached_base == base {
                 return f.try_clone();
             }
@@ -180,9 +204,10 @@ impl NodeFileLayer {
         let f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(path)?;
+            .open(&path)?;
+        let written = f.metadata().map(|m| m.len()).unwrap_or(0);
         let out = f.try_clone()?;
-        map.insert(node_id.to_string(), (base, f));
+        map.insert(node_id.to_string(), (base, f, written));
         Ok(out)
     }
 }
@@ -210,6 +235,7 @@ where
         if let Ok(mut f) = self.writer_for(node_id) {
             let _ = f.write_all(line.as_bytes());
             let _ = f.flush();
+            self.note_written(node_id, line.len());
         }
     }
 }

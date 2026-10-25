@@ -173,22 +173,34 @@ impl SouthPlugin for SouthSoAdapter {
             .clone()
     }
 
+    /// 配置 Schema：与其它 FFI 调用一样走 `run_sync`（独立线程执行）。
+    ///
+    /// 直接在调用者线程上调用是不安全的：插件侧 `handle_ref` 生成 `&T`，
+    /// 而 open/poll_group 等走 `handle_mut` 生成 `&mut T`，两者指向同一个插件对象。
+    /// 前端打开「新增节点」表单（异步 handler，跑在 tokio worker 线程上）时
+    /// 与正在进行的采集并发，就会同时持有 `&T` 和 `&mut T` —— 违反 Rust 独占引用规则。
     fn config_schema(&self) -> Option<ConfigSchema> {
-        let ptr = unsafe { (self.config_schema)(self.handle) };
-        let s = unsafe { gateway_sdk::ptr_to_string(ptr) };
-        if !ptr.is_null() {
-            unsafe { (self.free_string)(ptr) };
-        }
-        s.and_then(|s| serde_json::from_str(&s).ok())
+        let raw = self.run_sync(|handle| {
+            let ptr = unsafe { (self.config_schema)(handle) };
+            let s = unsafe { gateway_sdk::ptr_to_string(ptr) };
+            if !ptr.is_null() {
+                unsafe { (self.free_string)(ptr) };
+            }
+            s.ok_or_else(|| "config schema null".to_string())
+        });
+        raw.ok().and_then(|s| serde_json::from_str(&s).ok())
     }
 
     fn tag_schema(&self) -> Option<TagSchema> {
-        let ptr = unsafe { (self.tag_schema)(self.handle) };
-        let s = unsafe { gateway_sdk::ptr_to_string(ptr) };
-        if !ptr.is_null() {
-            unsafe { (self.free_string)(ptr) };
-        }
-        s.and_then(|s| serde_json::from_str(&s).ok())
+        let raw = self.run_sync(|handle| {
+            let ptr = unsafe { (self.tag_schema)(handle) };
+            let s = unsafe { gateway_sdk::ptr_to_string(ptr) };
+            if !ptr.is_null() {
+                unsafe { (self.free_string)(ptr) };
+            }
+            s.ok_or_else(|| "tag schema null".to_string())
+        });
+        raw.ok().and_then(|s| serde_json::from_str(&s).ok())
     }
 
     async fn open(&self, node_id: NodeId, config: PluginConfig) -> gateway_sdk::PluginResult<()> {
@@ -511,13 +523,18 @@ impl NorthPlugin for NorthSoAdapter {
             .clone()
     }
 
+    /// 配置 Schema：走 `run_sync`（独立线程执行），与其它 FFI 调用保持一致。
+    /// 详见 SouthSoAdapter::config_schema 的说明（&T 与 &mut T 并发的未定义行为）。
     fn config_schema(&self) -> Option<ConfigSchema> {
-        let ptr = unsafe { (self.config_schema)(self.handle) };
-        let s = unsafe { gateway_sdk::ptr_to_string(ptr) };
-        if !ptr.is_null() {
-            unsafe { (self.free_string)(ptr) };
-        }
-        s.and_then(|s| serde_json::from_str(&s).ok())
+        let raw = self.run_sync(|handle| {
+            let ptr = unsafe { (self.config_schema)(handle) };
+            let s = unsafe { gateway_sdk::ptr_to_string(ptr) };
+            if !ptr.is_null() {
+                unsafe { (self.free_string)(ptr) };
+            }
+            s.ok_or_else(|| "config schema null".to_string())
+        });
+        raw.ok().and_then(|s| serde_json::from_str(&s).ok())
     }
 
     async fn open(&self, node_id: NodeId, config: PluginConfig) -> gateway_sdk::PluginResult<()> {

@@ -224,7 +224,14 @@ async fn auth_middleware(
     let ctx = match resolve_bearer(&state, auth) {
         Some(c) => Some(c),
         None => {
-            // 既未配置静态 token 也无任何用户：视为"未初始化"放行（与历史行为一致）
+            // 既未配置静态 token 也无任何用户：视为"未初始化"放行（与历史行为一致）。
+            //
+            // 但「未初始化」只在**用户库健康**时成立：用户库打不开（DB 损坏/只读）时
+            // 必须 fail-closed —— 否则「数据库一坏 → 匿名直接拿到 Admin」就成了后门。
+            if !state.user_store.is_available() {
+                tracing::error!("auth: user store unavailable, denying anonymous access");
+                return ApiError::unauthorized().into_response();
+            }
             let has_users = state.user_store.has_any_user().await.ok() == Some(true);
             if state.config.token.is_none() && !has_users {
                 Some(AuthContext {
@@ -381,6 +388,7 @@ pub fn router(state: AppState) -> Router<AppState> {
                 .delete(handlers::delete_user),
         )
         .route("/users/:id/password", put(handlers::change_password))
+        .route("/users/:id/unlock", post(handlers::unlock_user))
         // ---- 租户 CRUD（不过 v1 别名） ----
         .route(
             "/tenants",

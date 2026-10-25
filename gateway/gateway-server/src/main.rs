@@ -265,7 +265,19 @@ node credentials such as MQTT passwords will be stored in PLAINTEXT in data.db. 
             tracing::info!("loaded snapshot from {}", db_path.display());
         }
         Ok(None) => {}
-        Err(e) => tracing::warn!("persist load failed: {}, starting with empty config", e),
+        Err(e) => {
+            // 加载失败必须**拒绝启动**，不能「以空配置继续跑」：
+            // 落盘是「UPSERT + 删除差集」的全量替换，空快照会把库里原有的
+            // 节点/组/点位/订阅/规则全部 DELETE 掉 —— 一次启动就能把现场配置清空
+            // （版本不匹配、库损坏、JSON 解析失败都会走到这里）。
+            // 保留 data.db 不动，由运维修好库或换回匹配的版本再启动。
+            tracing::error!(
+                "persist load failed from {}: {} — refusing to start (an empty config would overwrite the existing database)",
+                db_path.display(),
+                e
+            );
+            return Err(format!("failed to load configuration from {}", db_path.display()).into());
+        }
     }
 
     let _ = crate::config::STATIC_DIR.set(config.static_dir.clone());
@@ -407,15 +419,24 @@ Backups created now can only be restored by this running instance. Set a fixed s
     tracing::info!("gateway listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, serve)
-        .with_graceful_shutdown(shutdown_signal(shutdown_state))
+        .with_graceful_shutdown(shutdown_signal(shutdown_state.clone()))
         .await?;
+    // 到这里说明：已停止接收新连接，且**在途请求都已结束**。
+    // 此时停节点并强制落盘，最后一次配置变更才不会丢
+    // （去抖窗口内只置脏标记，后台落盘任务又随进程一起退出）。
+    stop_running_nodes(&shutdown_state.manager).await;
+    shutdown_state.flush().await;
+    shutdown_state.optimize_db().await;
     Ok(())
 }
 
-/// 优雅退出：收到 SIGINT/SIGTERM 后停止接收新请求，顺序停止所有运行中的节点，
-/// 等待采集任务收敛并落盘，避免停机时丢数据或留下孤儿任务。
+/// 优雅退出：等待 SIGINT/SIGTERM，并通知所有 WS 客户端立即断开。
+///
+/// 返回后 axum 停止接收新连接并等待在途请求结束。
+/// **停节点与落盘必须放在 `axum::serve(...).await` 返回之后**：否则 flush 会早于
+/// 在途请求的 persist() —— 去抖窗口内只置了脏标记，后台落盘任务又随进程退出，
+/// 最后一次配置变更就此丢失。
 async fn shutdown_signal(state: AppState) {
-    let manager = state.manager.clone();
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -439,13 +460,6 @@ async fn shutdown_signal(state: AppState) {
         _ = terminate => tracing::info!("SIGTERM received, shutting down gracefully"),
     }
 
-    let running: Vec<_> = manager
-        .nodes_list()
-        .into_iter()
-        .filter(|n| n.state == gateway_sdk::NodeState::Running)
-        .map(|n| n.id())
-        .collect();
-
     // 第一步：向所有 WS 连接广播停机（Close 4002, "server shutting down"），
     // 让客户端立即感知并尽快断开/重连其他实例；随后在有界窗口内等待连接任务退出，
     // 保证关闭帧在停止节点（可能耗时较久）之前就已送达。
@@ -460,6 +474,17 @@ async fn shutdown_signal(state: AppState) {
         );
     }
 
+    tracing::info!("gateway stopped");
+}
+
+/// 顺序停止运行中的节点，等待采集任务收敛，避免留下孤儿任务与半开的设备连接
+async fn stop_running_nodes(manager: &std::sync::Arc<gateway_core::Manager>) {
+    let running: Vec<_> = manager
+        .nodes_list()
+        .into_iter()
+        .filter(|n| n.state == gateway_sdk::NodeState::Running)
+        .map(|n| n.id())
+        .collect();
     if !running.is_empty() {
         tracing::info!("stopping {} running node(s) before exit", running.len());
         for id in running {
@@ -468,11 +493,6 @@ async fn shutdown_signal(state: AppState) {
             }
         }
     }
-    // 退出前强制落盘：去抖窗口内可能仍有未写入的变更
-    state.flush().await;
-    // 共享连接上做一次 PRAGMA optimize（幂等、廉价，维护统计信息）
-    state.optimize_db().await;
-    tracing::info!("gateway stopped");
 }
 
 #[cfg(test)]
