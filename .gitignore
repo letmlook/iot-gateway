@@ -15,6 +15,9 @@
 /data/*.json
 /data/*.dat
 
+# 历史联调遗留数据（曾随复测记录误入库 c573823，2026-11-08 移出版本控制；保留条目防止再次误跟踪）
+data.round1-bak-pre-retest/
+
 # Logs
 *.log
 logs/
