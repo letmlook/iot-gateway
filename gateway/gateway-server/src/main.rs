@@ -430,6 +430,8 @@ Backups created now can only be restored by this running instance. Set a fixed s
     // 到这里说明：已停止接收新连接，且**在途请求都已结束**。
     // 此时停节点并强制落盘，最后一次配置变更才不会丢
     // （去抖窗口内只置脏标记，后台落盘任务又随进程一起退出）。
+    // 流程任务先停（它们消费总线；节点停止前先撤消费者）
+    shutdown_state.flow_runtime.stop_all().await;
     stop_running_nodes(&shutdown_state.manager).await;
     shutdown_state.flush().await;
     shutdown_state.optimize_db().await;

@@ -228,3 +228,99 @@ fn ws_metrics_functions_work() {
     assert_eq!(metric_ws_frames_sent(), 0);
     assert_eq!(metric_ws_frames_dropped(), 0);
 }
+
+/// alarm 帧（v2.0 T1-④）：订阅 alarms topic 的已认证客户端应收到 alarm_feed 广播的告警帧。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alarm_frame_reaches_alarms_subscriber() {
+    use futures_util::{SinkExt, StreamExt};
+    use gateway_server::license::FeatureManager;
+    use gateway_server::state::AppState;
+    use gateway_server::users::UserStore;
+    use std::time::Duration;
+
+    let cfg = gateway_server::config::Config {
+        token: Some("test-token".to_string()),
+        ..Default::default()
+    };
+    let state = AppState::new(
+        Arc::new(gateway_core::Manager::new()),
+        cfg,
+        None,
+        FeatureManager::without_license(),
+        Arc::new(UserStore::empty()),
+        None,
+        None,
+    );
+
+    let app = axum::Router::new()
+        .nest("/api", gateway_server::api::router(state.clone()))
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let url = format!("ws://{addr}/api/v1/ws");
+    let (mut client, _) = tokio_tungstenite::connect_async(url.as_str())
+        .await
+        .unwrap();
+
+    // 认证 + 订阅 alarms topic
+    client
+        .send(Message::Text(
+            r#"{"type":"auth","token":"Bearer test-token"}"#.into(),
+        ))
+        .await
+        .unwrap();
+    client
+        .send(Message::Text(
+            r#"{"type":"subscribe","topics":["alarms"]}"#.into(),
+        ))
+        .await
+        .unwrap();
+
+    // alarm 帧是机会式（broadcast 无缓存、不重放）：等服务端处理完 auth/subscribe 再广播
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // 广播一条告警
+    state.alarm_feed.notify(gateway_server::ws::WsAlarmData {
+        id: "11111111-1111-1111-1111-111111111111".into(),
+        flow_id: "22222222-2222-2222-2222-222222222222".into(),
+        node_name: "alarm-out".into(),
+        level: "high".into(),
+        tag: "temperature".into(),
+        value: Some(91.5),
+        threshold: Some(80.0),
+        message: "overtemp".into(),
+        ts: 1_700_000_000_000,
+    });
+
+    // 读帧直到拿到 alarm 帧（跳过 auth/hello）
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut seen_alarm = false;
+    while tokio::time::Instant::now() < deadline {
+        let msg = match tokio::time::timeout(Duration::from_secs(3), client.next()).await {
+            Ok(Some(Ok(m))) => m,
+            _ => panic!("ws stream ended or timed out before alarm frame"),
+        };
+        if let Message::Text(text) = msg {
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            match v["type"].as_str() {
+                Some("auth") | Some("hello") => continue,
+                Some("alarm") => {
+                    assert_eq!(v["data"]["level"], "high");
+                    assert_eq!(v["data"]["tag"], "temperature");
+                    assert_eq!(v["data"]["value"], 91.5);
+                    assert_eq!(v["data"]["nodeName"], "alarm-out");
+                    seen_alarm = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(seen_alarm, "应收到 alarm 帧");
+
+    let _ = client.send(Message::Close(None)).await;
+}

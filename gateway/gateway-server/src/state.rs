@@ -43,6 +43,8 @@ pub struct AppState {
     pub plugin_processes: Option<Arc<ProcessPluginLoader>>,
     /// WS 停机广播：优雅停机时置位，所有 WS 连接任务向客户端发送 Close(4002) 后退出
     pub ws_shutdown: WsShutdown,
+    /// 告警事件广播（v2.0 T1-④）：flow 运行时产生告警时 notify，WS alarms 订阅者收帧
+    pub alarm_feed: crate::ws::AlarmFeed,
 }
 
 impl AppState {
@@ -70,6 +72,7 @@ impl AppState {
             _loader: loader.map(Arc::new),
             plugin_processes: None,
             ws_shutdown: WsShutdown::new(),
+            alarm_feed: crate::ws::AlarmFeed::new(),
         }
     }
 

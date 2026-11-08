@@ -84,9 +84,27 @@ pub enum WsServerFrame {
     /// nodes 快照帧：服务端周期推送
     #[serde(rename = "nodes")]
     Nodes { nodes: Vec<WsNodeSnapshot> },
+    /// alarm 帧：流程产生的告警事件（机会式推送；REST /api/alarms 为可靠来源）
+    #[serde(rename = "alarm")]
+    Alarm { data: WsAlarmData },
     /// 错误帧
     #[serde(rename = "error")]
     Error { message: String },
+}
+
+/// alarm 帧数据体（camelCase，与前端约定一致）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WsAlarmData {
+    pub id: String,
+    pub flow_id: String,
+    pub node_name: String,
+    pub level: String,
+    pub tag: String,
+    pub value: Option<f64>,
+    pub threshold: Option<f64>,
+    pub message: String,
+    pub ts: i64,
 }
 
 /// values 帧数据体
@@ -134,8 +152,15 @@ impl WsServerFrame {
         WsServerFrame::Hello {
             version: env!("CARGO_PKG_VERSION").to_string(),
             build_date: env!("BUILD_DATE").to_string(),
-            features: vec!["values".to_string(), "nodes".to_string()],
+            features: vec![
+                "values".to_string(),
+                "nodes".to_string(),
+                "alarms".to_string(),
+            ],
         }
+    }
+    fn alarm(data: WsAlarmData) -> Self {
+        WsServerFrame::Alarm { data }
     }
     fn auth_ok() -> Self {
         WsServerFrame::Auth {
@@ -174,6 +199,7 @@ bitflags::bitflags! {
     pub struct Topics: u8 {
         const VALUES = 1 << 0;
         const NODES = 1 << 1;
+        const ALARMS = 1 << 2;
     }
 }
 
@@ -184,6 +210,7 @@ impl Topics {
             match s {
                 "values" => t |= Topics::VALUES,
                 "nodes" => t |= Topics::NODES,
+                "alarms" => t |= Topics::ALARMS,
                 _ => {}
             }
         }
@@ -244,6 +271,37 @@ impl Default for WsShutdown {
         Self {
             tx: Arc::new(watch::Sender::new(false)),
         }
+    }
+}
+
+/// 告警事件广播：流程运行时产生告警时 `notify`，已订阅 `alarms` topic 的 WS 连接
+/// 收到 `alarm` 帧。容量有界（64）：慢消费者 Lagged 丢弃（REST /api/alarms 为可靠
+/// 来源），与 WsShutdown 同理不引入无界资源。
+#[derive(Clone)]
+pub struct AlarmFeed {
+    tx: broadcast::Sender<Arc<WsAlarmData>>,
+}
+
+impl AlarmFeed {
+    pub fn new() -> Self {
+        let (tx, _) = broadcast::channel(64);
+        Self { tx }
+    }
+
+    /// 连接任务订阅告警流
+    pub fn subscribe(&self) -> broadcast::Receiver<Arc<WsAlarmData>> {
+        self.tx.subscribe()
+    }
+
+    /// 广播一条告警（无订阅者时静默丢弃）
+    pub fn notify(&self, alarm: WsAlarmData) {
+        let _ = self.tx.send(Arc::new(alarm));
+    }
+}
+
+impl Default for AlarmFeed {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -410,6 +468,9 @@ where
     // 停机信号：wait_for 对「订阅前标志已置位」的边界同样立即返回，不存在竞态窗口
     let mut shutdown_rx = state.ws_shutdown.subscribe();
 
+    // 告警事件流（订阅 alarms topic 的连接在认证后收到 alarm 帧）
+    let mut alarm_rx = state.alarm_feed.subscribe();
+
     // interval 的首个 tick 立即完成：先消费掉，避免连接刚建立或刚认证时
     // 立即触发服务器 ping / pong 超时判定（曾导致认证后连接被瞬间以
     // Close(1000, "pong timeout") 关闭）/ 快照
@@ -496,6 +557,25 @@ where
                     send_control(&mut sender, Message::Text(serde_json::to_string(&WsServerFrame::auth_fail("auth timeout")).unwrap())).await;
                     send_control(&mut sender, auth_fail_close_frame("auth timeout")).await;
                     break;
+                }
+            }
+
+            // 告警事件（订阅 alarms topic 的连接；机会式推送，REST 为可靠来源）
+            alarm = alarm_rx.recv() => {
+                match alarm {
+                    Ok(a) => {
+                        if session.authenticated && session.topics.contains(Topics::ALARMS) {
+                            let text = serde_json::to_string(&WsServerFrame::alarm((*a).clone()))
+                                .unwrap_or_default();
+                            enqueue_frame(&out_tx, Message::Text(text));
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::debug!("WS alarm feed lagged {} events", n);
+                        WS_FRAMES_DROPPED
+                            .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
 

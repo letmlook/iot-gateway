@@ -115,6 +115,7 @@ impl FlowRuntime {
         };
         let manager = state.manager.clone();
         let alarm_store = state.alarm_store.clone();
+        let alarm_feed = state.alarm_feed.clone();
         let tenant = row.tenant_id.clone();
         let flow_id = row.id;
         let flow_name = row.name.clone();
@@ -143,10 +144,24 @@ impl FlowRuntime {
                             };
                             match (target, &d.payload) {
                                 (SinkTarget::Alarm, gateway_flow::FlowPayload::Alarm(ev)) => {
-                                    if let Err(e) =
-                                        alarm_store.raise(&tenant, &flow_id, node_name, ev)
-                                    {
-                                        error!(flow_id = ?flow_id, "alarm raise error: {e}");
+                                    match alarm_store.raise(&tenant, &flow_id, node_name, ev) {
+                                        Ok(id) => {
+                                            // WS alarm 帧（机会式；REST 为可靠来源）
+                                            alarm_feed.notify(crate::ws::WsAlarmData {
+                                                id: id.to_string(),
+                                                flow_id: flow_id.to_string(),
+                                                node_name: node_name.clone(),
+                                                level: ev.level.as_str().into(),
+                                                tag: ev.tag.clone(),
+                                                value: ev.value,
+                                                threshold: ev.threshold,
+                                                message: ev.message.clone(),
+                                                ts: ev.ts.timestamp_millis(),
+                                            });
+                                        }
+                                        Err(e) => {
+                                            error!(flow_id = ?flow_id, "alarm raise error: {e}");
+                                        }
                                     }
                                 }
                                 (
@@ -174,6 +189,14 @@ impl FlowRuntime {
     /// 停止流程任务（不存在则静默）。
     pub async fn stop(&self, flow_id: Uuid) {
         if let Some(handle) = self.tasks.lock().await.remove(&flow_id) {
+            handle.abort();
+        }
+    }
+
+    /// 优雅停机：停止全部流程任务（main.rs 停机序列在停节点之前调用）。
+    pub async fn stop_all(&self) {
+        let mut tasks = self.tasks.lock().await;
+        for (_, handle) in tasks.drain() {
             handle.abort();
         }
     }

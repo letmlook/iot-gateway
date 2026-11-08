@@ -29,6 +29,7 @@ const FrameType = {
   UNSUBSCRIBE: 'unsubscribe',
   VALUES: 'values',
   NODES: 'nodes',
+  ALARM: 'alarm',
   HELLO: 'hello',
   ERROR: 'error',
 }
