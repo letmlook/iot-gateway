@@ -29,6 +29,8 @@ const mainNavItems = [
   { path: '/north', icon: 'cloud', labelKey: 'menu.northApps' },
   { path: '/monitor', icon: 'monitor', labelKey: 'menu.dataMonitor' },
   { path: '/monitor/history', icon: 'history', labelKey: 'menu.history' },
+  { path: '/monitor/alarms', icon: 'alarms', labelKey: 'menu.alarms' },
+  { path: '/flows', icon: 'flows', labelKey: 'menu.flows' },
   { path: '/plugins', icon: 'plugins', labelKey: 'menu.pluginManage' },
 ]
 

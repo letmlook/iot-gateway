@@ -25,9 +25,9 @@ function isActive(path) {
   if (path === '/dashboard') {
     return route.path === '/dashboard' || route.path === '/'
   }
-  // /monitor 的子页（/monitor/flow、/monitor/history）各自高亮菜单项，不再连带命中父项
+  // /monitor 的子页（/monitor/flow、/monitor/history、/monitor/alarms）各自高亮菜单项，不再连带命中父项
   if (path === '/monitor') {
-    return route.path === '/monitor' || (route.path.startsWith('/monitor/') && !['/monitor/flow', '/monitor/history'].some(p => route.path.startsWith(p)))
+    return route.path === '/monitor' || (route.path.startsWith('/monitor/') && !['/monitor/flow', '/monitor/history', '/monitor/alarms'].some(p => route.path.startsWith(p)))
   }
   return route.path.startsWith(path)
 }
@@ -88,6 +88,12 @@ function toggleCollapsed() {
           </svg>
           <svg v-else-if="item.icon === 'history'" viewBox="0 0 20 20" fill="currentColor">
             <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm.75-12.25a.75.75 0 00-1.5 0v4c0 .27.14.51.37.65l3 1.75a.75.75 0 10.76-1.3l-2.63-1.53v-3.57z" clip-rule="evenodd"/>
+          </svg>
+          <svg v-else-if="item.icon === 'alarms'" viewBox="0 0 20 20" fill="currentColor">
+            <path d="M10 2a6 6 0 00-6 6v3.586l-1.707 1.707A1 1 0 003 15h14a1 1 0 00.707-1.707L16 11.586V8a6 6 0 00-6-6zM7.5 16a2.5 2.5 0 005 0h-5z"/>
+          </svg>
+          <svg v-else-if="item.icon === 'flows'" viewBox="0 0 20 20" fill="currentColor">
+            <path d="M3 3.5A1.5 1.5 0 014.5 2h3A1.5 1.5 0 019 3.5v1A1.5 1.5 0 017.5 6H7v2.5h6V8a1.5 1.5 0 011.5-1.5h3A1.5 1.5 0 0119 8v1a1.5 1.5 0 01-1.5 1.5h-3A1.5 1.5 0 0113 9v-.5H7v2.955a5.002 5.002 0 014 4.795V17a1 1 0 11-2 0 3 3 0 10-6 0 1 1 0 11-2 0v-1a5.002 5.002 0 014-4.795V6H4.5A1.5 1.5 0 013 4.5v-1z" transform="translate(-1 0)"/>
           </svg>
           <svg v-else-if="item.icon === 'plugins'" viewBox="0 0 20 20" fill="currentColor">
             <path d="M11 17a1 1 0 001.447.894l4-2A1 1 0 0017 15V9.236a1 1 0 00-1.447-.894l-4 2a1 1 0 00-.553.894V17zM15.211 6.276a1 1 0 000-1.788l-4.764-2.382a1 1 0 00-.894 0L4.789 4.488a1 1 0 000 1.788l4.764 2.382a1 1 0 00.894 0l4.764-2.382zM4.447 8.342A1 1 0 003 9.236V15a1 1 0 00.553.894l4 2A1 1 0 009 17v-5.764a1 1 0 00-.553-.894l-4-2z"/>

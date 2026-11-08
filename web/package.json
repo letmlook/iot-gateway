@@ -7,12 +7,14 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "test:unit": "node --test tests/*.test.js",
     "gen:openapi": "cargo run -q -p gateway-server --bin export-openapi > ../openapi.json",
     "gen:api": "npm run gen:openapi && openapi-typescript ../openapi.json -o src/types/api.d.ts",
     "typecheck": "tsc -p jsconfig.json"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
+    "@vue-flow/core": "^1.48.2",
     "@vue/shared": "^3.5.27",
     "echarts": "^6.1.0",
     "element-plus": "^2.13.1",

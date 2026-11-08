@@ -91,6 +91,24 @@ const routes = [
     meta: { title: '历史数据' }
   },
   {
+    path: '/monitor/alarms',
+    name: 'AlarmEvents',
+    component: () => import('./views/AlarmEvents.vue'),
+    meta: { title: '告警中心' }
+  },
+  {
+    path: '/flows',
+    name: 'FlowList',
+    component: () => import('./views/FlowList.vue'),
+    meta: { title: '流程编排' }
+  },
+  {
+    path: '/flows/:id/edit',
+    name: 'FlowEditor',
+    component: () => import('./views/FlowEditor.vue'),
+    meta: { title: '流程编辑器' }
+  },
+  {
     path: '/plugins',
     name: 'Plugins',
     component: () => import('./views/Plugins.vue'),

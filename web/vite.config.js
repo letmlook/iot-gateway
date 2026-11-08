@@ -27,6 +27,10 @@ export default defineConfig({
           if (id.includes('echarts') || id.includes('zrender')) {
             return 'echarts'
           }
+          // Vue Flow 仅流程编辑器使用：独立 chunk，保持首屏 vendor 不被撑大
+          if (id.includes('@vue-flow')) {
+            return 'vue-flow'
+          }
           if (id.includes('element-plus') || id.includes('@element-plus')) {
             return 'element-plus'
           }

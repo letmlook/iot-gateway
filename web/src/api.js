@@ -179,6 +179,22 @@ export const api = {
     if (maxPoints != null) q.set('max_points', String(maxPoints))
     return req('GET', `/history/series?${q.toString()}`)
   },
+
+  // 流程编排（v2.0 T1；gateway-server/src/flows.rs + api/flows_api.rs）
+  flows: () => req('GET', '/flows'),
+  flow: (id) => req('GET', `/flows/${id}`),
+  createFlow: (body) => req('POST', '/flows', body),
+  updateFlow: (id, body) => req('PUT', `/flows/${id}`, body),
+  deleteFlow: (id) => req('DELETE', `/flows/${id}`),
+  publishFlow: (id) => req('POST', `/flows/${id}/publish`),
+  unpublishFlow: (id) => req('POST', `/flows/${id}/unpublish`),
+  flowOperators: () => req('GET', '/flows/operators'),
+
+  // 告警事件（v2.0 T1-④；gateway-server/src/alarms.rs + api/alarms_api.rs）
+  alarms: (params) =>
+    req('GET', `/alarms${params ? '?' + new URLSearchParams(params).toString() : ''}`),
+  ackAlarm: (id) => req('POST', `/alarms/${id}/ack`, {}),
+  resolveAlarm: (id) => req('POST', `/alarms/${id}/resolve`, {}),
   backup: (password) =>
     fetch(`${BASE}/backup`, {
       method: 'POST',
