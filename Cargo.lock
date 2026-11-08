@@ -835,6 +835,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gateway-flow"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "gateway-sdk",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
 name = "gateway-plugin-common"
 version = "0.1.0"
 dependencies = [

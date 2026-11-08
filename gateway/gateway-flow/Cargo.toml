@@ -1,0 +1,13 @@
+[package]
+name = "gateway-flow"
+version = "0.1.0"
+edition = "2021"
+description = "流程编排 v2：DAG 数据模型、校验、执行计划与 MVP 算子（设计见 docs/design/流程编排-v2.md）"
+
+[dependencies]
+gateway-sdk = { path = "../gateway-sdk" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
