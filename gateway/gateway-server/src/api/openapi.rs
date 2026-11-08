@@ -1826,6 +1826,60 @@ fn publish_flow() {}
 fn unpublish_flow() {}
 
 // ---------------------------------------------------------------------------
+// 告警事件（v2.0 T1-④；design docs/design/流程编排-v2.md §4.2）
+// ---------------------------------------------------------------------------
+
+/// 列出告警事件（租户过滤；可按 state/level 过滤）。
+#[utoipa::path(
+    get,
+    path = "/api/alarms",
+    tag = "alarms",
+    security(("bearerAuth" = [])),
+    params(
+        ("state" = Option<String>, Query, description = "active|acknowledged|resolved"),
+        ("level" = Option<String>, Query, description = "critical|high|medium|low|info"),
+        ("limit" = Option<i64>, Query, description = "缺省 200，clamp [1,1000]"),
+    ),
+    responses(
+        (status = 200, description = "告警数组", body = Object),
+        (status = 401, description = "未认证", body = Error),
+    )
+)]
+fn list_alarms() {}
+
+/// 确认告警（active → acknowledged，记录操作人；Operator 及以上）。
+#[utoipa::path(
+    post,
+    path = "/api/alarms/{id}/ack",
+    tag = "alarms",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "告警 id（UUID）")),
+    responses(
+        (status = 200, description = "已确认", body = Object),
+        (status = 400, description = "不存在/跨租户/已非 active", body = Error),
+        (status = 401, description = "未认证", body = Error),
+        (status = 403, description = "需要 Operator 及以上", body = Error),
+    )
+)]
+fn ack_alarm() {}
+
+/// 解除告警（active|acknowledged → resolved 终态；Admin）。
+#[utoipa::path(
+    post,
+    path = "/api/alarms/{id}/resolve",
+    tag = "alarms",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "告警 id（UUID）")),
+    responses(
+        (status = 200, description = "已解除", body = Object),
+        (status = 400, description = "不存在/跨租户/已 resolved", body = Error),
+        (status = 401, description = "未认证", body = Error),
+        (status = 403, description = "需要 Admin", body = Error),
+    )
+)]
+fn resolve_alarm() {}
+
+// ---------------------------------------------------------------------------
 // OpenAPI 汇总
 // ---------------------------------------------------------------------------
 
@@ -1916,6 +1970,9 @@ fn unpublish_flow() {}
         delete_flow,
         publish_flow,
         unpublish_flow,
+        list_alarms,
+        ack_alarm,
+        resolve_alarm,
         list_rules,
         create_rule,
         update_rule,
@@ -2090,6 +2147,9 @@ mod tests {
         "DELETE /api/flows/{id}",
         "POST /api/flows/{id}/publish",
         "POST /api/flows/{id}/unpublish",
+        "GET /api/alarms",
+        "POST /api/alarms/{id}/ack",
+        "POST /api/alarms/{id}/resolve",
         "POST /api/upload",
         "GET /api/rules",
         "POST /api/rules",

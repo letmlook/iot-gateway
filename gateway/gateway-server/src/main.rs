@@ -1,8 +1,10 @@
 //! 网关服务入口：插件注册（.so 动态加载 + 可选内置）、REST API、前端静态资源、离线授权、用户管理。
 
+mod alarms;
 mod api;
 mod backup;
 mod config;
+mod flow_runtime;
 mod flows;
 mod history;
 mod license;
@@ -349,6 +351,9 @@ Backups created now can only be restored by this running instance. Set a fixed s
     state.sync_node_log_names();
     // 优雅退出时需要用到状态（state 随后会被 move 进 Router）
     let shutdown_state = state.clone();
+
+    // 流程编排（v2.0 T1）：开机恢复全部 published 流程（设计 §3.2 重启恢复语义）
+    state.flow_runtime.start_published(&state).await;
 
     // 后台合并落盘：把去抖窗口内的多次变更合并成一次 SQLite 事务，
     // 避免「改一个点位就全量重写一次配置库」的写放大。

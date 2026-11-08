@@ -133,7 +133,9 @@ fn valid_graph_body(name: &str) -> Value {
     json!({
         "name": name,
         "nodes": [
-            {"id": src, "name": "src", "kind": "source", "config": {}, "position": {"x": 0.0, "y": 0.0}},
+            {"id": src, "name": "src", "kind": "source",
+             "config": {"south_node_id": Uuid::new_v4(), "group_id": Uuid::new_v4()},
+             "position": {"x": 0.0, "y": 0.0}},
             {"id": th, "name": "th", "kind": "operator", "operator": "threshold_alarm",
              "config": {"tag_name": "temperature", "high": 80.0, "level": "high"},
              "position": {"x": 100.0, "y": 0.0}},

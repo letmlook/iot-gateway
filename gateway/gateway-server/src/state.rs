@@ -26,6 +26,10 @@ pub struct AppState {
     pub db: Option<Arc<Db>>,
     /// 流程编排存储（v2.0 T1；data.db 附加表 flows；db=None 时退化为内存库，API 始终可用）
     pub flow_store: Arc<crate::flows::FlowStore>,
+    /// 告警事件存储（v2.0 T1-④；data.db 附加表 alarm_events）
+    pub alarm_store: Arc<crate::alarms::AlarmStore>,
+    /// 流程运行时（订阅侧消费任务；published 流程的启停与恢复）
+    pub flow_runtime: Arc<crate::flow_runtime::FlowRuntime>,
     /// 持久化脏标记：true 表示内存中已有尚未落盘的变更
     persist_dirty: Arc<std::sync::atomic::AtomicBool>,
     /// 落盘串行锁：保证「清标记 → 取快照 → 写库」是一个原子步骤。
@@ -58,6 +62,8 @@ impl AppState {
             user_store,
             node_log_names,
             flow_store: crate::flows::FlowStore::open_best_effort(db.clone()),
+            alarm_store: crate::alarms::AlarmStore::open_best_effort(db.clone()),
+            flow_runtime: Arc::new(crate::flow_runtime::FlowRuntime::new()),
             db,
             persist_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             persist_lock: Arc::new(tokio::sync::Mutex::new(())),

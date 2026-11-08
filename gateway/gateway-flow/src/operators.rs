@@ -19,6 +19,21 @@ pub const OPERATOR_NAMES: [&str; 5] = [
     "sink_alarm",
 ];
 
+/// Source 节点配置：绑定的南向 (节点, 组)。流程输入只允许来自南向组
+/// （设计 §3.4：flow 不订阅 flow 输出，构造性禁环）。
+#[derive(Debug, Deserialize)]
+pub struct SourceConfig {
+    pub south_node_id: Uuid,
+    pub group_id: Uuid,
+}
+
+/// Source 配置校验（publish 门禁的一部分）。
+pub fn validate_source_config(config: &serde_json::Value) -> Result<(), String> {
+    serde_json::from_value::<SourceConfig>(config.clone())
+        .map(|_| ())
+        .map_err(|e| format!("invalid source config (need south_node_id + group_id): {e}"))
+}
+
 /// 节点端口规范（校验与编辑器面板共用）。
 pub struct PortSpec {
     pub inputs: &'static [&'static str],

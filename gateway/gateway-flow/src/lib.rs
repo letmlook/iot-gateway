@@ -76,9 +76,13 @@ mod tests {
         }
     }
 
+    fn source_config() -> serde_json::Value {
+        json!({"south_node_id": Uuid::new_v4(), "group_id": Uuid::new_v4()})
+    }
+
     fn alarm_graph() -> (Flow, FlowNode, FlowNode) {
         // source → threshold_alarm(temperature > 80) → { sink_alarm(alarm), sink_north(normal) }
-        let src = node("src", NodeKind::Source, None, json!({}));
+        let src = node("src", NodeKind::Source, None, source_config());
         let th = node(
             "th",
             NodeKind::Operator,
@@ -257,7 +261,11 @@ mod tests {
             json!({"tag_name":"temperature","high":80.0,"level":"high"}),
         );
         flow.graph = FlowGraph {
-            nodes: vec![node("src", NodeKind::Source, None, json!({})), th_ok, sa],
+            nodes: vec![
+                node("src", NodeKind::Source, None, source_config()),
+                th_ok,
+                sa,
+            ],
             edges: vec![FlowEdge {
                 source_node_id: flow.graph.nodes[0].id,
                 source_port: "out".into(),

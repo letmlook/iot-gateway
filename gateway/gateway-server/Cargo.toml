@@ -76,3 +76,5 @@ futures-util = "0.3"
 # 集成测试：用 oneshot 直接打 axum Router
 tower = { version = "0.4", features = ["util"] }
 tokio-tungstenite = "0.26"
+# 流程运行时测试的北向桩插件需要实现 async_trait 标注的 SDK trait
+async-trait = "0.1"

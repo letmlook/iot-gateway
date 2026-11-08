@@ -1,5 +1,6 @@
 //! REST API 与静态资源服务。
 
+pub mod alarms_api;
 mod dto;
 mod error;
 pub mod flows_api;
@@ -146,6 +147,17 @@ fn required_role(method: &axum::http::Method, path: &str) -> crate::users::UserR
     }
     // 写值（对现场设备反控）：Operator 及以上
     if p.ends_with("/write_tags") {
+        return Operator;
+    }
+    // 告警事件（v2.0）：读 Viewer+；确认 Operator+；解除（终态操作）Admin
+    if p == "alarms" || p.starts_with("alarms/") {
+        let is_read = method == axum::http::Method::GET || method == axum::http::Method::HEAD;
+        if is_read {
+            return Viewer;
+        }
+        if p.ends_with("/resolve") {
+            return Admin;
+        }
         return Operator;
     }
     let is_read = method == axum::http::Method::GET || method == axum::http::Method::HEAD;
@@ -510,6 +522,10 @@ pub fn router(state: AppState) -> Router<AppState> {
         )
         .route("/flows/:id/publish", post(flows_api::publish_flow))
         .route("/flows/:id/unpublish", post(flows_api::unpublish_flow))
+        // ---- 告警事件（v2.0 T1-④；不过 v1 别名） ----
+        .route("/alarms", get(alarms_api::list_alarms))
+        .route("/alarms/:id/ack", post(alarms_api::ack_alarm))
+        .route("/alarms/:id/resolve", post(alarms_api::resolve_alarm))
         // ---- 文件上传 ----
         .route("/upload", post(handlers::upload_config_file))
         // ---- 规则 ----

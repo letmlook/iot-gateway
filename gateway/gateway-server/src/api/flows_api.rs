@@ -189,16 +189,21 @@ pub async fn update_flow(
     if !updated {
         return Err(ApiError::not_found("flow not found"));
     }
+    // 已发布流程改图 = 以新图重新部署（stop + start）
+    if row.status == "published" {
+        state.flow_runtime.start(&state, row.clone()).await;
+    }
     Ok(Json(row_to_json(&row)))
 }
 
-/// DELETE /flows/:id（Admin；运行时任务停止随接线批接上）
+/// DELETE /flows/:id（Admin；先停运行时任务再删）
 pub async fn delete_flow(
     State(state): State<AppState>,
     axum::extract::Extension(ctx): axum::extract::Extension<AuthContext>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<axum::http::StatusCode, ApiError> {
     let uuid = Uuid::parse_str(&id).map_err(|_| ApiError::not_found("flow not found"))?;
+    state.flow_runtime.stop(uuid).await;
     let deleted = tokio::task::spawn_blocking({
         let st = state.clone();
         move || st.flow_store.delete(uuid, &ctx.tenant)
@@ -261,18 +266,23 @@ pub async fn publish_flow(
     .await
     .map_err(|e| ApiError::internal(e.to_string()))?
     .map_err(|e| ApiError::internal(e.to_string()))?;
+    // 启动订阅侧消费任务（设计 §3.1 方案 A）
+    if let Some(r) = &updated {
+        state.flow_runtime.start(&state, r.clone()).await;
+    }
     updated
         .map(|r| Json(row_to_json(&r)))
         .ok_or_else(|| ApiError::not_found("flow not found"))
 }
 
-/// POST /flows/:id/unpublish —— 回草稿（告警事件与运行态随接线批定义）
+/// POST /flows/:id/unpublish —— 回草稿（停止运行时任务；告警事件保留）
 pub async fn unpublish_flow(
     State(state): State<AppState>,
     axum::extract::Extension(ctx): axum::extract::Extension<AuthContext>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let uuid = Uuid::parse_str(&id).map_err(|_| ApiError::not_found("flow not found"))?;
+    state.flow_runtime.stop(uuid).await;
     let updated = tokio::task::spawn_blocking({
         let st = state.clone();
         move || st.flow_store.set_status(uuid, &ctx.tenant, "draft", false)

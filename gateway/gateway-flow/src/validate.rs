@@ -71,7 +71,14 @@ pub fn validate(flow: &Flow) -> Vec<FlowError> {
                     }
                 }
             }
-            NodeKind::Source => {}
+            NodeKind::Source => {
+                if let Err(e) = operators::validate_source_config(&n.config) {
+                    errs.push(FlowError::Validation(format!(
+                        "source node `{}`: {e}",
+                        n.name
+                    )));
+                }
+            }
         }
     }
 
