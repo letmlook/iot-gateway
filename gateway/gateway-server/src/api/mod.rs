@@ -1242,6 +1242,54 @@ mod tests {
         cleanup_env(env);
     }
 
+    // ---------- 管理台 API 面回归：web/src/api.js BASE='/api' 的调用路径不得 404 ----------
+    //
+    // 背景（2026-11-08）：887d387 起前端 BASE 曾为 '/api/v1'，但后端仅有 6 个分页端点
+    // 注册了 /v1 别名（users/nodes/nodes-:id-groups/nodes-:id-tags/nodes-:id-values/rules
+    // 的 GET），auth/plugins/license/tenants/backup/history 等按路由表注释「不过 v1 别名」
+    // 只存在于 /api 裸路径，导致管理台登录等大部分请求 404。本测试锁定两侧契约：
+    //   1) /api/<path> 对管理台实际调用的路由族可达（200/401/4xx 均算可达，404 即回归）；
+    //   2) /api/v1 仅为分页端点别名——其余路径 404 是契约而非缺陷。
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn console_api_surface_reachable_at_bare_api_prefix() {
+        // status_of 直接打 api::router（/api 前缀的 nest 在 main.rs），故这里用裸路径：
+        // 裸路径经 nest 后即前端 BASE='/api' 请求的 /api/<path>。
+        let env = rbac_env().await;
+        // (method, uri) 覆盖 api.js 实际调用的各路由族；token=None：受保护端点应 401/4xx，白名单端点 200
+        let cases = [
+            ("GET", "/health"),
+            ("GET", "/version"),
+            ("POST", "/auth/login"),
+            ("GET", "/plugins/south"),
+            ("GET", "/plugins/north"),
+            ("GET", "/license/status"),
+            ("GET", "/license/machine-id"),
+            ("GET", "/nodes"),
+            ("GET", "/tenants"),
+            ("GET", "/audit"),
+            ("GET", "/logs/config"),
+            ("GET", "/system/config"),
+            ("GET", "/data-flow"),
+            ("GET", "/history/stats"),
+            ("GET", "/history/series/list"),
+            ("POST", "/backup"),
+        ];
+        for (method, uri) in cases {
+            let status = status_of(&env, method, uri, None).await;
+            assert_ne!(
+                status, 404,
+                "{method} {uri} 不应 404（管理台契约：/api 裸路径必须可达）"
+            );
+        }
+        // 对照组：非分页端点没有 v1 别名（「不过 v1 别名」是路由表注释的既定契约）
+        assert_eq!(status_of(&env, "GET", "/v1/plugins/south", None).await, 404);
+        assert_eq!(status_of(&env, "GET", "/v1/auth/login", None).await, 404);
+        // 分页端点的 v1 别名存在（未带 token → 401 而非 404；裸路径可达性已由上方用例组覆盖）
+        assert_eq!(status_of(&env, "GET", "/v1/nodes", None).await, 401);
+        cleanup_env(env);
+    }
+
     // ---------- S1: normalize_api_path 等价矩阵（防越权关键测试） ----------
 
     #[test]

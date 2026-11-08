@@ -1,4 +1,9 @@
-const BASE = '/api/v1'
+// BASE 必须是 '/api'（非 '/api/v1'）：后端只有 6 个分页端点注册了 /v1 别名
+// （users/nodes/nodes-:id-groups/nodes-:id-tags/nodes-:id-values/rules 的 GET），
+// 其余端点（auth/plugins/license/tenants/backup/history…）按路由表注释「不过 v1 别名」
+// 只存在于 /api 裸路径。此前 BASE='/api/v1' 会让登录等大部分请求 404（887d387 起引入）。
+// ws 由 gatewayWs.js 自行走 /api/v1/ws（该路径有别名注册），不受此影响。
+const BASE = '/api'
 const TOKEN_KEY = 'gateway_token'
 
 function getStoredToken() {
@@ -158,6 +163,22 @@ export const api = {
   hardwareInfo: () => req('GET', '/hardware'),
   metrics: () => fetch(`${BASE}/metrics`).then(r => r.text()),
   dataFlow: () => req('GET', '/data-flow'),
+
+  // 历史数据（后端 gateway-server/src/history.rs；history_enabled=false 时 series 会 400）
+  historyStats: () => req('GET', '/history/stats'),
+  historySeriesList: (limit) =>
+    req('GET', `/history/series/list${limit != null ? `?limit=${limit}` : ''}`),
+  historySeries: (nodeId, groupId, tag, from, to, maxPoints) => {
+    const q = new URLSearchParams({
+      node_id: nodeId,
+      group_id: groupId,
+      tag,
+      from: String(from),
+      to: String(to),
+    })
+    if (maxPoints != null) q.set('max_points', String(maxPoints))
+    return req('GET', `/history/series?${q.toString()}`)
+  },
   backup: (password) =>
     fetch(`${BASE}/backup`, {
       method: 'POST',

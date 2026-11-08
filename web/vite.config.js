@@ -23,6 +23,10 @@ export default defineConfig({
         // 升级 Element Plus 不会让业务 chunk 缓存失效。
         manualChunks(id) {
           if (!id.includes('node_modules')) return undefined
+          // echarts 按需注册但仍是独立大库：单独成 chunk，仅访问历史页时加载
+          if (id.includes('echarts') || id.includes('zrender')) {
+            return 'echarts'
+          }
           if (id.includes('element-plus') || id.includes('@element-plus')) {
             return 'element-plus'
           }

@@ -25,6 +25,10 @@ function isActive(path) {
   if (path === '/dashboard') {
     return route.path === '/dashboard' || route.path === '/'
   }
+  // /monitor 的子页（/monitor/flow、/monitor/history）各自高亮菜单项，不再连带命中父项
+  if (path === '/monitor') {
+    return route.path === '/monitor' || (route.path.startsWith('/monitor/') && !['/monitor/flow', '/monitor/history'].some(p => route.path.startsWith(p)))
+  }
   return route.path.startsWith(path)
 }
 
@@ -81,6 +85,9 @@ function toggleCollapsed() {
           </svg>
           <svg v-else-if="item.icon === 'monitor'" viewBox="0 0 20 20" fill="currentColor">
             <path d="M2 11a1 1 0 011-1h2a1 1 0 011 1v5a1 1 0 01-1 1H3a1 1 0 01-1-1v-5zm6-4a1 1 0 011-1h2a1 1 0 011 1v9a1 1 0 01-1 1H9a1 1 0 01-1-1V7zm6-3a1 1 0 011-1h2a1 1 0 011 1v12a1 1 0 01-1 1h-2a1 1 0 01-1-1V4z"/>
+          </svg>
+          <svg v-else-if="item.icon === 'history'" viewBox="0 0 20 20" fill="currentColor">
+            <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm.75-12.25a.75.75 0 00-1.5 0v4c0 .27.14.51.37.65l3 1.75a.75.75 0 10.76-1.3l-2.63-1.53v-3.57z" clip-rule="evenodd"/>
           </svg>
           <svg v-else-if="item.icon === 'plugins'" viewBox="0 0 20 20" fill="currentColor">
             <path d="M11 17a1 1 0 001.447.894l4-2A1 1 0 0017 15V9.236a1 1 0 00-1.447-.894l-4 2a1 1 0 00-.553.894V17zM15.211 6.276a1 1 0 000-1.788l-4.764-2.382a1 1 0 00-.894 0L4.789 4.488a1 1 0 000 1.788l4.764 2.382a1 1 0 00.894 0l4.764-2.382zM4.447 8.342A1 1 0 003 9.236V15a1 1 0 00.553.894l4 2A1 1 0 009 17v-5.764a1 1 0 00-.553-.894l-4-2z"/>

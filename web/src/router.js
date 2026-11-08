@@ -85,6 +85,12 @@ const routes = [
     meta: { title: '数据流指标' }
   },
   {
+    path: '/monitor/history',
+    name: 'History',
+    component: () => import('./views/History.vue'),
+    meta: { title: '历史数据' }
+  },
+  {
     path: '/plugins',
     name: 'Plugins',
     component: () => import('./views/Plugins.vue'),
