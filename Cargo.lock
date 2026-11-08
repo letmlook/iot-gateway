@@ -901,6 +901,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "gateway-core",
+ "gateway-flow",
  "gateway-sdk",
  "hex",
  "mac_address",

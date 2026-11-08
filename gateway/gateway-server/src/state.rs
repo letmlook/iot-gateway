@@ -24,6 +24,8 @@ pub struct AppState {
     /// data.db 的进程内共享长连接（配置快照与 users 表共用）；
     /// None = 测试环境或启动时 Db::open 失败的降级路径（退回按次开连接的自由函数）
     pub db: Option<Arc<Db>>,
+    /// 流程编排存储（v2.0 T1；data.db 附加表 flows；db=None 时退化为内存库，API 始终可用）
+    pub flow_store: Arc<crate::flows::FlowStore>,
     /// 持久化脏标记：true 表示内存中已有尚未落盘的变更
     persist_dirty: Arc<std::sync::atomic::AtomicBool>,
     /// 落盘串行锁：保证「清标记 → 取快照 → 写库」是一个原子步骤。
@@ -55,6 +57,7 @@ impl AppState {
             feature_manager,
             user_store,
             node_log_names,
+            flow_store: crate::flows::FlowStore::open_best_effort(db.clone()),
             db,
             persist_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             persist_lock: Arc::new(tokio::sync::Mutex::new(())),

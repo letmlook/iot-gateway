@@ -3,6 +3,7 @@
 pub mod api;
 pub mod backup;
 pub mod config;
+pub mod flows;
 pub mod history;
 pub mod license;
 pub mod logging;

@@ -3,6 +3,7 @@
 mod api;
 mod backup;
 mod config;
+mod flows;
 mod history;
 mod license;
 mod logging;

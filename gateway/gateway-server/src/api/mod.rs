@@ -2,6 +2,7 @@
 
 mod dto;
 mod error;
+pub mod flows_api;
 mod handlers;
 pub mod handlers_page;
 mod openapi;
@@ -127,6 +128,21 @@ fn required_role(method: &axum::http::Method, path: &str) -> crate::users::UserR
     if p == "rules" || p.starts_with("rules/") {
         let is_read = method == axum::http::Method::GET || method == axum::http::Method::HEAD;
         return if is_read { Viewer } else { Admin };
+    }
+    // 流程编排（v2.0）：读 Viewer+；保存草稿 Operator；发布/下线/删除 Admin——
+    // 发布会直接改变数据面行为（告警与北向投递），权限高于普通草稿编辑
+    if p == "flows" || p.starts_with("flows/") {
+        let is_read = method == axum::http::Method::GET || method == axum::http::Method::HEAD;
+        if is_read {
+            return Viewer;
+        }
+        if p.ends_with("/publish")
+            || p.ends_with("/unpublish")
+            || method == axum::http::Method::DELETE
+        {
+            return Admin;
+        }
+        return Operator;
     }
     // 写值（对现场设备反控）：Operator 及以上
     if p.ends_with("/write_tags") {
@@ -480,6 +496,20 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/history/series", get(handlers::history_series))
         .route("/history/series/list", get(handlers::history_series_list))
         .route("/history/stats", get(handlers::history_stats))
+        // ---- 流程编排（v2.0 T1；不过 v1 别名） ----
+        .route(
+            "/flows",
+            get(flows_api::list_flows).post(flows_api::create_flow),
+        )
+        .route("/flows/operators", get(flows_api::list_flow_operators))
+        .route(
+            "/flows/:id",
+            get(flows_api::get_flow)
+                .put(flows_api::update_flow)
+                .delete(flows_api::delete_flow),
+        )
+        .route("/flows/:id/publish", post(flows_api::publish_flow))
+        .route("/flows/:id/unpublish", post(flows_api::unpublish_flow))
         // ---- 文件上传 ----
         .route("/upload", post(handlers::upload_config_file))
         // ---- 规则 ----

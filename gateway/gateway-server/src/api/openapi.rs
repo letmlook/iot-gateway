@@ -1679,6 +1679,153 @@ fn enable_rule_v1() {}
 fn ws_entry() {}
 
 // ---------------------------------------------------------------------------
+// 流程编排（v2.0 T1；design docs/design/流程编排-v2.md §5）
+// ---------------------------------------------------------------------------
+
+/// POST /api/flows 请求体（api/flows_api.rs FlowUpsertRequest；nodes/edges 为
+/// gateway_flow 强类型图，文档以自由对象表示）。
+#[derive(ToSchema)]
+pub struct FlowUpsertReq {
+    pub name: String,
+    #[allow(dead_code)]
+    pub description: Option<String>,
+}
+
+/// 流程列表/详情项。
+#[derive(ToSchema)]
+pub struct FlowDto {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub version: i64,
+    #[allow(dead_code)]
+    #[schema(value_type = Object)]
+    pub graph: serde_json::Value,
+}
+
+/// 列出当前租户可见的流程。
+#[utoipa::path(
+    get,
+    path = "/api/flows",
+    tag = "flows",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "流程数组", body = Object),
+        (status = 401, description = "未认证", body = Error),
+    )
+)]
+fn list_flows() {}
+
+/// 创建流程草稿（图强类型解析；同租户内名称唯一）。
+#[utoipa::path(
+    post,
+    path = "/api/flows",
+    tag = "flows",
+    security(("bearerAuth" = [])),
+    request_body(content = FlowUpsertReq),
+    responses(
+        (status = 200, description = "已创建的流程", body = FlowDto),
+        (status = 400, description = "名称缺失/重复或图非法", body = Error),
+        (status = 401, description = "未认证", body = Error),
+        (status = 403, description = "需要 Operator 及以上", body = Error),
+    )
+)]
+fn create_flow() {}
+
+/// 算子发现（编辑器面板数据源，前端不硬编码算子知识）。
+#[utoipa::path(
+    get,
+    path = "/api/flows/operators",
+    tag = "flows",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "算子数组（name/inputs/outputs）", body = Object),
+        (status = 401, description = "未认证", body = Error),
+    )
+)]
+fn list_flow_operators() {}
+
+/// 流程详情（含完整图）。
+#[utoipa::path(
+    get,
+    path = "/api/flows/{id}",
+    tag = "flows",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "流程 id（UUID）")),
+    responses(
+        (status = 200, description = "流程详情", body = FlowDto),
+        (status = 404, description = "不存在或跨租户", body = Error),
+        (status = 401, description = "未认证", body = Error),
+    )
+)]
+fn get_flow() {}
+
+/// 更新流程（名称/描述/整图）。
+#[utoipa::path(
+    put,
+    path = "/api/flows/{id}",
+    tag = "flows",
+    security(("bearerAuth" = [])),
+    request_body(content = FlowUpsertReq),
+    params(("id" = String, Path, description = "流程 id（UUID）")),
+    responses(
+        (status = 200, description = "已更新", body = FlowDto),
+        (status = 404, description = "不存在或跨租户", body = Error),
+        (status = 401, description = "未认证", body = Error),
+    )
+)]
+fn update_flow() {}
+
+/// 删除流程（Admin；已发布流程先自动下线——运行时任务停止随接线批接上）。
+#[utoipa::path(
+    delete,
+    path = "/api/flows/{id}",
+    tag = "flows",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "流程 id（UUID）")),
+    responses(
+        (status = 204, description = "已删除"),
+        (status = 404, description = "不存在或跨租户", body = Error),
+        (status = 401, description = "未认证", body = Error),
+        (status = 403, description = "需要 Admin", body = Error),
+    )
+)]
+fn delete_flow() {}
+
+/// 发布流程：强制整图校验（环/端口/配置），通过则置 published 且 version+1。
+#[utoipa::path(
+    post,
+    path = "/api/flows/{id}/publish",
+    tag = "flows",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "流程 id（UUID）")),
+    responses(
+        (status = 200, description = "已发布", body = FlowDto),
+        (status = 400, description = "校验失败（环/缺 sink/配置非法等）", body = Error),
+        (status = 404, description = "不存在或跨租户", body = Error),
+        (status = 401, description = "未认证", body = Error),
+        (status = 403, description = "需要 Admin", body = Error),
+    )
+)]
+fn publish_flow() {}
+
+/// 下线流程（回草稿；运行态由运行时派生）。
+#[utoipa::path(
+    post,
+    path = "/api/flows/{id}/unpublish",
+    tag = "flows",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "流程 id（UUID）")),
+    responses(
+        (status = 200, description = "已下线", body = FlowDto),
+        (status = 404, description = "不存在或跨租户", body = Error),
+        (status = 401, description = "未认证", body = Error),
+        (status = 403, description = "需要 Admin", body = Error),
+    )
+)]
+fn unpublish_flow() {}
+
+// ---------------------------------------------------------------------------
 // OpenAPI 汇总
 // ---------------------------------------------------------------------------
 
@@ -1761,6 +1908,14 @@ fn ws_entry() {}
         history_series,
         history_series_list,
         history_stats,
+        list_flows,
+        create_flow,
+        list_flow_operators,
+        get_flow,
+        update_flow,
+        delete_flow,
+        publish_flow,
+        unpublish_flow,
         list_rules,
         create_rule,
         update_rule,
@@ -1927,6 +2082,14 @@ mod tests {
         "GET /api/history/series",
         "GET /api/history/series/list",
         "GET /api/history/stats",
+        "GET /api/flows",
+        "POST /api/flows",
+        "GET /api/flows/operators",
+        "GET /api/flows/{id}",
+        "PUT /api/flows/{id}",
+        "DELETE /api/flows/{id}",
+        "POST /api/flows/{id}/publish",
+        "POST /api/flows/{id}/unpublish",
         "POST /api/upload",
         "GET /api/rules",
         "POST /api/rules",
