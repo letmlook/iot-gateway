@@ -1,12 +1,20 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import Components from 'unplugin-vue-components/vite'
+import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 
 // 后端默认端口见 gateway-server/src/config.rs 的 default_port()
 const BACKEND_PORT = process.env.GATEWAY_PORT || '3000'
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [
+    vue(),
+    // Element Plus 按需引入：模板中的 <el-*> 组件自动注册并按需携带样式。
+    // 命令式 API（ElMessage/ElMessageBox）与 v-loading 指令不经模板编译，
+    // 其样式与指令注册见 src/main.js 的手动引入。
+    Components({ resolvers: [ElementPlusResolver()] }),
+  ],
   build: {
     outDir: 'dist',
     rollupOptions: {
