@@ -2,6 +2,7 @@ name: Bench (nightly)
 
 # 性能基线：每晚跑一次，产物留存便于与后续改动对比。
 # 之所以放在 nightly 而不是每个 PR：压测数值受 runner 负载影响，逐 PR 比较噪声大于信号。
+# T4（蓝图 M3）：跑完自动与最近基线对比（scripts/bench_compare.py），越界指标自动开告警 issue。
 
 on:
   schedule:
@@ -9,9 +10,13 @@ on:
     - cron: "0 18 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: write
+  issues: write
+
 jobs:
   bench:
-    name: cargo run -p gateway-bench
+    name: bench + baseline compare
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,16 +25,66 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # 基线跨 run 传递：cache 按 run_id 键保存，restore-keys 前缀命中最近一次；
+      # nightly 每天访问不会触发 7 天 LRU 逐出。prev/ 存上一次基线，docs/bench/latest.json 为本次结果。
+      - uses: actions/cache@v4
+        with:
+          path: |
+            prev/latest.json
+            docs/bench/latest.json
+          key: bench-baseline-${{ github.run_id }}
+          restore-keys: |
+            bench-baseline-
+
+      - name: Shift current baseline to previous
+        run: |
+          # 首次运行（cache 未命中）没有 prev；把恢复到的最新 latest.json 作为 prev。
+          # 之后 bench 会重写 latest.json，prev 始终是「上一次」的结果。
+          if [ -f docs/bench/latest.json ] && [ ! -f prev/latest.json ]; then
+            mkdir -p prev && cp docs/bench/latest.json prev/latest.json
+          fi
+
       - name: Run benchmarks
         run: |
           mkdir -p docs/bench
-          cargo run --release -p gateway-bench -- --out docs/bench/baseline-$(date +%F).md
+          cargo run --release -p gateway-bench -- \
+            --out "docs/bench/baseline-$(date +%F).md" --json docs/bench/latest.json
 
       - name: Show result
         run: cat docs/bench/baseline-*.md
 
+      - name: Compare with previous baseline
+        id: compare
+        run: |
+          if [ ! -f prev/latest.json ]; then
+            echo "alert=false" >> "$GITHUB_OUTPUT"
+            echo "summary=first run, no baseline" >> "$GITHUB_OUTPUT"
+            echo "首次运行：无历史基线可比，本次结果已作为基线保存。"
+            exit 0
+          fi
+          python3 scripts/bench_compare.py prev/latest.json docs/bench/latest.json --threshold 0.5
+
+      # 越界自动开 issue；同标题 open issue 已存在则评论追加（避免刷屏）
+      - name: Open alert issue on regression
+        if: steps.compare.outputs.alert == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUMMARY: ${{ steps.compare.outputs.summary }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          TITLE="[bench] 性能基线越界告警（$(date +%F)）"
+          BODY="$(printf '夜间基线对比发现越界指标：\n\n%s\n\n运行记录：%s' "$SUMMARY" "$RUN_URL")"
+          EXISTING=$(gh issue list --search "in:title \"$TITLE\"" --state open --json number --jq '.[0].number' || true)
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "$BODY"
+          else
+            gh issue create --title "$TITLE" --body "$BODY" --label "performance"
+          fi
+
       - uses: actions/upload-artifact@v4
         with:
           name: bench-baseline
-          path: docs/bench/baseline-*.md
+          path: |
+            docs/bench/baseline-*.md
+            docs/bench/latest.json
           retention-days: 90

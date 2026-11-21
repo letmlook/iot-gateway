@@ -134,6 +134,50 @@ impl Report {
         }
         out
     }
+
+    /// 机器可读输出（nightly 与上一基线自动对比用）。
+    /// value 在 markdown 里带千分位逗号，这里剥掉并尽量转成数字；解析失败的
+    /// 指标（纯文本值）以字符串形态保留，对比脚本跳过非数值行。
+    fn json(&self) -> String {
+        #[derive(serde::Serialize)]
+        struct BenchReportJson<'a> {
+            title: &'a str,
+            os: &'a str,
+            arch: &'a str,
+            rustc: String,
+            date: String,
+            metrics: Vec<BenchMetricJson<'a>>,
+        }
+        #[derive(serde::Serialize)]
+        struct BenchMetricJson<'a> {
+            metric: &'a str,
+            value: serde_json::Value,
+            unit: &'a str,
+        }
+        let metrics = self
+            .rows
+            .iter()
+            .map(|r| BenchMetricJson {
+                metric: &r.metric,
+                value: r
+                    .value
+                    .replace(',', "")
+                    .parse::<f64>()
+                    .map(|v| serde_json::json!(v))
+                    .unwrap_or(serde_json::json!(r.value)),
+                unit: r.unit,
+            })
+            .collect();
+        let doc = BenchReportJson {
+            title: &self.title,
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+            rustc: rustc_version(),
+            date: chrono::Local::now().to_rfc3339(),
+            metrics,
+        };
+        serde_json::to_string_pretty(&doc).expect("serialize bench json")
+    }
 }
 
 fn rustc_version() -> String {
@@ -475,6 +519,11 @@ fn main() {
         .windows(2)
         .find(|w| w[0] == "--out")
         .map(|w| w[1].clone());
+    // 机器可读 JSON（nightly 基线对比用，scripts/bench_compare.py 消费）
+    let json_out = args
+        .windows(2)
+        .find(|w| w[0] == "--json")
+        .map(|w| w[1].clone());
     // 自定义规模覆盖（用于验收口径，如 Q5：--nodes 200 --tags-per-node 50）
     let nodes_override = args
         .windows(2)
@@ -658,5 +707,13 @@ fn main() {
         }
         std::fs::write(&p, &md).expect("write report");
         println!("\n（已写入 {}）", p.display());
+        if let Some(jp) = json_out {
+            let jp = std::path::PathBuf::from(&jp);
+            if let Some(parent) = jp.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            std::fs::write(&jp, report.json()).expect("write bench json");
+            println!("（JSON 已写入 {}）", jp.display());
+        }
     }
 }

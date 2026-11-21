@@ -19,7 +19,12 @@ use std::sync::Arc;
 use tracing::info;
 
 /// 当前快照/schema 版本。大于此版本需升级程序。
-pub const SNAPSHOT_VERSION: u32 = 2;
+///
+/// 版本史：
+/// - v2：nodes/rules 加 tenant_id 列（多租户 T7）
+/// - v3（T4 升级向导）：热路径索引完善（tags 按节点+组、subscriptions 按源侧、
+///   rules 按源节点）+ 迁移前自动创建回滚点备份（`<库文件>.pre-v3.bak`）
+pub const SNAPSHOT_VERSION: u32 = 3;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (version INTEGER NOT NULL);
@@ -189,7 +194,7 @@ pub fn build_snapshot(
     }
 }
 
-fn ensure_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
+fn ensure_schema(conn: &Connection, db_path: &Path) -> Result<(), rusqlite::Error> {
     apply_pragmas(conn)?;
     conn.execute_batch(SCHEMA)?;
 
@@ -246,6 +251,38 @@ fn ensure_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
 
         // 更新版本号
         conn.execute("UPDATE meta SET version = 2", [])?;
+    }
+
+    // v2 → v3 迁移（T4 升级向导，蓝图 M3）：热路径索引 + 回滚点。
+    // 回滚点 = 迁移前的整个库的一致性快照（`<库文件>.pre-v3.bak`）；就地迁移只加
+    // 索引（不改动表结构与数据），失败时数据无损，回滚 = 停止网关后用备份覆盖库文件。
+    if v < 3 {
+        // 1) 回滚点：WAL 先 checkpoint 落主文件，再整文件拷贝（拿到与关闭状态等价的库）
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        let backup_path = db_path.with_extension("pre-v3.bak");
+        match std::fs::copy(db_path, &backup_path) {
+            Ok(n) => info!(
+                backup = %backup_path.display(),
+                bytes = n,
+                "v2→v3 迁移回滚点已创建；如需回滚：停止网关，用该文件覆盖原库文件后重启"
+            ),
+            // 备份失败不阻断迁移（迁移本身只加索引、无结构风险），但明确告警
+            Err(e) => tracing::warn!(
+                backup = %backup_path.display(),
+                "v2→v3 迁移前备份失败（继续迁移，无回滚点）：{e}"
+            ),
+        }
+
+        // 2) 热路径索引：组内标签列举 / 南向侧订阅反查 / 节点删除时按源清规则
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_tags_node_group ON tags(node_id, group_id);
+             CREATE INDEX IF NOT EXISTS idx_subs_south ON subscriptions(south_node_id, group_id);
+             CREATE INDEX IF NOT EXISTS idx_rules_source ON rules(south_node_id);",
+        )?;
+
+        // 3) 版本推进
+        conn.execute("UPDATE meta SET version = 3", [])?;
+        info!("schema migrated v2 → v3 (hot-path indexes + rollback point)");
     }
 
     Ok(())
@@ -887,7 +924,7 @@ pub async fn load_secret(
     let path_log = path_buf.display().to_string();
     let snap = tokio::task::spawn_blocking(move || {
         let conn = Connection::open(&path_buf)?;
-        ensure_schema(&conn)?;
+        ensure_schema(&conn, &path_buf)?;
         load_from_db(&conn)
     })
     .await
@@ -921,7 +958,7 @@ pub async fn save_secret(
         // 数据库里存着设备连接凭据（未设 GATEWAY_SECRET_KEY 时还是明文）：
         // SQLite 默认按 0644 创建文件，本机任意用户都能读走。显式收紧到 0600。
         restrict_permissions(&path_buf);
-        ensure_schema(&conn)?;
+        ensure_schema(&conn, &path_buf)?;
         // 备份改为节流执行（默认每小时一次）且使用一致性快照，
         // 不再「每次保存都整文件 copy」造成 O(库大小) 开销。
         if let Err(e) = maybe_backup(&conn, &path_buf) {
@@ -1110,7 +1147,7 @@ impl Db {
             }
         }
         // 硬性顺序第 3 步：检查通过（或被跳过）后才配置 PRAGMA 并建 schema
-        ensure_schema(&conn)?;
+        ensure_schema(&conn, path)?;
         tracing::info!(path = %path.display(), "database connection ready (single shared connection)");
         Ok(Arc::new(Db {
             path: path.to_path_buf(),
@@ -2123,13 +2160,107 @@ mod tests {
         assert_eq!(loaded.rules.len(), 1);
         assert_eq!(loaded.rules[0].tenant_id, "default");
 
-        // meta 版本升到 2
+        // meta 版本升到当前版本（迁移链式执行：v1 库一步升到 SNAPSHOT_VERSION）
         let version: i64 = db
             .with(|conn| Ok(conn.query_row("SELECT version FROM meta LIMIT 1", [], |r| r.get(0))?))
             .expect("get version");
-        assert_eq!(version, 2);
+        assert_eq!(version, SNAPSHOT_VERSION as i64);
 
         drop(db);
+        cleanup_all(&path);
+    }
+
+    /// v2 → v3 迁移（T4 升级向导）：迁移前自动创建回滚点备份，热路径索引就位，
+    /// 版本推进；二次打开幂等（备份不被覆盖、迁移不重复执行）。
+    #[tokio::test]
+    async fn v2_to_v3_migration_creates_rollback_point_and_indexes() {
+        let _backup_guard = BACKUP_TEST_LOCK.lock().await;
+        let path = temp_db("v3-mig");
+
+        // 用 v2 schema 手工造库（有 tenant_id，无 v3 索引）
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meta (version INTEGER NOT NULL);
+                 INSERT INTO meta VALUES (2);
+                 CREATE TABLE nodes (id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL,
+                   plugin_name TEXT NOT NULL, config TEXT NOT NULL, state TEXT NOT NULL,
+                   tenant_id TEXT NOT NULL DEFAULT 'default');
+                 CREATE TABLE groups (node_id TEXT NOT NULL, group_id TEXT NOT NULL,
+                   name TEXT NOT NULL, interval_ms INTEGER NOT NULL, description TEXT,
+                   PRIMARY KEY (node_id, group_id));
+                 CREATE TABLE tags (tag_id TEXT PRIMARY KEY, node_id TEXT NOT NULL,
+                   group_id TEXT NOT NULL, name TEXT NOT NULL, address TEXT NOT NULL,
+                   attr TEXT NOT NULL, data_type TEXT, description TEXT);
+                 CREATE TABLE subscriptions (north_node_id TEXT NOT NULL, south_node_id TEXT NOT NULL,
+                   group_id TEXT NOT NULL, PRIMARY KEY (north_node_id, south_node_id, group_id));
+                 CREATE TABLE rules (id TEXT PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER NOT NULL,
+                   south_node_id TEXT NOT NULL, group_id TEXT NOT NULL, tag_name TEXT NOT NULL,
+                   op TEXT NOT NULL, threshold REAL NOT NULL, for_ms INTEGER NOT NULL,
+                   clear_ms INTEGER NOT NULL, action TEXT NOT NULL, tenant_id TEXT NOT NULL DEFAULT 'default');
+                 INSERT INTO nodes VALUES ('550e8400-e29b-41d4-a716-446655440001', 'node-a', 'south', 'sim', '{}', 'running', 'default');
+                 INSERT INTO tags VALUES ('550e8400-e29b-41d4-a716-446655440011', '550e8400-e29b-41d4-a716-446655440001', '550e8400-e29b-41d4-a716-446655440002', 'temp', 'R0', 'read', 'float64', NULL);
+                 INSERT INTO subscriptions VALUES ('550e8400-e29b-41d4-a716-446655440021', '550e8400-e29b-41d4-a716-446655440001', '550e8400-e29b-41d4-a716-446655440002');
+                 INSERT INTO rules VALUES ('r1', 'rule-1', 1, '550e8400-e29b-41d4-a716-446655440001', '550e8400-e29b-41d4-a716-446655440002', 'temp', 'gt', 30.0, 0, 0, '{\"type\":\"log\",\"message\":\"hi\"}', 'default');",
+            )
+            .unwrap();
+        }
+
+        let backup_path = path.with_extension("pre-v3.bak");
+        assert!(!backup_path.exists(), "迁移前不应有回滚点");
+
+        // 打开触发迁移
+        let db = Db::open(&path, IntegrityMode::Off).expect("open v2 db");
+        let backup_bytes = std::fs::metadata(&backup_path)
+            .expect("回滚点备份必须存在")
+            .len();
+        assert!(backup_bytes > 0, "备份不应为空文件");
+
+        // 数据完好（迁移只加索引不动数据）
+        let loaded = db.load_snapshot(None).expect("load").expect("some");
+        assert_eq!(loaded.nodes.len(), 1);
+        assert_eq!(loaded.rules.len(), 1);
+
+        // 版本推进到 3 + 三个索引就位
+        let (version, index_count): (i64, i64) = db
+            .with(|conn| {
+                Ok((
+                    conn.query_row("SELECT version FROM meta LIMIT 1", [], |r| r.get(0))?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN
+                         ('idx_tags_node_group','idx_subs_south','idx_rules_source')",
+                        [],
+                        |r| r.get(0),
+                    )?,
+                ))
+            })
+            .expect("query version/indexes");
+        assert_eq!(version, 3);
+        assert_eq!(index_count, 3, "三个热路径索引都应创建");
+
+        drop(db);
+
+        // 二次打开幂等：版本保持、备份不被覆盖（保留原字节）、索引不重复
+        let backup_before = std::fs::read(&backup_path).unwrap();
+        let db2 = Db::open(&path, IntegrityMode::Off).expect("reopen");
+        let version2: i64 = db2
+            .with(|conn| Ok(conn.query_row("SELECT version FROM meta LIMIT 1", [], |r| r.get(0))?))
+            .expect("version");
+        assert_eq!(version2, 3);
+        let backup_after = std::fs::read(&backup_path).unwrap();
+        assert_eq!(backup_before, backup_after, "幂等打开不得覆盖回滚点");
+        let dup: i64 = db2
+            .with(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_tags_node_group'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .expect("index count");
+        assert_eq!(dup, 1, "CREATE IF NOT EXISTS 保证索引不重复");
+
+        drop(db2);
         cleanup_all(&path);
     }
 
