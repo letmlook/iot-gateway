@@ -29,7 +29,12 @@ export function getErrorMessage(t, error) {
   if (code && typeof code === 'string') {
     const key = `errors.${code}`
     const translated = t(key)
-    if (translated !== key) return translated
+    if (translated !== key) {
+      // 后端 message 往往携带逐条原因（如 flow 发布校验、tag 校验），
+      // 只给通用文案会把细节吞掉（2026-11-21 M1 真机验收发现）。
+      if (msg && msg !== translated) return `${translated}: ${msg}`
+      return translated
+    }
   }
   return msg || t('errors.unknown')
 }

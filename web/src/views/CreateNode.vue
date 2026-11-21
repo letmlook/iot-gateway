@@ -1,11 +1,13 @@
 <script setup>
-import { ref, inject, onMounted, computed, watch } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { getErrorMessage } from '../i18n'
 import { ElMessage } from 'element-plus'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { api } from '../api.js'
+import { useGatewayStore } from '../stores/gateway.js'
 import PageHeader from '../components/PageHeader.vue'
 import NodeConfigForm from '../components/NodeConfigForm.vue'
 
@@ -14,8 +16,12 @@ const route = useRoute()
 const { t } = useI18n()
 
 const kind = computed(() => route.path.startsWith('/north') ? 'north' : 'south')
-const southPlugins = inject('southPlugins', ref([]))
-const northPlugins = inject('northPlugins', ref([]))
+// 插件列表来自 Pinia gateway store（App.vue 挂载时 loadAll 拉取）。
+// 修复记录（2026-11-21）：887d387 把 App.vue 的 provide('southPlugins') 迁到 Pinia 时
+// 漏改了本页的 inject——注入键已无人提供，兜底 ref([]) 导致插件下拉恒为空、
+// 无法从 UI 建任何节点。改为直接读 store，并在列表为空时兜底自取。
+const gatewayStore = useGatewayStore()
+const { southPlugins, northPlugins } = storeToRefs(gatewayStore)
 
 const pluginList = computed(() => kind.value === 'south' ? southPlugins.value : northPlugins.value)
 // API 返回 { name, name_zh?, name_en?, description?, description_zh?, description_en?, version }
@@ -105,6 +111,8 @@ function goBack() {
 
 watch(() => createForm.value.plugin_name, (name) => loadSchemaForPlugin(name))
 onMounted(async () => {
+  // 兜底：直接冷落地到本页（如 F5 刷新）时 store 可能还没加载插件列表
+  if (!pluginList.value.length) await gatewayStore.loadPlugins()
   createForm.value.plugin_name = pluginOptions.value[0]?.name || ''
   await loadSchemaForPlugin(createForm.value.plugin_name)
   await loadCopyFrom()

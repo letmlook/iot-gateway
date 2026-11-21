@@ -692,7 +692,19 @@ where
 
     match frame {
         WsClientFrame::Auth { token } => {
-            let ctx = resolve_bearer(state, token.as_deref());
+            // token 形式兼容：文档契约是 "Bearer xxx"（集成测试按此覆盖），
+            // 但前端 gatewayWs.js 实际发裸 token——2026-11-21 M1 真机验收发现
+            // 裸 token 在 resolve_bearer 的 strip_prefix 处必然失败，WS 认证
+            // 对真实前端 100% 被拒（REST 轮询兜底掩盖了这一点）。统一在此
+            // 归一化为 Bearer 形式，两种客户端都接受。
+            let normalized = token.as_deref().map(|t| {
+                if t.starts_with("Bearer ") {
+                    t.to_string()
+                } else {
+                    format!("Bearer {t}")
+                }
+            });
+            let ctx = resolve_bearer(state, normalized.as_deref());
             if let Some(ctx) = ctx {
                 session.authenticated = true;
                 session.username = ctx.username;

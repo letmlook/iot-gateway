@@ -11,6 +11,17 @@ export const SOURCE_PORTS = { inputs: [], outputs: ['out'] }
 export const DEFAULT_SINK_PORTS = { inputs: ['in'], outputs: [] }
 
 /**
+ * config 的深拷贝只用 JSON 往返。不能用 structuredClone：编辑器里的 config
+ * 是 Vue reactive Proxy，structuredClone 遇 Proxy 直接抛 DataCloneError
+ * （2026-11-21 M1 真机验收发现：保存流程必然失败）。本模块保持纯 JS，
+ * 不引 Vue 的 toRaw，故用 JSON。
+ * @param {object} v
+ */
+function deepCloneJson(v) {
+  return JSON.parse(JSON.stringify(v ?? {}))
+}
+
+/**
  * 由 /flows/operators 返回构建「算子名 → 端口规范」映射。
  * @param {Array<{name:string, inputs:string[], outputs:string[]}>} operators
  * @returns {Record<string, {inputs:string[], outputs:string[]}>}
@@ -55,7 +66,7 @@ export function graphToVueFlow(graph, portsMap) {
         label: n.name,
         kind: n.kind,
         operator: n.operator ?? null,
-        config: structuredClone(n.config ?? {}),
+        config: deepCloneJson(n.config),
         inputs: ports.inputs,
         outputs: ports.outputs,
       },
@@ -82,7 +93,7 @@ export function vueFlowToGraph(vfNodes, vfEdges) {
     name: n.data?.label ?? '',
     kind: n.data?.kind,
     ...(n.data?.operator ? { operator: n.data.operator } : {}),
-    config: structuredClone(n.data?.config ?? {}),
+    config: deepCloneJson(n.data?.config),
     position: { x: n.position?.x ?? 0, y: n.position?.y ?? 0 },
   }))
   const edges = (vfEdges || []).map((e) => ({

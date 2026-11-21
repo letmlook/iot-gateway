@@ -255,7 +255,7 @@ onUnmounted(() => {})
           v-for="op in operators"
           :key="op.name"
           class="palette-item"
-          @click="addNode('operator', op.name)"
+          @click="addNode(op.kind === 'sink' ? 'sink' : 'operator', op.name)"
         >{{ t(`flowsEditor.op_${op.name}`) }}</el-button>
       </div>
 

@@ -37,8 +37,17 @@ where
 }
 
 /// 优雅停机：停机广播触发后，所有已连接的 WS 客户端都应收到 Close(4002) 且连接任务退出。
+// metric_ws_clients 是进程级全局计数（ws.rs 的 WS_CLIENT_COUNT 静态量）。
+// 并行测试会互相污染：其他测试的连接计入本测试的断言；且前序测试的 runtime
+// drop 会 abort 服务端 handle_socket 任务，跳过正常返回路径上的 fetch_sub，
+// 计数出现永久泄漏（≥1）。因此：所有依赖全局计数的测试用这把锁串行化，
+// 并在断言时以「进入时基线」代替绝对 0（吸收泄漏）。2026-11-21 M1 真机
+// 验收批发现（全量并发跑时 graceful 偶发失败，单跑必过）。
+static WS_METRIC_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn graceful_shutdown_broadcasts_close_4002_to_all_clients() {
+    let _metric_guard = WS_METRIC_LOCK.lock().await;
     use gateway_core::Manager;
     use gateway_server::license::FeatureManager;
     use gateway_server::state::AppState;
@@ -72,6 +81,8 @@ async fn graceful_shutdown_broadcasts_close_4002_to_all_clients() {
     });
 
     let url = format!("ws://{addr}/api/v1/ws");
+    // 基线 = 进入时已有连接数（含前序测试 abort 泄漏）；断言回到基线而非绝对 0
+    let baseline = metric_ws_clients();
     let (mut c1, _) = tokio_tungstenite::connect_async(url.as_str())
         .await
         .unwrap();
@@ -81,7 +92,7 @@ async fn graceful_shutdown_broadcasts_close_4002_to_all_clients() {
 
     // 等待两个连接都被服务端登记（handle_socket 已进入并递增计数），消除启动竞态
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while metric_ws_clients() < 2 {
+    while metric_ws_clients() < baseline + 2 {
         assert!(
             tokio::time::Instant::now() < deadline,
             "ws connections were not registered in time"
@@ -95,13 +106,13 @@ async fn graceful_shutdown_broadcasts_close_4002_to_all_clients() {
         .notify_and_drain(WS_SHUTDOWN_DRAIN_TIMEOUT)
         .await;
     assert_eq!(
-        remaining, 0,
+        remaining, baseline,
         "all ws connection tasks should exit after the shutdown broadcast"
     );
     assert_eq!(
         metric_ws_clients(),
-        0,
-        "connection counter should return to zero after drain"
+        baseline,
+        "connection counter should return to baseline after drain"
     );
 
     // 两个客户端都必须收到 Close(4002, "server shutting down")
@@ -232,6 +243,8 @@ fn ws_metrics_functions_work() {
 /// alarm 帧（v2.0 T1-④）：订阅 alarms topic 的已认证客户端应收到 alarm_feed 广播的告警帧。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn alarm_frame_reaches_alarms_subscriber() {
+    // 与 graceful 测试互斥：本测试的活跃连接会污染进程级 WS 计数
+    let _metric_guard = WS_METRIC_LOCK.lock().await;
     use futures_util::{SinkExt, StreamExt};
     use gateway_server::license::FeatureManager;
     use gateway_server::state::AppState;

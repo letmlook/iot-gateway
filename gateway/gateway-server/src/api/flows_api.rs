@@ -300,12 +300,19 @@ pub async fn list_flow_operators() -> Json<serde_json::Value> {
     let operators: Vec<serde_json::Value> = gateway_flow::OPERATOR_NAMES
         .iter()
         .map(|name| {
-            let spec = match *name {
-                "sink_north" | "sink_alarm" => gateway_flow::operators::PortSpec::sink(name),
-                _ => gateway_flow::operators::PortSpec::operator(name),
+            // sink 类算子必须以 kind=sink 建节点（validate.rs 的 NodeKind::Sink 门禁）。
+            // 类别由后端声明而非前端硬编码——2026-11-21 M1 真机验收发现：前端把
+            // 全部算子建成 kind=operator，publish 校验「graph has no sink node」必败，
+            // UI 路径上无法拼出可发布的流程。
+            let is_sink = matches!(*name, "sink_north" | "sink_alarm");
+            let spec = if is_sink {
+                gateway_flow::operators::PortSpec::sink(name)
+            } else {
+                gateway_flow::operators::PortSpec::operator(name)
             };
             json!({
                 "name": name,
+                "kind": if is_sink { "sink" } else { "operator" },
                 "inputs": spec.inputs,
                 "outputs": spec.outputs,
             })
