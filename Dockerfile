@@ -43,6 +43,12 @@ COPY gateway/gateway-plugins/plugin-smtp/Cargo.toml gateway/gateway-plugins/plug
 # 测试夹具不进镜像，但 workspace 成员清单需要它们的 Cargo.toml
 COPY gateway/gateway-plugins/plugin-faulty/Cargo.toml gateway/gateway-plugins/plugin-faulty/
 COPY gateway/gateway-plugins/plugin-abi-mismatch/Cargo.toml gateway/gateway-plugins/plugin-abi-mismatch/
+# cargo fetch 需要解析全部成员 manifest：未显式声明 [lib] 的成员做 target
+# 自动发现时要求 src/lib.rs 存在。给每个成员放空桩（fetch 不编译 target），
+# 下一层 COPY gateway/ 会用真实源码整体覆盖。
+RUN find gateway -name Cargo.toml | while read -r f; do \
+      d="$(dirname "$f")"; mkdir -p "$d/src"; printf '' > "$d/src/lib.rs"; \
+    done
 RUN cargo fetch --locked
 
 COPY gateway/ gateway/

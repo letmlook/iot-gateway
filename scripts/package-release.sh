@@ -97,5 +97,7 @@ echo "==> 生成 SHA256SUMS"
 
 echo "==> 完成"
 ls -la "dist/${NAME}.tar.gz" dist/SHA256SUMS
+# 只展示前 20 行；head 退出后 GNU tar 收 SIGPIPE 以退出码 2 结束，pipefail 下
+# 会把整个脚本带挂（产物此时已完整生成）——故容忍该行的非零退出
 echo "包内清单："
-tar -tzf "${OUT}.tar.gz" | head -20
+tar -tzf "${OUT}.tar.gz" | head -20 || true

@@ -33,6 +33,15 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
+      # kafka 插件发布包做真实构建（kafka-client feature，rdkafka-sys 源码编译）：
+      # 需要 CMake 与 librdkafka 的系统依赖；镜像构建（Dockerfile）保持 stub 口径，
+      # 两者差异见 Dockerfile 注释。
+      - name: Install native deps for kafka plugin
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake libclang-dev libcurl4-openssl-dev libsasl2-dev libssl-dev libzstd-dev
+
       - name: Package
         run: ./scripts/package-release.sh
 
