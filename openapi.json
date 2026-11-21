@@ -1,14 +1,214 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "gateway-server",
-    "description": "HTTP API、插件加载、Web 服务入口",
+    "title": "IoT Gateway REST API",
+    "description": "IoT Gateway 管理台与集成 API。\n\n## 版本别名（T3，v1 冻结 + v2 活跃）\n\n`/api/v1/...` 与 `/api/v2/...` 是同一契约的显式版本别名：列表端点在 v1/v2 下均为分页契约（items/total/page/pageSize），裸路径 `/api/...` 保留旧契约兼容。RBAC/审计/限流对三种前缀同语义（按归一化路径判定）。\n\n## WebSocket 帧协议\n\n无版本断裂：新增帧类型（如 v2.0 的 alarm 帧）向后兼容——客户端按 `type` 字段分发并忽略未知帧；`hello.version` 可探测服务端版本；认证帧接受 `Bearer x` 与裸 `x` 两种形态。",
     "license": {
       "name": ""
     },
-    "version": "0.1.0"
+    "version": "2.0.0"
   },
   "paths": {
+    "/api/alarms": {
+      "get": {
+        "tags": [
+          "alarms"
+        ],
+        "summary": "列出告警事件（租户过滤；可按 state/level 过滤）。",
+        "operationId": "list_alarms",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "description": "active|acknowledged|resolved",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "level",
+            "in": "query",
+            "description": "critical|high|medium|low|info",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "缺省 200，clamp [1,1000]",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "告警数组",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/alarms/{id}/ack": {
+      "post": {
+        "tags": [
+          "alarms"
+        ],
+        "summary": "确认告警（active → acknowledged，记录操作人；Operator 及以上）。",
+        "operationId": "ack_alarm",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "告警 id（UUID）",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "已确认",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "不存在/跨租户/已非 active",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "需要 Operator 及以上",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/alarms/{id}/resolve": {
+      "post": {
+        "tags": [
+          "alarms"
+        ],
+        "summary": "解除告警（active|acknowledged → resolved 终态；Admin）。",
+        "operationId": "resolve_alarm",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "告警 id（UUID）",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "已解除",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "不存在/跨租户/已 resolved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "需要 Admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/api/audit": {
       "get": {
         "tags": [
@@ -244,6 +444,466 @@
           },
           "401": {
             "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/flows": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "列出当前租户可见的流程。",
+        "operationId": "list_flows",
+        "responses": {
+          "200": {
+            "description": "流程数组",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "创建流程草稿（图强类型解析；同租户内名称唯一）。",
+        "operationId": "create_flow",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FlowUpsertReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "已创建的流程",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "名称缺失/重复或图非法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "需要 Operator 及以上",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/flows/operators": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "算子发现（编辑器面板数据源，前端不硬编码算子知识）。",
+        "operationId": "list_flow_operators",
+        "responses": {
+          "200": {
+            "description": "算子数组（name/inputs/outputs）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/flows/{id}": {
+      "get": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "流程详情（含完整图）。",
+        "operationId": "get_flow",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "流程 id（UUID）",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "流程详情",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "不存在或跨租户",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "更新流程（名称/描述/整图）。",
+        "operationId": "update_flow",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "流程 id（UUID）",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FlowUpsertReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "已更新",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "不存在或跨租户",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "删除流程（Admin；已发布流程先自动下线——运行时任务停止随接线批接上）。",
+        "operationId": "delete_flow",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "流程 id（UUID）",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "已删除"
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "需要 Admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "不存在或跨租户",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/flows/{id}/publish": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "发布流程：强制整图校验（环/端口/配置），通过则置 published 且 version+1。",
+        "operationId": "publish_flow",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "流程 id（UUID）",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "已发布",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "校验失败（环/缺 sink/配置非法等）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "需要 Admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "不存在或跨租户",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/flows/{id}/unpublish": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "下线流程（回草稿；运行态由运行时派生）。",
+        "operationId": "unpublish_flow",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "流程 id（UUID）",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "已下线",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "需要 Admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "不存在或跨租户",
             "content": {
               "application/json": {
                 "schema": {
@@ -5644,6 +6304,53 @@
           }
         }
       },
+      "FlowDto": {
+        "type": "object",
+        "description": "流程列表/详情项。",
+        "required": [
+          "id",
+          "name",
+          "status",
+          "version",
+          "graph"
+        ],
+        "properties": {
+          "graph": {
+            "type": "object"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "FlowUpsertReq": {
+        "type": "object",
+        "description": "POST /api/flows 请求体（api/flows_api.rs FlowUpsertRequest；nodes/edges 为\ngateway_flow 强类型图，文档以自由对象表示）。",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "GroupDto": {
         "type": "object",
         "required": [
@@ -6593,6 +7300,59 @@
           }
         }
       },
+      "WsAlarmData": {
+        "type": "object",
+        "description": "alarm 帧数据体（camelCase，与 ws.rs::WsAlarmData 一致）。",
+        "required": [
+          "id",
+          "flowId",
+          "nodeName",
+          "level",
+          "tag",
+          "message",
+          "ts"
+        ],
+        "properties": {
+          "flowId": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "level": {
+            "type": "string",
+            "description": "critical | high | medium | low | info"
+          },
+          "message": {
+            "type": "string"
+          },
+          "nodeName": {
+            "type": "string"
+          },
+          "tag": {
+            "type": "string"
+          },
+          "threshold": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "ts": {
+            "type": "integer",
+            "format": "int64",
+            "description": "epoch 毫秒"
+          },
+          "value": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          }
+        }
+      },
       "WsClientFrame": {
         "oneOf": [
           {
@@ -6859,6 +7619,25 @@
           },
           {
             "type": "object",
+            "description": "流程产生的告警事件（机会式推送；REST /api/alarms 为可靠来源）。\n订阅 `alarms` topic 且认证后才会收到。",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "$ref": "#/components/schemas/WsAlarmData"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "alarm"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
             "required": [
               "message",
               "type"
@@ -7001,6 +7780,14 @@
     {
       "name": "ws",
       "description": "WebSocket 实时订阅"
+    },
+    {
+      "name": "flows",
+      "description": "流程编排 v2（图 CRUD/发布/算子发现）"
+    },
+    {
+      "name": "alarms",
+      "description": "告警中心（事件查询/确认/恢复）"
     }
   ]
 }

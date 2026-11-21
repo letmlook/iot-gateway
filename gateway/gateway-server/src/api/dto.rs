@@ -426,6 +426,8 @@ pub struct WsNodeSnapshot {
 }
 
 /// WS 服务器 → 客户端帧。
+// 与 ws.rs 的真实 WsServerFrame 保持同步：T1-④ 新增 alarm 帧（订阅 alarms topic
+// 后的告警事件推送），文档桩此前缺该变体导致生成的契约缺帧（M2 收尾修复）。
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(tag = "type", rename_all = "camelCase")]
 #[allow(dead_code)]
@@ -447,7 +449,31 @@ pub enum WsServerFrame {
     Nodes {
         nodes: Vec<WsNodeSnapshot>,
     },
+    /// 流程产生的告警事件（机会式推送；REST /api/alarms 为可靠来源）。
+    /// 订阅 `alarms` topic 且认证后才会收到。
+    Alarm {
+        data: WsAlarmData,
+    },
     Error {
         message: String,
     },
+}
+
+/// alarm 帧数据体（camelCase，与 ws.rs::WsAlarmData 一致）。
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WsAlarmData {
+    pub id: String,
+    #[serde(rename = "flowId")]
+    pub flow_id: String,
+    #[serde(rename = "nodeName")]
+    pub node_name: String,
+    /// critical | high | medium | low | info
+    pub level: String,
+    pub tag: String,
+    pub value: Option<f64>,
+    pub threshold: Option<f64>,
+    pub message: String,
+    /// epoch 毫秒
+    pub ts: i64,
 }

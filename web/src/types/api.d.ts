@@ -4,6 +4,57 @@
  */
 
 export interface paths {
+    "/api/alarms": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 列出告警事件（租户过滤；可按 state/level 过滤）。 */
+        get: operations["list_alarms"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/alarms/{id}/ack": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** 确认告警（active → acknowledged，记录操作人；Operator 及以上）。 */
+        post: operations["ack_alarm"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/alarms/{id}/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** 解除告警（active|acknowledged → resolved 终态；Admin）。 */
+        post: operations["resolve_alarm"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/audit": {
         parameters: {
             query?: never;
@@ -89,6 +140,94 @@ export interface paths {
         get: operations["data_flow"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/flows": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 列出当前租户可见的流程。 */
+        get: operations["list_flows"];
+        put?: never;
+        /** 创建流程草稿（图强类型解析；同租户内名称唯一）。 */
+        post: operations["create_flow"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/flows/operators": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 算子发现（编辑器面板数据源，前端不硬编码算子知识）。 */
+        get: operations["list_flow_operators"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/flows/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 流程详情（含完整图）。 */
+        get: operations["get_flow"];
+        /** 更新流程（名称/描述/整图）。 */
+        put: operations["update_flow"];
+        post?: never;
+        /** 删除流程（Admin；已发布流程先自动下线——运行时任务停止随接线批接上）。 */
+        delete: operations["delete_flow"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/flows/{id}/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** 发布流程：强制整图校验（环/端口/配置），通过则置 published 且 version+1。 */
+        post: operations["publish_flow"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/flows/{id}/unpublish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** 下线流程（回草稿；运行态由运行时派生）。 */
+        post: operations["unpublish_flow"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1176,6 +1315,23 @@ export interface components {
             code: string;
             message: string;
         };
+        /** @description 流程列表/详情项。 */
+        FlowDto: {
+            graph: Record<string, never>;
+            id: string;
+            name: string;
+            status: string;
+            /** Format: int64 */
+            version: number;
+        };
+        /**
+         * @description POST /api/flows 请求体（api/flows_api.rs FlowUpsertRequest；nodes/edges 为
+         *     gateway_flow 强类型图，文档以自由对象表示）。
+         */
+        FlowUpsertReq: {
+            description?: string | null;
+            name: string;
+        };
         GroupDto: {
             description?: string | null;
             id: string;
@@ -1456,6 +1612,25 @@ export interface components {
             /** @description 元素为 [tagId, value] 二元组（tuple 序列化），如 [["<uuid>", 1.5]] */
             values: Record<string, never>[];
         };
+        /** @description alarm 帧数据体（camelCase，与 ws.rs::WsAlarmData 一致）。 */
+        WsAlarmData: {
+            flowId: string;
+            id: string;
+            /** @description critical | high | medium | low | info */
+            level: string;
+            message: string;
+            nodeName: string;
+            tag: string;
+            /** Format: double */
+            threshold?: number | null;
+            /**
+             * Format: int64
+             * @description epoch 毫秒
+             */
+            ts: number;
+            /** Format: double */
+            value?: number | null;
+        };
         /** @description WS 客户端 → 服务器帧。 */
         WsClientFrame: {
             token?: string | null;
@@ -1514,6 +1689,10 @@ export interface components {
             /** @enum {string} */
             type: "nodes";
         } | {
+            data: components["schemas"]["WsAlarmData"];
+            /** @enum {string} */
+            type: "alarm";
+        } | {
             message: string;
             /** @enum {string} */
             type: "error";
@@ -1541,6 +1720,142 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    list_alarms: {
+        parameters: {
+            query?: {
+                /** @description active|acknowledged|resolved */
+                state?: string;
+                /** @description critical|high|medium|low|info */
+                level?: string;
+                /** @description 缺省 200，clamp [1,1000] */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 告警数组 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Record<string, never>;
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    ack_alarm: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 告警 id（UUID） */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 已确认 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Record<string, never>;
+                };
+            };
+            /** @description 不存在/跨租户/已非 active */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 需要 Operator 及以上 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    resolve_alarm: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 告警 id（UUID） */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 已解除 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Record<string, never>;
+                };
+            };
+            /** @description 不存在/跨租户/已 resolved */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 需要 Admin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
     list_audit: {
         parameters: {
             query: {
@@ -1719,6 +2034,358 @@ export interface operations {
             };
             /** @description 未认证 */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    list_flows: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 流程数组 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Record<string, never>;
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    create_flow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FlowUpsertReq"];
+            };
+        };
+        responses: {
+            /** @description 已创建的流程 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FlowDto"];
+                };
+            };
+            /** @description 名称缺失/重复或图非法 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 需要 Operator 及以上 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    list_flow_operators: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 算子数组（name/inputs/outputs） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Record<string, never>;
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    get_flow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 流程 id（UUID） */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 流程详情 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FlowDto"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 不存在或跨租户 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    update_flow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 流程 id（UUID） */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FlowUpsertReq"];
+            };
+        };
+        responses: {
+            /** @description 已更新 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FlowDto"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 不存在或跨租户 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    delete_flow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 流程 id（UUID） */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 已删除 */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 需要 Admin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 不存在或跨租户 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    publish_flow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 流程 id（UUID） */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 已发布 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FlowDto"];
+                };
+            };
+            /** @description 校验失败（环/缺 sink/配置非法等） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 需要 Admin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 不存在或跨租户 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    unpublish_flow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 流程 id（UUID） */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 已下线 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FlowDto"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 需要 Admin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 不存在或跨租户 */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

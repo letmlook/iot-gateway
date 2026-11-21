@@ -2032,6 +2032,19 @@ fn resolve_alarm() {}
         )
     ),
     modifiers(&SecurityAddon),
+    info(
+        title = "IoT Gateway REST API",
+        version = "2.0.0",
+        description = "IoT Gateway 管理台与集成 API。
+
+## 版本别名（T3，v1 冻结 + v2 活跃）
+
+`/api/v1/...` 与 `/api/v2/...` 是同一契约的显式版本别名：列表端点在 v1/v2 下均为分页契约（items/total/page/pageSize），裸路径 `/api/...` 保留旧契约兼容。RBAC/审计/限流对三种前缀同语义（按归一化路径判定）。
+
+## WebSocket 帧协议
+
+无版本断裂：新增帧类型（如 v2.0 的 alarm 帧）向后兼容——客户端按 `type` 字段分发并忽略未知帧；`hello.version` 可探测服务端版本；认证帧接受 `Bearer x` 与裸 `x` 两种形态。"
+    ),
     tags(
         (name = "auth", description = "登录/登出"),
         (name = "system", description = "系统信息与配置、上传"),
@@ -2048,6 +2061,8 @@ fn resolve_alarm() {}
         (name = "history", description = "历史数据查询"),
         (name = "backup", description = "备份与恢复（Admin）"),
         (name = "ws", description = "WebSocket 实时订阅"),
+        (name = "flows", description = "流程编排 v2（图 CRUD/发布/算子发现）"),
+        (name = "alarms", description = "告警中心（事件查询/确认/恢复）"),
     )
 )]
 pub struct ApiDoc;
