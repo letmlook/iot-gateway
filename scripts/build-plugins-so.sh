@@ -12,6 +12,9 @@ cp target/debug/libplugin_sim.so target/debug/libplugin_s7.so \
    target/debug/libplugin_opcua.so target/debug/libplugin_virb.so \
    target/debug/libplugin_http.so target/debug/libplugin_influxdb.so \
    target/debug/libplugin_tdengine.so plugins/
+# SMTP：stub 构建（ffi only，无 lettre 依赖）总是可构建；完整客户端需 --features smtp-client
+cargo build -p plugin-smtp --features ffi
+cp target/debug/libplugin_smtp.so plugins/
 # Kafka 单独构建（可能失败）
 cargo build -p plugin-kafka --features "ffi,kafka-client" 2>/dev/null && \
    cp target/debug/libplugin_kafka.so plugins/ || \

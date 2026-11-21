@@ -29,4 +29,6 @@ members = [
     "gateway/gateway-plugins/plugin-influxdb",
     "gateway/gateway-plugins/plugin-tdengine",
     "gateway/gateway-plugins/plugin-kafka",
+    # 告警通知渠道（蓝图 §7 Q6）：SMTP 北向（邮件）
+    "gateway/gateway-plugins/plugin-smtp",
 ]

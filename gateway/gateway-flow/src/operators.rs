@@ -1,5 +1,6 @@
 //! MVP 算子集（design §1/§4.1）：threshold_alarm、state_change_alarm、route、
-//! sink_north、sink_alarm。脚本算子（rhai）与 rate_of_change 明确不在 MVP（沙箱/语义专项）。
+//! alarm_to_data、sink_north、sink_alarm。脚本算子（rhai）与 rate_of_change 明确
+//! 不在 MVP（沙箱/语义专项）。
 
 use chrono::Utc;
 use gateway_sdk::{DataValue, GroupData};
@@ -11,10 +12,11 @@ use crate::error::FlowError;
 use crate::payload::{AlarmEvent, AlarmLevel, FlowPayload};
 
 /// 算子/端点注册表（server 侧 `GET /flows/operators` 发现用，前端不硬编码——踩坑 P6 对策）。
-pub const OPERATOR_NAMES: [&str; 5] = [
+pub const OPERATOR_NAMES: [&str; 6] = [
     "threshold_alarm",
     "state_change_alarm",
     "route",
+    "alarm_to_data",
     "sink_north",
     "sink_alarm",
 ];
@@ -56,6 +58,12 @@ impl PortSpec {
             "route" => PortSpec {
                 inputs: &["in"],
                 outputs: &["true", "false"],
+            },
+            // 告警 → 数据桥：把 Alarm 载荷转成 GroupData，交给 sink_north（MQTT/Kafka/
+            // Webhook/SMTP 等北向节点）推送——告警通知渠道（蓝图 §7 Q6）的实现基础
+            "alarm_to_data" => PortSpec {
+                inputs: &["in"],
+                outputs: &["out"],
             },
             _ => PortSpec {
                 inputs: &["in"],
@@ -122,6 +130,7 @@ pub fn validate_config(operator: &str, config: &serde_json::Value) -> Result<(),
             }
             Ok(())
         }
+        "alarm_to_data" => Ok(()),
         "sink_alarm" => Ok(()),
         other => Err(format!("unknown operator `{other}`")),
     }
@@ -291,6 +300,62 @@ fn display_value(v: &DataValue) -> String {
     }
 }
 
+// ---------- 告警 → 数据桥（alarm_to_data） ----------
+
+/// 告警伪源（GroupData.node_name/group_name）：北向 topic 模板可引用
+/// `{node_name}`/`{group_name}`，告警帧统一以 alarms/events 呈现。
+pub const ALARM_SOURCE_NODE: &str = "alarms";
+pub const ALARM_SOURCE_GROUP: &str = "events";
+
+/// 告警字段的显示名（GroupData.tag_names 用；北向 payload 按此作为字段 key）。
+/// tag_id 本身无全局意义，只需 GroupData 内自洽——用固定 u128 生成的稳定 UUID。
+pub const ALARM_FIELD_NAMES: [&str; 6] = [
+    "alarm_level",
+    "alarm_tag",
+    "alarm_value",
+    "alarm_threshold",
+    "alarm_message",
+    "alarm_ts",
+];
+
+fn alarm_field_tag_id(idx: usize) -> gateway_sdk::TagId {
+    // idx 0..=5，one-based u128 避免与 nil UUID 撞车
+    gateway_sdk::TagId(uuid::Uuid::from_u128(idx as u128 + 1))
+}
+
+/// 把告警事件包装成 GroupData（北向 on_group_data 的载荷形态）：
+/// 每个告警字段一个「点位」，value/threshold 缺省时不输出该字段。
+/// 北向插件（MQTT/Kafka/Webhook/SMTP）按 tag_names 作为字段 key 正常序列化，
+/// 告警通知渠道由此全部复用既有北向能力（蓝图 §7 Q6）。
+pub fn alarm_to_group_data(ev: &AlarmEvent) -> GroupData {
+    let mut values = Vec::with_capacity(ALARM_FIELD_NAMES.len());
+    let mut names = HashMap::new();
+    let mut push = |idx: usize, v: DataValue| {
+        let tag_id = alarm_field_tag_id(idx);
+        names.insert(tag_id, ALARM_FIELD_NAMES[idx].to_string());
+        values.push((tag_id, v));
+    };
+    push(0, DataValue::String(ev.level.as_str().into()));
+    push(1, DataValue::String(ev.tag.clone()));
+    if let Some(v) = ev.value {
+        push(2, DataValue::Float64(v));
+    }
+    if let Some(t) = ev.threshold {
+        push(3, DataValue::Float64(t));
+    }
+    push(4, DataValue::String(ev.message.clone()));
+    push(5, DataValue::String(ev.ts.to_rfc3339()));
+    GroupData {
+        node_id: gateway_sdk::NodeId(uuid::Uuid::nil()),
+        group_id: gateway_sdk::GroupId(uuid::Uuid::nil()),
+        ts: ev.ts,
+        values,
+        node_name: Some(ALARM_SOURCE_NODE.into()),
+        group_name: Some(ALARM_SOURCE_GROUP.into()),
+        tag_names: Some(names),
+    }
+}
+
 /// 算子统一入口（engine 按计划调用）。返回 (输出 port → 载荷) 映射。
 pub fn evaluate_node(
     operator: &str,
@@ -299,7 +364,20 @@ pub fn evaluate_node(
     input: FlowPayload,
     state: &mut HashMap<Uuid, HashMap<String, String>>,
 ) -> Result<Vec<(&'static str, FlowPayload)>, FlowError> {
-    // MVP 算子都只接受 Data 输入（alarm 事件流不进处理算子——validate 保证图形态）
+    // alarm_to_data 是唯一接受 Alarm 输入的算子（告警 → 数据桥）
+    if operator == "alarm_to_data" {
+        let ev = match input {
+            FlowPayload::Alarm(ev) => ev,
+            FlowPayload::Data(_) => {
+                return Err(FlowError::Operator(
+                    operator.to_string(),
+                    "alarm_to_data requires Alarm input, got Data".into(),
+                ))
+            }
+        };
+        return Ok(vec![("out", FlowPayload::Data(alarm_to_group_data(&ev)))]);
+    }
+    // 其余 MVP 算子都只接受 Data 输入（alarm 事件流不进处理算子——validate 保证图形态）
     let gd = match input {
         FlowPayload::Data(gd) => gd,
         FlowPayload::Alarm(_) => {
@@ -353,5 +431,118 @@ pub fn evaluate_node(
             other.to_string(),
             "not an operator".into(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn sample_alarm(value: Option<f64>, threshold: Option<f64>) -> AlarmEvent {
+        AlarmEvent {
+            level: AlarmLevel::High,
+            tag: "temperature".into(),
+            value,
+            threshold,
+            message: "temperature=95.5 crossed Some(80)".into(),
+            ts: chrono::Utc.with_ymd_and_hms(2026, 11, 21, 8, 0, 0).unwrap(),
+        }
+    }
+
+    #[test]
+    fn alarm_to_group_data_carries_all_fields() {
+        let gd = alarm_to_group_data(&sample_alarm(Some(95.5), Some(80.0)));
+        // 伪源名称：北向 topic 模板可引用 alarms/events
+        assert_eq!(gd.node_name.as_deref(), Some(ALARM_SOURCE_NODE));
+        assert_eq!(gd.group_name.as_deref(), Some(ALARM_SOURCE_GROUP));
+        // 每个字段都有显示名，value/threshold 存在时全部 6 字段输出
+        let names = gd.tag_names.as_ref().unwrap();
+        assert_eq!(names.len(), 6);
+        assert_eq!(
+            values_by_field(&gd),
+            vec![
+                ("alarm_level", "high".to_string()),
+                ("alarm_tag", "temperature".to_string()),
+                ("alarm_value", "95.5".to_string()),
+                ("alarm_threshold", "80".to_string()),
+                (
+                    "alarm_message",
+                    "temperature=95.5 crossed Some(80)".to_string()
+                ),
+                ("alarm_ts", gd.ts.to_rfc3339()),
+            ]
+        );
+    }
+
+    #[test]
+    fn alarm_without_value_threshold_omits_fields() {
+        let gd = alarm_to_group_data(&sample_alarm(None, None));
+        let names = gd.tag_names.as_ref().unwrap();
+        // value/threshold 缺省：不输出对应字段（4 个）
+        assert_eq!(names.len(), 4);
+        let fields = values_by_field(&gd);
+        assert!(!fields.iter().any(|(k, _)| *k == "alarm_value"));
+        assert!(!fields.iter().any(|(k, _)| *k == "alarm_threshold"));
+    }
+
+    /// 按 tag_names 反查字段序列（显示名 → 值的显示串），供断言用
+    fn values_by_field(gd: &GroupData) -> Vec<(&'static str, String)> {
+        let names = gd.tag_names.as_ref().unwrap();
+        let mut out = Vec::new();
+        for (tag_id, v) in &gd.values {
+            let name = names.get(tag_id).unwrap().as_str();
+            let idx = ALARM_FIELD_NAMES.iter().position(|n| *n == name).unwrap();
+            let display = match v {
+                DataValue::String(s) => s.clone(),
+                other => other.as_f64().unwrap().to_string(),
+            };
+            out.push((ALARM_FIELD_NAMES[idx], display));
+        }
+        out
+    }
+
+    #[test]
+    fn evaluate_node_accepts_alarm_input_only() {
+        let mut state = HashMap::new();
+        let cfg = serde_json::json!({});
+        // Alarm 输入 → ("out", Data)
+        let out = evaluate_node(
+            "alarm_to_data",
+            Uuid::new_v4(),
+            &cfg,
+            FlowPayload::Alarm(sample_alarm(Some(1.0), None)),
+            &mut state,
+        )
+        .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "out");
+        assert!(matches!(out[0].1, FlowPayload::Data(_)));
+        // Data 输入 → 报错
+        let gd = GroupData {
+            node_id: gateway_sdk::NodeId(Uuid::nil()),
+            group_id: gateway_sdk::GroupId(Uuid::nil()),
+            ts: Utc::now(),
+            values: vec![],
+            node_name: None,
+            group_name: None,
+            tag_names: None,
+        };
+        assert!(evaluate_node(
+            "alarm_to_data",
+            Uuid::new_v4(),
+            &cfg,
+            FlowPayload::Data(gd),
+            &mut state
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn alarm_to_data_validates_and_has_out_port() {
+        assert!(validate_config("alarm_to_data", &serde_json::json!({})).is_ok());
+        let spec = PortSpec::operator("alarm_to_data");
+        assert!(spec.inputs.contains(&"in"));
+        assert!(spec.outputs.contains(&"out"));
     }
 }

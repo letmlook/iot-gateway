@@ -623,6 +623,7 @@ export default {
     op_threshold_alarm: '阈值告警',
     op_state_change_alarm: '状态变化告警',
     op_route: '条件路由',
+    op_alarm_to_data: '告警转数据',
     op_sink_north: '北向输出',
     op_sink_alarm: '告警输出',
     newSource: '南向数据源',

@@ -10,7 +10,7 @@ if (-not (Test-Path plugins)) {
     New-Item -ItemType Directory -Path plugins | Out-Null
 }
 
-cargo build -p plugin-sim -p plugin-s7 -p plugin-bacnet -p plugin-ethernet-ip -p plugin-iec104 -p plugin-mqtt -p plugin-modbus-tcp -p plugin-modbus-rtu -p plugin-opcua -p plugin-virb -p plugin-http -p plugin-influxdb -p plugin-tdengine --features ffi
+cargo build -p plugin-sim -p plugin-s7 -p plugin-bacnet -p plugin-ethernet-ip -p plugin-iec104 -p plugin-mqtt -p plugin-modbus-tcp -p plugin-modbus-rtu -p plugin-opcua -p plugin-virb -p plugin-http -p plugin-influxdb -p plugin-tdengine -p plugin-smtp --features ffi
 
 # Kafka 需要 CMake + rdkafka，单独构建（失败不中断）
 try {
@@ -33,6 +33,7 @@ Copy-Item target\debug\plugin_virb.dll plugins\
 Copy-Item target\debug\plugin_http.dll plugins\
 Copy-Item target\debug\plugin_influxdb.dll plugins\
 Copy-Item target\debug\plugin_tdengine.dll plugins\
+Copy-Item target\debug\plugin_smtp.dll plugins\
 
 Write-Host "plugins: $((Get-ChildItem plugins\*.dll -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }) -join ', ')"
 Get-ChildItem plugins\*.dll -ErrorAction SilentlyContinue

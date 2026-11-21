@@ -623,6 +623,7 @@ export default {
     op_threshold_alarm: 'Threshold Alarm',
     op_state_change_alarm: 'State Change Alarm',
     op_route: 'Route',
+    op_alarm_to_data: 'Alarm to Data',
     op_sink_north: 'North Sink',
     op_sink_alarm: 'Alarm Sink',
     newSource: 'South Source',

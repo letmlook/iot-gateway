@@ -127,5 +127,9 @@ Each plugin has a `default` feature for its client dependency and an `ffi` featu
 - `plugin-modbus-rtu`: `modbus-client` (tokio-modbus + tokio-serial), `ffi`
 - `plugin-opcua`: `opcua-client`, `ffi`
 - `plugin-mqtt`: `mqtt-client` (rumqttc), `ffi`
+- `plugin-kafka`: `kafka-client` (rdkafka), `ffi`
+- `plugin-smtp`: `smtp-client` (lettre, tokio1+rustls), `ffi` — alarm notification channel; pairs with the flow `alarm_to_data` operator
 - `plugin-sim`: `ffi` only
 - `plugin-virb`: `ffi` only
+
+Heavy client deps are opt-in (not in default features): default builds register stub plugins whose `config_schema` explicitly marks the stub mode and whose `connection_status` exposes counters (e.g. `dropped_no_client`).

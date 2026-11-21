@@ -79,6 +79,11 @@ fn register_builtin_plugins(mgr: &mut gateway_core::Manager) {
     // 需 kafka-client feature 才真实发送」。kafka-client 不进默认 feature（rdkafka
     // 为重 C 库）；以 `--features kafka-client` 构建时这里注册的就是完整生产者客户端。
     mgr.register_north("kafka", Arc::new(plugin_kafka::KafkaPlugin::new()));
+    // 告警通知渠道（蓝图 §7 Q6，2026-11-21）：SMTP 北向。默认构建为 stub（同 kafka
+    // 模式：schema 明确标注、connection_status 可观测）；`--features smtp-client`
+    // 构建时注册的就是完整 lettre 发送客户端。与 flow 的 alarm_to_data 算子配合：
+    // source → threshold_alarm → alarm_to_data → sink_north(smtp)。
+    mgr.register_north("smtp", Arc::new(plugin_smtp::SmtpPlugin::new()));
 }
 
 #[tokio::main]

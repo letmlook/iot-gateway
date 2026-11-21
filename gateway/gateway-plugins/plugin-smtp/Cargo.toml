@@ -1,0 +1,39 @@
+[package]
+name = "plugin-smtp"
+version = "0.1.0"
+edition = "2021"
+description = "北向插件：SMTP 邮件通知（告警 → 邮件，蓝图 §7 Q6 通知渠道）"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+default = []
+# smtp-client = lettre 编译，包含完整 SMTP 发送实现；不开时为 stub：计数不发送。
+# 不进默认 feature（网络/TLS 栈较重）；以 `--features smtp-client` 构建时生效。
+smtp-client = ["dep:lettre"]
+ffi = []
+
+[dependencies]
+gateway-sdk = { path = "../../gateway-sdk" }
+gateway-plugin-common = { path = "../../gateway-plugin-common" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# lettre: version verified via cargo info as 0.11.24
+# tokio1-rustls-tls 一次特性含 tokio1 + rustls（避免 OpenSSL 依赖）；builder 构造邮件
+lettre = { version = "0.11", default-features = false, features = [
+    "smtp-transport",
+    "tokio1-rustls-tls",
+    "builder",
+], optional = true }
+
+[dev-dependencies]
+# FFI 导出符号存在性测试（tests/ffi_exports.rs）：用真实宿主 loader 验证 cdylib 可被加载注册
+gateway-core = { path = "../../gateway-core" }
+libloading = "0.8"
