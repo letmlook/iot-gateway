@@ -70,6 +70,10 @@ pub struct Config {
     pub ws_max_clients: u32,
     /// WebSocket 节点状态快照推送间隔（毫秒）；0 = 关闭快照推送
     pub ws_snapshot_interval_ms: u64,
+    /// 写路径速率限制（次/分钟/身份，T3）：POST/PUT/PATCH/DELETE 计数；0 = 关闭
+    pub rate_limit_writes_per_min: u32,
+    /// 登录速率限制（次/分钟/IP）：防爆破第二道闸门（第一道是 per-username 账号锁）；0 = 关闭
+    pub rate_limit_login_per_min: u32,
 }
 
 fn default_bind_str() -> String {
@@ -124,6 +128,14 @@ fn default_ws_snapshot_interval_ms() -> u64 {
     5000
 }
 
+fn default_rate_limit_writes_per_min() -> u32 {
+    120
+}
+
+fn default_rate_limit_login_per_min() -> u32 {
+    10
+}
+
 fn parse_origins(s: &str) -> Vec<String> {
     s.split(',')
         .map(|x| x.trim().to_string())
@@ -170,6 +182,10 @@ struct ConfigFile {
     ws_max_clients: u32,
     #[serde(default = "default_ws_snapshot_interval_ms")]
     ws_snapshot_interval_ms: u64,
+    #[serde(default = "default_rate_limit_writes_per_min")]
+    rate_limit_writes_per_min: u32,
+    #[serde(default = "default_rate_limit_login_per_min")]
+    rate_limit_login_per_min: u32,
 }
 
 fn default_data_dir_str() -> String {
@@ -244,6 +260,8 @@ impl Default for Config {
             enable_docs: false,
             ws_max_clients: default_ws_max_clients(),
             ws_snapshot_interval_ms: default_ws_snapshot_interval_ms(),
+            rate_limit_writes_per_min: default_rate_limit_writes_per_min(),
+            rate_limit_login_per_min: default_rate_limit_login_per_min(),
         }
     }
 }
@@ -289,6 +307,8 @@ impl Config {
             enable_docs: cf.enable_docs,
             ws_max_clients: cf.ws_max_clients,
             ws_snapshot_interval_ms: cf.ws_snapshot_interval_ms,
+            rate_limit_writes_per_min: cf.rate_limit_writes_per_min,
+            rate_limit_login_per_min: cf.rate_limit_login_per_min,
         })
     }
 
@@ -320,6 +340,8 @@ impl Config {
             enable_docs: false,
             ws_max_clients: default_ws_max_clients(),
             ws_snapshot_interval_ms: default_ws_snapshot_interval_ms(),
+            rate_limit_writes_per_min: default_rate_limit_writes_per_min(),
+            rate_limit_login_per_min: default_rate_limit_login_per_min(),
         };
         if let Ok(json) = serde_json::to_string_pretty(&default_cfg) {
             let _ = std::fs::write(&path, json);
@@ -483,6 +505,16 @@ impl Config {
         if let Ok(s) = std::env::var("GATEWAY_WS_SNAPSHOT_INTERVAL_MS") {
             if let Ok(n) = s.parse::<u64>() {
                 c.ws_snapshot_interval_ms = n;
+            }
+        }
+        if let Ok(s) = std::env::var("GATEWAY_RATE_LIMIT_WRITES_PER_MIN") {
+            if let Ok(n) = s.parse::<u32>() {
+                c.rate_limit_writes_per_min = n;
+            }
+        }
+        if let Ok(s) = std::env::var("GATEWAY_RATE_LIMIT_LOGIN_PER_MIN") {
+            if let Ok(n) = s.parse::<u32>() {
+                c.rate_limit_login_per_min = n;
             }
         }
         // 未提供备份密钥时随机生成：保证不再有「写死在仓库中的默认密钥」

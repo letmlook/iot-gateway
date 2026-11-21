@@ -424,9 +424,13 @@ Backups created now can only be restored by this running instance. Set a fixed s
     };
     tracing::info!("gateway listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, serve)
-        .with_graceful_shutdown(shutdown_signal(shutdown_state.clone()))
-        .await?;
+    // ConnectInfo：限流中间件对白名单路径（auth/login）按客户端 IP 限流需要它
+    axum::serve(
+        listener,
+        serve.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(shutdown_state.clone()))
+    .await?;
     // 到这里说明：已停止接收新连接，且**在途请求都已结束**。
     // 此时停节点并强制落盘，最后一次配置变更才不会丢
     // （去抖窗口内只置脏标记，后台落盘任务又随进程一起退出）。

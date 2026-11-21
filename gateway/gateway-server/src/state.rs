@@ -45,6 +45,8 @@ pub struct AppState {
     pub ws_shutdown: WsShutdown,
     /// 告警事件广播（v2.0 T1-④）：flow 运行时产生告警时 notify，WS alarms 订阅者收帧
     pub alarm_feed: crate::ws::AlarmFeed,
+    /// 写路径速率限制器（v2.0 T3）：固定窗口计数，配置见 config.rate_limit_*
+    pub rate_limiter: Arc<crate::api::rate_limit::RateLimiter>,
 }
 
 impl AppState {
@@ -57,6 +59,11 @@ impl AppState {
         node_log_names: Option<NodeLogNameMap>,
         db: Option<Arc<Db>>,
     ) -> Self {
+        // 在 config 被 move 进 Self 之前读取限流配置
+        let rate_limiter = Arc::new(crate::api::rate_limit::RateLimiter::new(
+            config.rate_limit_writes_per_min,
+            config.rate_limit_login_per_min,
+        ));
         Self {
             manager,
             config,
@@ -73,6 +80,7 @@ impl AppState {
             plugin_processes: None,
             ws_shutdown: WsShutdown::new(),
             alarm_feed: crate::ws::AlarmFeed::new(),
+            rate_limiter,
         }
     }
 

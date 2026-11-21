@@ -20,8 +20,10 @@ fn node_with_tenant(name: &str, kind: NodeKind, tenant: &str) -> gateway_core::N
 }
 
 fn snapshot_with_cross_domain_subs() -> Snapshot {
-    let mut snap = Snapshot::default();
-    snap.version = gateway_core::SNAPSHOT_VERSION;
+    let mut snap = Snapshot {
+        version: gateway_core::SNAPSHOT_VERSION,
+        ..Default::default()
+    };
 
     // 域 A：北向节点 + 南向节点 sa（组 ga）
     let mut north = node_with_tenant("north-a", NodeKind::North, "tenant-a");

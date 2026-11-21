@@ -7,6 +7,7 @@ pub mod flows_api;
 mod handlers;
 pub mod handlers_page;
 mod openapi;
+pub mod rate_limit;
 pub mod scope;
 
 #[allow(unused_imports)]
@@ -87,18 +88,23 @@ fn role_satisfies(have: crate::users::UserRole, need: crate::users::UserRole) ->
     rank(have) >= rank(need)
 }
 
-/// 归一化 API 相对路径：接受 /api/v1/users、/api/users、v1/users、users 四种输入，统一返回 "users"。
+/// 归一化 API 相对路径：接受 /api/v1/users、/api/v2/users、/api/users、v1/users、users 等输入，统一返回 "users"。
 /// 这是安全关键函数——如果不统一，/api/v1/users 会把 Admin 规则绕成 Viewer 可读（越权漏洞）。
+/// v2 别名（T3）与 v1 同契约：版本前缀只是路由面，RBAC/审计按归一化路径判定。
 fn normalize_api_path(raw: &str) -> &str {
     let p = raw
         .trim_start_matches("/api/v1/")
         .trim_start_matches("/api/v1")
+        .trim_start_matches("/api/v2/")
+        .trim_start_matches("/api/v2")
         .trim_start_matches("/api/")
         .trim_start_matches("/api")
         .trim_start_matches('/')
         .trim_end_matches('/');
-    // 兜底：裸 "v1/xxx" 输入（trim_end_matches 之后仍可能残留）
-    p.strip_prefix("v1/").unwrap_or(p)
+    // 兜底：裸 "v1/xxx"、"v2/xxx" 输入（trim_end_matches 之后仍可能残留）
+    let p1 = p.strip_prefix("v1/").unwrap_or(p);
+    let p2 = p1.strip_prefix("v2/").unwrap_or(p1);
+    p2
 }
 
 /// 路由 -> 所需最低角色。
@@ -565,8 +571,46 @@ pub fn router(state: AppState) -> Router<AppState> {
         );
     }
 
+    // ---- /api/v2 别名（T3 API v2，2026-11-21 拍板：v1 冻结保留一个大版本） ----
+    // 与 v1 同构策略：只对「存在契约分裂」的列表端点显式注册版本别名（旧路径 → 旧
+    // handler，v1/v2 → 分页 handler）；其余端点新旧同 handler，无分裂可言，裸路径即契约。
+    // 不用「整表 nest 复制」：nest 会把旧路径也带进 /v2（/v2/users 命中旧 handler
+    // 返回 {"users":[...]}），而旧契约正是 v2 要淘汰的东西。
+    // 版本前缀只是路由面——RBAC/审计/限流都按 normalize_api_path 归一化后判定，
+    // /api、/api/v1、/api/v2 三种输入同语义。
+    r = r
+        .route(
+            "/v2/users",
+            get(handlers_page::list_users_v1).post(handlers::create_user),
+        )
+        .route(
+            "/v2/nodes",
+            get(handlers_page::list_nodes_v1).post(handlers::create_node),
+        )
+        .route(
+            "/v2/nodes/:id/groups",
+            get(handlers_page::list_groups_v1).post(handlers::add_group),
+        )
+        .route(
+            "/v2/nodes/:id/tags",
+            get(handlers_page::list_tags_v1).post(handlers::add_tag),
+        )
+        .route("/v2/nodes/:id/values", get(handlers_page::node_values_v1))
+        .route(
+            "/v2/rules",
+            get(handlers_page::list_rules_v1).post(handlers::create_rule),
+        );
+
     let state2 = state.clone();
+    let state3 = state.clone();
     r.with_state(state)
+        // 洋葱序（后注册在外层）：request_id → auth → rate_limit → handler。
+        // 限流在最内层：认证后可读 AuthContext.username 作身份；白名单的
+        // auth/login 无身份，按 ConnectInfo 的客户端 IP 限流。
+        .route_layer(middleware::from_fn_with_state(
+            state3,
+            rate_limit::rate_limit_middleware,
+        ))
         .route_layer(middleware::from_fn_with_state(state2, auth_middleware))
         .route_layer(middleware::from_fn(request_id_middleware))
 }
@@ -676,6 +720,23 @@ mod tests {
         )
     }
 
+    /// 低限流阈值的独立 state：限流集成测试用（默认 120/min 在测试里难以触发）
+    fn state_with_rate_limit(writes_per_min: u32) -> AppState {
+        let mut cfg = base_config();
+        cfg.disable_auth = false;
+        cfg.rate_limit_writes_per_min = writes_per_min;
+        cfg.rate_limit_login_per_min = 1000;
+        AppState::new(
+            Arc::new(Manager::new()),
+            cfg,
+            None,
+            crate::license::FeatureManager::without_license(),
+            Arc::new(crate::users::UserStore::empty()),
+            None,
+            None,
+        )
+    }
+
     async fn body_of(res: Response) -> String {
         let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
             .await
@@ -730,6 +791,66 @@ mod tests {
             dataflow_status, 401,
             "/data-flow exposes internal topology and must require auth"
         );
+    }
+
+    // ---------- T3: /api/v2 全量别名 ----------
+
+    #[tokio::test]
+    async fn v2_alias_serves_same_contract_as_v1() {
+        // v2 与 v1 是同一契约快照：同响应、同分页语义；未认证同拒
+        let (s1, b1) = call("/v1/users?page=1&page_size=5", Some("test-token")).await;
+        let (s2, b2) = call("/v2/users?page=1&page_size=5", Some("test-token")).await;
+        assert_eq!(s1, 200);
+        assert_eq!(s2, 200, "/v2 alias must serve the paginated handler");
+        assert_eq!(b1, b2, "v2 must be byte-identical to v1 for the same query");
+        let (s3, _) = call("/v2/nodes", None).await;
+        assert_eq!(s3, 401, "v2 alias must not weaken authentication");
+    }
+
+    // ---------- T3: 写路径速率限制 ----------
+
+    #[tokio::test]
+    async fn rate_limit_blocks_writes_over_threshold_with_429() {
+        let st = state_with_rate_limit(3);
+        let app = super::router(st.clone()).with_state(st).into_service();
+        let mut saw_429 = false;
+        // 阈值 3，发 6 个写请求：后半必须出现 429（未超限的写请求走到 handler 后
+        // 因空 body 返回 400/422，同样证明限流层没有拦截它们）
+        for _ in 0..6 {
+            let req = axum::http::Request::builder()
+                .method("POST")
+                .uri("/nodes")
+                .header(header::AUTHORIZATION, "Bearer test-token")
+                .body(Body::empty())
+                .unwrap();
+            let res = ServiceExt::oneshot(app.clone(), req).await.unwrap();
+            if res.status().as_u16() == 429 {
+                saw_429 = true;
+                assert!(
+                    res.headers().contains_key("retry-after"),
+                    "429 must carry Retry-After"
+                );
+                let body = body_of(res).await;
+                assert!(body.contains("rate_limited"), "body: {body}");
+            }
+        }
+        assert!(saw_429, "writes over threshold must be blocked with 429");
+    }
+
+    #[tokio::test]
+    async fn rate_limit_ignores_read_methods() {
+        let st = state_with_rate_limit(1);
+        let app = super::router(st.clone()).with_state(st).into_service();
+        // 读方法不限流：阈值 1 之下连发 10 个 GET 都不得 429
+        for _ in 0..10 {
+            let req = axum::http::Request::builder()
+                .uri("/nodes")
+                .header(header::AUTHORIZATION, "Bearer test-token")
+                .body(Body::empty())
+                .unwrap();
+            let res = ServiceExt::oneshot(app.clone(), req).await.unwrap();
+            assert_ne!(res.status().as_u16(), 429, "GET must not be rate limited");
+        }
     }
 
     #[tokio::test]
@@ -1355,6 +1476,14 @@ mod tests {
             ("/api/health", "health"),
             ("v1/health", "health"),
             ("health", "health"),
+            // v2 别名（T3）：与 v1 同语义
+            ("/api/v2/users", "users"),
+            ("/api/v2/users/", "users"),
+            ("v2/users", "users"),
+            ("/api/v2/health", "health"),
+            ("/api/v2/nodes/abc/start", "nodes/abc/start"),
+            // 嵌套别名 /v2/v1/users（router 整体 nest 产物）也归一为 users
+            ("/api/v2/v1/users", "users"),
             ("/api/v1/nodes/abc/start", "nodes/abc/start"),
             ("/api/nodes/abc/start", "nodes/abc/start"),
             ("v1/nodes/abc/start", "nodes/abc/start"),
@@ -1390,6 +1519,23 @@ mod tests {
             required_role(&axum::http::Method::GET, "/api/v1/rules"),
             crate::users::UserRole::Viewer
         );
+    }
+
+    #[test]
+    fn v2_alias_same_rbac_semantics_as_v1() {
+        // T3 安全回归：/api/v2 别名与 v1/裸路径同 RBAC 语义（版本前缀只是路由面）
+        use crate::users::UserRole::{Admin, Viewer};
+        for p in ["/api/v2/users", "/api/v1/users", "/api/users"] {
+            assert_eq!(required_role(&axum::http::Method::GET, p), Admin, "{p}");
+        }
+        for p in ["/api/v2/rules", "/api/v1/rules", "/api/rules"] {
+            assert_eq!(required_role(&axum::http::Method::GET, p), Viewer, "{p}");
+            assert_eq!(
+                required_role(&axum::http::Method::POST, p),
+                Admin,
+                "{p} write"
+            );
+        }
     }
 
     #[test]

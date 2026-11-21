@@ -56,6 +56,8 @@ impl VirbModel {
 }
 
 /// 字节序 (与 defines.h virb_endianess_e 一致)
+// ABCD/BADC/DCBA/CDAB 是业界标准字节序命名，与 C 头文件保持一致，不改名
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Clone, Copy)]
 pub enum VirbEndianess {
     ABCD = 1,
@@ -112,8 +114,8 @@ fn append_crc(buf: &mut [u8], crc_len: usize) {
         return;
     }
     let mut crc: u16 = 0;
-    for i in 0..crc_len {
-        crc = crc.wrapping_add(buf[i] as u16);
+    for &b in buf.iter().take(crc_len) {
+        crc = crc.wrapping_add(b as u16);
     }
     buf[crc_len] = (crc & 0xff) as u8;
     buf[crc_len + 1] = (crc >> 8) as u8;
