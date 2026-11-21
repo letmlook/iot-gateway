@@ -52,9 +52,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # 预发布 tag（-alpha/-beta/-rc）标记为 prerelease，避免出现在正式版本列表
+          PRERELEASE_FLAG=""
+          case "${GITHUB_REF_NAME}" in
+            *-alpha*|*-beta*|*-rc*) PRERELEASE_FLAG="--prerelease" ;;
+          esac
           gh release create "${GITHUB_REF_NAME}" \
             dist/*.tar.gz dist/SHA256SUMS \
             --title "${GITHUB_REF_NAME}" \
+            $PRERELEASE_FLAG \
             --generate-notes
 
   docker:
