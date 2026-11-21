@@ -54,8 +54,11 @@ RUN cargo fetch --locked
 COPY gateway/ gateway/
 COPY config/ config/
 
-# 网关本体 + 插件宿主进程（进程级隔离模式需要）
-RUN cargo build --release --locked -p gateway-server --bin gateway -p gateway-plugin-host
+# 网关本体 + 插件宿主进程（进程级隔离模式需要）。
+# 必须分开构建：一条命令里 --bin 是全局过滤器，会把 -p gateway-plugin-host
+# 的目标过滤成「名为 gateway 的 bin」→ plugin-host 不构建（package-release.sh 同款教训）
+RUN cargo build --release --locked -p gateway-server --bin gateway
+RUN cargo build --release --locked -p gateway-plugin-host
 
 # 插件编译为 cdylib（--features ffi）。发布镜像带全部对外插件；
 # kafka / smtp 为 stub 构建（重客户端依赖默认不编译，schema 明确标注），
