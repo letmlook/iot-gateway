@@ -127,6 +127,8 @@ export function defaultConfig(operator) {
       return { node_id: '' }
     case 'rate_of_change':
       return { tag_name: '', max_rate: null, level: 'high', message: '' }
+    case 'expr_route':
+      return { expression: '' }
     case 'deduplicate':
       return {}
     default:

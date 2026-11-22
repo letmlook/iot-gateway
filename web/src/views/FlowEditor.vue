@@ -153,7 +153,7 @@ function onSourceNodeChange(nodeId) {
   if (nodeId) loadGroups(nodeId)
 }
 
-const OPS_WITH_FORM = ['threshold_alarm', 'state_change_alarm', 'route', 'sink_north', 'rate_of_change']
+const OPS_WITH_FORM = ['threshold_alarm', 'state_change_alarm', 'route', 'sink_north', 'rate_of_change', 'expr_route']
 const panelMode = computed(() => {
   const n = selectedNode.value
   if (!n) return null
@@ -432,6 +432,19 @@ onUnmounted(() => {})
               <el-form-item :label="t('flowsEditor.message')">
                 <el-input v-model="selectedNode.data.config.message" />
               </el-form-item>
+            </template>
+
+            <!-- expr_route -->
+            <template v-else-if="panelMode === 'expr_route'">
+              <el-form-item :label="t('flowsEditor.expression')" required>
+                <el-input
+                  v-model="selectedNode.data.config.expression"
+                  type="textarea"
+                  :rows="4"
+                  placeholder="tags.temperature > 80 && tags.pressure > 10"
+                />
+              </el-form-item>
+              <div class="editor-hint">{{ t('flowsEditor.expressionHint') }}</div>
             </template>
 
             <!-- sink_north -->

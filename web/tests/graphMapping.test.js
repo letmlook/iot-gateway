@@ -14,7 +14,7 @@ import {
   SOURCE_PORTS,
 } from '../src/utils/graphMapping.js'
 
-// /flows/operators 的真实返回形状(8 个算子 = MVP 6 + 流算子第二批 rate_of_change/deduplicate)
+// /flows/operators 的真实返回形状(9 个算子 = MVP 6 + 流算子第二批 rate_of_change/deduplicate + 表达式批 expr_route)
 const OPERATORS = [
   { name: 'threshold_alarm', inputs: ['in'], outputs: ['alarm', 'normal'] },
   { name: 'state_change_alarm', inputs: ['in'], outputs: ['alarm', 'normal'] },
@@ -24,6 +24,7 @@ const OPERATORS = [
   { name: 'sink_alarm', inputs: ['in'], outputs: [] },
   { name: 'rate_of_change', inputs: ['in'], outputs: ['alarm', 'normal'] },
   { name: 'deduplicate', inputs: ['in'], outputs: ['out'] },
+  { name: 'expr_route', inputs: ['in'], outputs: ['true', 'false'] },
 ]
 
 function sampleGraph() {
@@ -158,4 +159,5 @@ test('defaultConfig 新算子', () => {
     tag_name: '', max_rate: null, level: 'high', message: '',
   })
   assert.deepEqual(defaultConfig('deduplicate'), {})
+  assert.deepEqual(defaultConfig('expr_route'), { expression: '' })
 })
