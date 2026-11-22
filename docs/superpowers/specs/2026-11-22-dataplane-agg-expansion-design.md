@@ -82,9 +82,9 @@ pub struct TotalizerTag {
 2. **读数上升（new ≥ last_counter）**：`total += new − last_counter`。
 3. **读数回绕（new < last_counter）**：
    - 配置了 `rollover` 且 `last_counter` 高于 `rollover` 一半 → 视为翻转：`total += (rollover − last_counter) + new`；
-   - 未配置 `rollover`（或 last_counter 低于 rollover 一半）→ 视为**换表/清零**：`total` 从新读数重计（本次不累计负增量），`tracing::warn!` 记录。
+   - 未配置 `rollover`（或 last_counter 低于 rollover 一半）→ 视为**换表/复位**：`total` 保留不变（不累计负增量），基线 `last_counter` 重置为新读数，`tracing::warn!` 记录。
 4. **周期重置**（`reset_period_ms > 0` 且 `ts_ms − period_start_ms ≥ reset_period_ms`）：**先发射本周期 total，再 `total = 0` 并同批发射 0**（两条 synthetic：旧值 = 周期关闭，0 = 新周期开启；下游以 0 为新周期起点），`period_start_ms = ts_ms`。归零后 `last_emitted_total = 0`。
-5. **发射**：`total ≠ last_emitted_total` 时输出 `{tag}_total` 并更新 `last_emitted_total`；`emit_ms > 0` 且距上次输出 ≥ emit_ms 时周期强制输出。
+5. **发射**：`last_emitted_total` 为 None（首见后的首次推进）**视为变化**，发射一次初值确立基线；此后 `total ≠ last_emitted_total` 时输出 `{tag}_total` 并更新 `last_emitted_total`；`emit_ms > 0` 且距上次输出 ≥ emit_ms 时周期强制输出。
 
 ---
 
