@@ -57,6 +57,22 @@ pub struct WindowPolicy {
     pub aggregates: WindowAgg,
 }
 
+/// 表计累计量配置项（跨窗口持续累计读数）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TotalizerTag {
+    /// 表读数点位名（同组内去重拒绝；不要求组内已存在，与 window 口径一致）
+    pub tag_name: String,
+    /// 累计重置周期（毫秒）；0 = 永不重置
+    #[serde(default)]
+    pub reset_period_ms: u64,
+    /// 表满量程读数；配置后读数高位回绕按翻转补差
+    #[serde(default)]
+    pub rollover: Option<f64>,
+    /// 输出节拍（毫秒）；0 = 仅 total 变化时输出；> 0 时周期心跳强制输出
+    #[serde(default)]
+    pub emit_ms: u64,
+}
+
 /// 组数据策略：一组最多一条
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -81,6 +97,10 @@ pub struct GroupPolicy {
     /// 点位级死区覆盖（同名后者覆盖前者；校验时去重拒绝）
     #[serde(default)]
     pub tags: Vec<TagDeadband>,
+    /// 表计累计量；None 或空数组 = 未启用。输出虚拟点位 `{tag_name}_total`，
+    /// 走 synthetic 通道（不经过死区）
+    #[serde(default)]
+    pub totalizer: Option<Vec<TotalizerTag>>,
 }
 
 /// 校验 GroupPolicy 配置
@@ -139,6 +159,25 @@ pub fn validate_policy(policy: &GroupPolicy) -> Result<(), String> {
             }
         }
     }
+    if let Some(ref tots) = policy.totalizer {
+        let mut seen = std::collections::HashSet::new();
+        for t in tots {
+            if t.tag_name.trim().is_empty() {
+                return Err("totalizer tag_name must not be empty".to_string());
+            }
+            if !seen.insert(t.tag_name.as_str()) {
+                return Err(format!("duplicate tag_name in totalizer: {}", t.tag_name));
+            }
+            if let Some(ro) = t.rollover {
+                if !ro.is_finite() || ro <= 0.0 {
+                    return Err(format!(
+                        "tag {} rollover must be > 0 and finite",
+                        t.tag_name
+                    ));
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -164,11 +203,23 @@ struct TagWindow {
     last_emit_ms: u64,
 }
 
+/// 单点位 totalizer 运行态（不落盘，重启清零）
+#[derive(Debug, Clone, Default)]
+struct TotalizerState {
+    total: f64,
+    last_counter: Option<f64>,
+    period_start_ms: u64,
+    last_emitted_total: Option<f64>,
+    last_emit_ms: u64,
+}
+
 /// 单组过滤运行态（基线 + 窗口缓冲）
 #[derive(Debug, Default)]
 struct GroupFilterState {
     baselines: RwLock<HashMap<TagId, TagBaseline>>,
     windows: RwLock<HashMap<TagId, TagWindow>>,
+    /// totalizer 运行态（按真实点位 TagId 索引）
+    totalizers: RwLock<HashMap<TagId, TotalizerState>>,
     /// 虚拟点位 TagId 缓存（进程内稳态，进程重启后 id 变化无影响）
     synthetic_ids: RwLock<HashMap<String, TagId>>,
 }
@@ -710,6 +761,7 @@ mod tests {
             max_report_ms: 0,
             window: None,
             tags: vec![],
+            totalizer: None,
         }
     }
 
@@ -723,6 +775,7 @@ mod tests {
             max_report_ms: 0,
             window: None,
             tags: vec![],
+            totalizer: None,
         }
     }
 
@@ -742,6 +795,7 @@ mod tests {
                 },
             }),
             tags: vec![],
+            totalizer: None,
         }
     }
 
@@ -1224,6 +1278,7 @@ mod tests {
             max_report_ms: 0,
             window: None,
             tags: vec![],
+            totalizer: None,
         };
         assert!(validate_policy(&p).is_err());
     }
@@ -1247,6 +1302,7 @@ mod tests {
                 },
             }),
             tags: vec![],
+            totalizer: None,
         };
         assert!(validate_policy(&p).is_err());
     }
@@ -1270,6 +1326,7 @@ mod tests {
                 },
             }),
             tags: vec![],
+            totalizer: None,
         };
         assert!(validate_policy(&p).is_err());
     }
@@ -1293,6 +1350,7 @@ mod tests {
                 },
             }),
             tags: vec![],
+            totalizer: None,
         };
         assert!(validate_policy(&p).is_err());
     }
@@ -1314,6 +1372,7 @@ mod tests {
                 aggregates: WindowAgg { kinds: vec![] },
             }),
             tags: vec![],
+            totalizer: None,
         };
         assert!(validate_policy(&p).is_err());
     }
@@ -1342,6 +1401,7 @@ mod tests {
                     deadband_percent: None,
                 },
             ],
+            totalizer: None,
         };
         assert!(validate_policy(&p).is_err());
     }
@@ -1365,8 +1425,47 @@ mod tests {
                 },
             }),
             tags: vec![],
+            totalizer: None,
         };
         assert!(validate_policy(&p).is_ok());
+    }
+
+    #[test]
+    fn validate_totalizer_rules() {
+        let nid = nid();
+        let gid = gid();
+        let tag = |name: &str, ro: Option<f64>| TotalizerTag {
+            tag_name: name.to_string(),
+            reset_period_ms: 0,
+            rollover: ro,
+            emit_ms: 0,
+        };
+        let mut p = passthrough_policy(nid, gid);
+        p.totalizer = Some(vec![tag("meter", None)]);
+        assert!(validate_policy(&p).is_ok());
+        // 空数组 = 未启用，合法
+        p.totalizer = Some(vec![]);
+        assert!(validate_policy(&p).is_ok());
+        // 去重拒绝
+        p.totalizer = Some(vec![tag("meter", None), tag("meter", None)]);
+        assert!(validate_policy(&p).is_err());
+        // rollover 非法：0 / 负数 / 非有限
+        p.totalizer = Some(vec![tag("m", Some(0.0))]);
+        assert!(validate_policy(&p).is_err());
+        p.totalizer = Some(vec![tag("m", Some(-1.0))]);
+        assert!(validate_policy(&p).is_err());
+        p.totalizer = Some(vec![tag("m", Some(f64::INFINITY))]);
+        assert!(validate_policy(&p).is_err());
+        // 空名拒绝
+        p.totalizer = Some(vec![tag("  ", None)]);
+        assert!(validate_policy(&p).is_err());
+    }
+
+    #[test]
+    fn totalizer_field_backward_compatible() {
+        let json = r#"{"south_node_id":"00000000-0000-0000-0000-000000000000","group_id":"00000000-0000-0000-0000-000000000000","mode":"passthrough"}"#;
+        let p: GroupPolicy = serde_json::from_str(json).expect("旧 JSON 必须可反序列化");
+        assert!(p.totalizer.is_none());
     }
 
     // ===== Property tests（T5 质量纵深）=====
@@ -1539,6 +1638,7 @@ mod tests {
                     })
                 },
                 tags,
+                totalizer: None,
             };
             match validate_policy(&p) {
                 Ok(()) => {}
