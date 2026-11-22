@@ -194,3 +194,11 @@ workspace 根 `Cargo.toml` 加 `rhai`（最新 1.x 稳定版；具体版本号�
 - M-3：超大 stale_timeout_ms 溢出 panic 钳制
 - M-5：flow 算子 message 空串视同 None 统一
 - rate NaN 盲一拍文档句；窗口聚合不拦非有限值（第一批 M5，backlog）
+
+**本批（表达式批）终审 backlog 接受项**：
+- expr_route 点位拼写错误静默走 false 端（rhai 缺失属性比较为 Ok(false) 非 Err）——可观测性增强：publish 提示或文档明示
+- rule_extra_json `.ok()` 理论静默丢（RuleExtras 纯数据不可失败，不可达）
+- expr_route per-node Engine 冗余（rhai 求值态在 Scope，可全局共享）与 recompile 双 Engine 构造（亚毫秒）
+- rules advance triggered 块每拍 Vec 分配（风格优化）
+- 前端 graphMapping.test.js 覆盖列表测试不全（历史遗留）；api.d.ts 缺新字段（`npm run gen:api` 可同步）；CreateRuleReq 旧 serde(default) 字段 openapi required 口径（系统性既有）
+- 残差：persist 往返未测 logic=Any；extra>8 无 server 级自动化测试（冒烟人工证据）
