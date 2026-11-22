@@ -195,12 +195,16 @@ pub struct SystemConfigReq {
 }
 
 /// POST /api/rules、PUT /api/rules/{id} 请求体（handlers::CreateRuleReq）
+/// 注：handler 侧 id/enabled/for_ms/clear_ms/logic 均带 #[serde(default)]（可选），
+/// 文档桩同步 `required = false`——否则 OpenAPI 谎称必填（backlog 入账的口径失实）。
 #[derive(ToSchema)]
 pub struct CreateRuleReq {
     /// 为空时由服务端生成 UUID
+    #[schema(required = false)]
     pub id: String,
     pub name: String,
     /// 默认 true；PUT 时以 body 为准
+    #[schema(required = false)]
     pub enabled: bool,
     /// RuleSource：{ "south_node_id": "<uuid>", "group_id": "<uuid>", "tag_name": "..." }
     #[schema(value_type = Object)]
@@ -208,7 +212,11 @@ pub struct CreateRuleReq {
     /// RuleCondition
     #[schema(value_type = Object)]
     pub condition: serde_json::Value,
+    /// 缺省 0
+    #[schema(required = false)]
     pub for_ms: u64,
+    /// 缺省 0
+    #[schema(required = false)]
     pub clear_ms: u64,
     /// 追加触发条件数组，元素 {tag_name, op, threshold}；上限 8
     #[schema(value_type = Vec<Object>, required = false)]

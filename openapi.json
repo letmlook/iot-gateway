@@ -6250,15 +6250,11 @@
       },
       "CreateRuleReq": {
         "type": "object",
-        "description": "POST /api/rules、PUT /api/rules/{id} 请求体（handlers::CreateRuleReq）",
+        "description": "POST /api/rules、PUT /api/rules/{id} 请求体（handlers::CreateRuleReq）\n注：handler 侧 id/enabled/for_ms/clear_ms/logic 均带 #[serde(default)]（可选），\n文档桩同步 `required = false`——否则 OpenAPI 谎称必填（backlog 入账的口径失实）。",
         "required": [
-          "id",
           "name",
-          "enabled",
           "source",
           "condition",
-          "for_ms",
-          "clear_ms",
           "action"
         ],
         "properties": {
@@ -6276,6 +6272,7 @@
           "clear_ms": {
             "type": "integer",
             "format": "int64",
+            "description": "缺省 0",
             "minimum": 0
           },
           "condition": {
@@ -6296,6 +6293,7 @@
           "for_ms": {
             "type": "integer",
             "format": "int64",
+            "description": "缺省 0",
             "minimum": 0
           },
           "id": {

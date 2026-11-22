@@ -1294,24 +1294,34 @@ export interface components {
             name: string;
             plugin_name: string;
         };
-        /** @description POST /api/rules、PUT /api/rules/{id} 请求体（handlers::CreateRuleReq） */
+        /**
+         * @description POST /api/rules、PUT /api/rules/{id} 请求体（handlers::CreateRuleReq）
+         *     注：handler 侧 id/enabled/for_ms/clear_ms/logic 均带 #[serde(default)]（可选），
+         *     文档桩同步 `required = false`——否则 OpenAPI 谎称必填（backlog 入账的口径失实）。
+         */
         CreateRuleReq: {
             /** @description RuleAction */
             action: Record<string, never>;
             /** @description 独立恢复条件 {tag_name?, op, threshold} */
             clear_condition?: Record<string, never> | null;
-            /** Format: int64 */
-            clear_ms: number;
+            /**
+             * Format: int64
+             * @description 缺省 0
+             */
+            clear_ms?: number;
             /** @description RuleCondition */
             condition: Record<string, never>;
             /** @description 默认 true；PUT 时以 body 为准 */
-            enabled: boolean;
+            enabled?: boolean;
             /** @description 追加触发条件数组，元素 {tag_name, op, threshold}；上限 8 */
             extra_conditions?: Record<string, never>[];
-            /** Format: int64 */
-            for_ms: number;
+            /**
+             * Format: int64
+             * @description 缺省 0
+             */
+            for_ms?: number;
             /** @description 为空时由服务端生成 UUID */
-            id: string;
+            id?: string;
             /** @description 条件组逻辑：all | any（缺省 all） */
             logic?: string | null;
             name: string;

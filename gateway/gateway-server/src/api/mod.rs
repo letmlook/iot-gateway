@@ -1190,6 +1190,75 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn create_rule_rejects_more_than_8_extra_conditions() {
+        // B6 残差补测：extra>8 的 server 级自动化证据（此前只有 core 单测 + 冒烟人工记录）。
+        // create_rule 校验顺序：source 节点存在 → Rule::validate——所以必须先造真实节点，
+        // 否则会先撞 "source node not found"，测不到 extra 上限那条路径。
+        let env = rbac_env().await;
+        let node = gateway_core::Node::new(
+            "node-x",
+            gateway_sdk::NodeKind::South,
+            "sim",
+            gateway_sdk::PluginConfig::new(),
+        );
+        let nid = node.id().0; // Uuid（NodeId 无 Display；JSON 里要 Uuid 字符串）
+        let snap = gateway_core::Snapshot {
+            version: gateway_core::SNAPSHOT_VERSION,
+            nodes: vec![node],
+            groups: Vec::new(),
+            tags: Vec::new(),
+            subscriptions: Vec::new(),
+            rules: Vec::new(),
+            policies: Vec::new(),
+        };
+        env.state.manager.apply_snapshot(&snap).await;
+
+        let token = login_as(&env, "admin-extras", crate::users::UserRole::Admin).await;
+        let mk_cond = |i: usize| {
+            format!(
+                r#"{{"tag_name":"p{i}","op":"gt","threshold":{i}}}"#
+            )
+        };
+        let conds: Vec<String> = (0..9).map(mk_cond).collect();
+        let body = format!(
+            r#"{{"name":"r9","enabled":true,
+                "source":{{"south_node_id":"{nid}","group_id":"{}","tag_name":"temperature"}},
+                "condition":{{"op":"gt","threshold":80}},
+                "extra_conditions":[{}],
+                "action":{{"type":"log","message":"x"}}}}"#,
+            uuid::Uuid::new_v4(),
+            conds.join(",")
+        );
+        let (status, resp) = post_json_with_token(&env.state, "/rules", &body, &token).await;
+        assert_eq!(status, 400, "9 个 extra_conditions 必须被拒: {resp}");
+        assert!(resp.contains("extra_conditions"), "错误须指向 extra_conditions: {resp}");
+
+        // 8 个（上限内）不走上限校验：因测试环境的组/点位不存在，后续引用校验
+        // 仍会 400——但错误信息必须不再是 extra 数量上限（否则上限口径就是错的）
+        let conds8: Vec<String> = (0..8).map(mk_cond).collect();
+        let body8 = format!(
+            r#"{{"name":"r8","enabled":true,
+                "source":{{"south_node_id":"{nid}","group_id":"{}","tag_name":"temperature"}},
+                "condition":{{"op":"gt","threshold":80}},
+                "extra_conditions":[{}],
+                "action":{{"type":"log","message":"x"}}}}"#,
+            uuid::Uuid::new_v4(),
+            conds8.join(",")
+        );
+        let (status8, resp8) = post_json_with_token(&env.state, "/rules", &body8, &token).await;
+        assert_ne!(
+            status8, 500,
+            "上限内的规则不应 5xx: {resp8}"
+        );
+        assert!(
+            !resp8.contains("at most 8"),
+            "8 个 extra_conditions 不应报数量上限: {resp8}"
+        );
+
+        cleanup_env(env);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn admin_can_administer() {
         let env = rbac_env().await;
         let token = login_as(&env, "boss", crate::users::UserRole::Admin).await;

@@ -518,7 +518,7 @@ impl NorthPlugin for TdEnginePlugin {
             }
         }
 
-        #[cfg(not(feature = "http-client"))]
+    #[cfg(not(feature = "http-client"))]
         {
             let _ = line;
             let mut cs = node_state.connection_status.write().await;
@@ -917,12 +917,22 @@ fn config_schema() -> gateway_sdk::ConfigSchema {
     use gateway_sdk::schema::{ParamAttribute, ParamSchema, ParamType, ParamValid};
     use gateway_sdk::ConfigSchema;
 
+    let url_desc = "taosAdapter REST URL, default http://127.0.0.1:6041".to_string();
+    let url_desc_zh = "taosAdapter REST URL，默认为 http://127.0.0.1:6041".to_string();
+    let url_desc_en = "taosAdapter REST URL, default http://127.0.0.1:6041".to_string();
+    #[cfg(not(feature = "http-client"))]
+    let url_desc = format!("[STUB] 当前构建为 stub，需 http-client feature 才真实写入：本构建可创建节点、connection_status 可观测，但不会真实发送。{url_desc}");
+    #[cfg(not(feature = "http-client"))]
+    let url_desc_zh = format!("[STUB] 当前构建为 stub，需 http-client feature 才真实写入：本构建可创建节点、connection_status 可观测，但不会真实发送。{url_desc_zh}");
+    #[cfg(not(feature = "http-client"))]
+    let url_desc_en = format!("[STUB] 当前构建为 stub，需 http-client feature 才真实写入：本构建可创建节点、connection_status 可观测，但不会真实发送。{url_desc_en}");
     ConfigSchema::new()
+
         .param(ParamSchema {
             name: "url".to_string(), name_zh: Some("taosAdapter URL".to_string()), name_en: Some("taosAdapter URL".to_string()),
-            description: Some("taosAdapter REST URL, default http://127.0.0.1:6041".to_string()),
-            description_zh: Some("taosAdapter REST URL，默认为 http://127.0.0.1:6041".to_string()),
-            description_en: Some("taosAdapter REST URL, default http://127.0.0.1:6041".to_string()),
+            description: Some(url_desc),
+            description_zh: Some(url_desc_zh),
+            description_en: Some(url_desc_en),
             attribute: ParamAttribute::Optional, ty: ParamType::String,
             default: Some(serde_json::json!(DEFAULT_URL)),
             valid: Some(ParamValid { min: None, max: None, regex: Some("^https?://.*".to_string()), length: Some(1024) }),

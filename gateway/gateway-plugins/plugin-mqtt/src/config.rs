@@ -17,14 +17,23 @@ pub const UPLOAD_FORMAT_GROUP_DATA: &str = "group_data";
 pub const UPLOAD_FORMAT_RAW_DATA: &str = "raw_data";
 
 pub fn config_schema() -> ConfigSchema {
+    let host_desc = "MQTT Broker IP or hostname".to_string();
+    let host_desc_zh = "MQTT Broker IP 或域名".to_string();
+    let host_desc_en = "MQTT Broker IP or hostname".to_string();
+    #[cfg(not(feature = "mqtt-client"))]
+    let host_desc = format!("[STUB] 当前构建为 stub，需 mqtt-client feature 才真实上报：本构建可创建节点、connection_status 可观测，但不会真实发送。{host_desc}");
+    #[cfg(not(feature = "mqtt-client"))]
+    let host_desc_zh = format!("[STUB] 当前构建为 stub，需 mqtt-client feature 才真实上报：本构建可创建节点、connection_status 可观测，但不会真实发送。{host_desc_zh}");
+    #[cfg(not(feature = "mqtt-client"))]
+    let host_desc_en = format!("[STUB] 当前构建为 stub，需 mqtt-client feature 才真实上报：本构建可创建节点、connection_status 可观测，但不会真实发送。{host_desc_en}");
     ConfigSchema::new()
         .param(ParamSchema {
             name: "host".to_string(),
             name_zh: Some("服务器地址".to_string()),
             name_en: Some("Broker Host".to_string()),
-            description: Some("MQTT Broker IP or hostname".to_string()),
-            description_zh: Some("MQTT Broker IP 或域名".to_string()),
-            description_en: Some("MQTT Broker IP or hostname".to_string()),
+            description: Some(host_desc),
+            description_zh: Some(host_desc_zh),
+            description_en: Some(host_desc_en),
             attribute: ParamAttribute::Optional,
             ty: ParamType::String,
             default: Some(serde_json::json!(DEFAULT_HOST)),

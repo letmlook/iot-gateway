@@ -380,7 +380,7 @@ impl NorthPlugin for HttpPlugin {
             }
         }
 
-        #[cfg(not(feature = "http-client"))]
+    #[cfg(not(feature = "http-client"))]
         {
             let _ = payload;
             let mut cs = node_state.connection_status.write().await;
@@ -660,14 +660,24 @@ fn config_schema() -> gateway_sdk::ConfigSchema {
     use gateway_sdk::schema::{ParamAttribute, ParamOption, ParamSchema, ParamType, ParamValid};
     use gateway_sdk::ConfigSchema;
 
+    let url_desc = "HTTP POST/PUT target URL, must start with http:// or https://".to_string();
+    let url_desc_zh = "HTTP POST/PUT 目标 URL，必须以 http:// 或 https:// 开头".to_string();
+    let url_desc_en = "HTTP POST/PUT target URL, must start with http:// or https://".to_string();
+
+    #[cfg(not(feature = "http-client"))]
+    let url_desc = format!("[STUB] 当前构建为 stub，需 http-client feature 才真实上报：本构建可创建节点、connection_status 可观测，但不会真实发送。{url_desc}");
+    #[cfg(not(feature = "http-client"))]
+    let url_desc_zh = format!("[STUB] 当前构建为 stub，需 http-client feature 才真实上报：本构建可创建节点、connection_status 可观测，但不会真实发送。{url_desc_zh}");
+    #[cfg(not(feature = "http-client"))]
+    let url_desc_en = format!("[STUB] 当前构建为 stub，需 http-client feature 才真实上报：本构建可创建节点、connection_status 可观测，但不会真实发送。{url_desc_en}");
     ConfigSchema::new()
         .param(ParamSchema {
             name: "url".to_string(),
             name_zh: Some("目标 URL".to_string()),
             name_en: Some("Target URL".to_string()),
-            description: Some("HTTP POST/PUT target URL, must start with http:// or https://".to_string()),
-            description_zh: Some("HTTP POST/PUT 目标 URL，必须以 http:// 或 https:// 开头".to_string()),
-            description_en: Some("HTTP POST/PUT target URL, must start with http:// or https://".to_string()),
+            description: Some(url_desc),
+            description_zh: Some(url_desc_zh),
+            description_en: Some(url_desc_en),
             attribute: ParamAttribute::Required,
             ty: ParamType::String,
             default: None,
