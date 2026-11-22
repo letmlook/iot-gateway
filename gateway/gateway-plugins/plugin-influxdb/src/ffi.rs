@@ -1,1 +1,13 @@
-// FFI bindings placeholder — build with --features ffi to enable
+//! 北向 InfluxDB 插件 C ABI 导出。
+//!
+//! 全部符号由 `gateway_sdk::export_north_plugin!` 生成，不再手写：
+//! - **panic 隔离**：每个导出函数在本 crate 内 `catch_unwind`，把插件 panic 转成一次失败的调用。
+//!   这一点不可省略——插件与宿主各自静态链接了一份 Rust 运行时，异常一旦越过 C ABI 边界，
+//!   宿主侧会以 `Rust cannot catch foreign exceptions` 直接 abort 整个进程。
+//! - **运行时管理**：每次调用创建单线程 runtime，宿主保证调用发生在独立线程上（见 core `run_sync`）。
+//!
+//! 缺陷修复（2026-11-23，rc.5 镜像验证发现）：此前本文件是 1 行占位符——`mod ffi` 声明
+//! 与 `ffi` feature 都在，但宏调用从未写下，构建出的 .so 无任何 FFI 导出符号 → 动态加载
+//! 失败 → 容器形态下 influxdb 北向缺席（builtin 兜底当时又是「全或无」条件，见 main.rs）。
+
+gateway_sdk::export_north_plugin!(crate::InfluxDbPlugin);
