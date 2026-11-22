@@ -137,6 +137,47 @@ async function query() {
   }
 }
 
+// ---------- 报表导出（蓝图 T2 顺延项） ----------
+// 导出的是原始精度样本（后端不做降采样），与图上的降采样点不同——行数可能远大于图示。
+const exporting = ref(false)
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+async function exportCsv() {
+  if (!selectedKeys.value.length) {
+    ElMessage.warning(t('history.noSelection'))
+    return
+  }
+  exporting.value = true
+  try {
+    const r = RANGES.find((x) => x.key === range.value) || RANGES[1]
+    const to = Date.now()
+    const from = to - r.ms
+    const body = {
+      series: selectedKeys.value.map((key) => {
+        const [node_id, group_id, tag] = key.split('|')
+        return { node_id, group_id, tag }
+      }),
+      from,
+      to,
+    }
+    const { blob, filename } = await api.historyExport(body)
+    downloadBlob(blob, filename)
+    ElMessage.success(t('history.exportOk'))
+  } catch (e) {
+    ElMessage.error(t('history.exportFailed') + getErrorMessage(t, e))
+  } finally {
+    exporting.value = false
+  }
+}
+
 // ---------- 图表 ----------
 // 每个序列画三条线：min（透明）+ max-min（带面积，堆叠成 min/max 置信带）+ avg（主线）。
 // 置信带不进图例、不进 tooltip，视觉上托住主线。
@@ -297,6 +338,14 @@ onUnmounted(() => {
           @click="query"
         >
           {{ t('history.query') }}
+        </el-button>
+
+        <el-button
+          :loading="exporting"
+          :disabled="disabled || !selectedKeys.length"
+          @click="exportCsv"
+        >
+          {{ t('history.exportCsv') }}
         </el-button>
       </div>
 

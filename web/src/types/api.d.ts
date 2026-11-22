@@ -268,6 +268,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/history/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 历史报表导出：多序列原始精度样本，长表 CSV 下载（蓝图 T2 顺延项）。
+         *     POST 仅因参数结构（多三元组列表），语义纯读，Viewer 可用（required_role 特判）；
+         *     行数超 EXPORT_MAX_ROWS（50 万）返回 400 而非截断，避免产出误导性报表。
+         */
+        post: operations["history_export"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/history/series": {
         parameters: {
             query?: never;
@@ -1277,16 +1298,22 @@ export interface components {
         CreateRuleReq: {
             /** @description RuleAction */
             action: Record<string, never>;
+            /** @description 独立恢复条件 {tag_name?, op, threshold} */
+            clear_condition?: Record<string, never> | null;
             /** Format: int64 */
             clear_ms: number;
             /** @description RuleCondition */
             condition: Record<string, never>;
             /** @description 默认 true；PUT 时以 body 为准 */
             enabled: boolean;
+            /** @description 追加触发条件数组，元素 {tag_name, op, threshold}；上限 8 */
+            extra_conditions?: Record<string, never>[];
             /** Format: int64 */
             for_ms: number;
             /** @description 为空时由服务端生成 UUID */
             id: string;
+            /** @description 条件组逻辑：all | any（缺省 all） */
+            logic?: string | null;
             name: string;
             /** @description RuleSource：{ "south_node_id": "<uuid>", "group_id": "<uuid>", "tag_name": "..." } */
             source: Record<string, never>;
@@ -2440,6 +2467,67 @@ export interface operations {
                 };
                 content: {
                     "application/json": Record<string, never>;
+                };
+            };
+        };
+    };
+    history_export: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description 导出请求：序列列表（≤50）+ 时间窗毫秒（from 缺省 to-1h，to 缺省当前） */
+        requestBody?: {
+            content: {
+                /**
+                 * @example {
+                 *       "from": 1700000000000,
+                 *       "series": [
+                 *         {
+                 *           "group_id": "<uuid>",
+                 *           "node_id": "<uuid>",
+                 *           "tag": "temperature"
+                 *         },
+                 *         {
+                 *           "group_id": "<uuid>",
+                 *           "node_id": "<uuid>",
+                 *           "tag": "humidity"
+                 *         }
+                 *       ],
+                 *       "to": 1700003600000
+                 *     }
+                 */
+                "": unknown;
+            };
+        };
+        responses: {
+            /** @description 长表 CSV（ts,node_id,group_id,tag,value，ts 为 ISO8601 UTC） */
+            200: {
+                headers: {
+                    /** @description attachment; filename=history-export-<ts>.csv */
+                    "Content-Disposition"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 参数非法 / 行数超限 / 历史存储未启用 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description 未认证 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };

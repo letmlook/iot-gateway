@@ -179,6 +179,20 @@ export const api = {
     if (maxPoints != null) q.set('max_points', String(maxPoints))
     return req('GET', `/history/series?${q.toString()}`)
   },
+  // 历史报表导出（原始精度长表 CSV；POST 仅因多序列参数结构，语义纯读 Viewer 可用）
+  historyExport: (body) =>
+    fetch(`${BASE}/history/export`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify(body),
+    }).then(async (r) => {
+      if (!r.ok) throw await parseErrorResponse(r, await r.text())
+      const blob = await r.blob()
+      const disposition = r.headers.get('Content-Disposition')
+      const match = disposition && disposition.match(/filename="?([^";]+)"?/)
+      const filename = match ? match[1].trim() : `history-export-${Date.now()}.csv`
+      return { blob, filename }
+    }),
 
   // 流程编排（v2.0 T1；gateway-server/src/flows.rs + api/flows_api.rs）
   flows: () => req('GET', '/flows'),
