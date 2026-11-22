@@ -190,15 +190,15 @@ workspace 根 `Cargo.toml` 加 `rhai`（最新 1.x 稳定版；具体版本号�
 ## 七、路线图备忘
 
 三批全部完成后，「规则算法补齐」专题收官。后续 backlog（终审与各批审查遗留）：
-- M-2：stale=None 365d deadline 不 re-arm（一行）
-- M-3：超大 stale_timeout_ms 溢出 panic 钳制
-- M-5：flow 算子 message 空串视同 None 统一
-- rate NaN 盲一拍文档句；窗口聚合不拦非有限值（第一批 M5，backlog）
+- M-2：stale=None 365d deadline 不 re-arm（一行）——✅ 2026-11-22 修复（flow_runtime 哨兵 deadline re-arm）
+- M-3：超大 stale_timeout_ms 溢出 panic 钳制——✅ 2026-11-22 修复（MAX_STALE_TIMEOUT_MS=365d 钳制 + 测试）
+- M-5：flow 算子 message 空串视同 None 统一——✅ 2026-11-22 修复（三算子 filter 空白串 + 测试）
+- rate NaN 盲一拍文档句；窗口聚合不拦非有限值（第一批 M5，backlog）——✅ 2026-11-22 修复并文档化（实际比「盲一拍」严重：NaN 基线永久失明，已拒入基线 + 测试；窗口聚合拒收非有限样本；架构说明两句）
 
-**本批（表达式批）终审 backlog 接受项**：
-- expr_route 点位拼写错误静默走 false 端（rhai 缺失属性比较为 Ok(false) 非 Err）——可观测性增强：publish 提示或文档明示
-- rule_extra_json `.ok()` 理论静默丢（RuleExtras 纯数据不可失败，不可达）
-- expr_route per-node Engine 冗余（rhai 求值态在 Scope，可全局共享）与 recompile 双 Engine 构造（亚毫秒）
-- rules advance triggered 块每拍 Vec 分配（风格优化）
-- 前端 graphMapping.test.js 覆盖列表测试不全（历史遗留）；api.d.ts 缺新字段（`npm run gen:api` 可同步）；CreateRuleReq 旧 serde(default) 字段 openapi required 口径（系统性既有）
-- 残差：persist 往返未测 logic=Any；extra>8 无 server 级自动化测试（冒烟人工证据）
+**本批（表达式批）终审 backlog 接受项**（✅ = 2026-11-22 B6 批处理）：
+- ✅ expr_route 点位拼写错误静默走 false 端——按 backlog 选项以文档明示处理（架构说明算子清单；拼写无错日志是 rhai 缺位属性语义，改无可改）
+- ✅ rule_extra_json `.ok()` 理论静默丢——inspect_err warn 兜底（不可达路径现在可观测）
+- ✅ expr_route per-node Engine 冗余与 recompile 双 Engine 构造——进程级 shared_engine() 共享（rhai Engine Send+Sync、求值态在 Scope），CachedScript 只存 AST
+- ✅ rules advance triggered 块每拍 Vec 分配——栈上 [bool; 9] 数组
+- ✅ 前端 graphMapping.test.js 覆盖列表测试不全——defaultConfig switch 全分支枚举补测；api.d.ts 缺新字段——`npm run gen:api` 已同步（两轮）；CreateRuleReq 旧 serde(default) 字段 openapi required 口径——文档桩补 required = false（id/enabled/for_ms/clear_ms）
+- ✅ 残差：persist 往返补测 logic=Any；extra>8 补 server 级自动化测试（POST /rules 全链路 400）

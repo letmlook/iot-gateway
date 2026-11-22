@@ -16,9 +16,7 @@ export const useMonitorStore = defineStore('monitor', () => {
   const selectedGroupId = ref(null)
   const loading = ref(false)
   const error = ref(null)
-  const connected = ref(false)   // WS connection status
   let pollTimer = null
-  let ws = null
 
   // Getters
   const southNodes = computed(() => nodes.value.filter(n => n.kind === 'south'))
@@ -99,17 +97,9 @@ export const useMonitorStore = defineStore('monitor', () => {
     }
   }
 
-  // WS 占位（后续 gatewayWs.js 实现后接入）
-  function connectWs() {
-    // TODO: gatewayWs.js
-  }
-  function disconnectWs() {
-    if (ws) {
-      ws.close()
-      ws = null
-      connected.value = false
-    }
-  }
+  // WS 实时值已由 views/DataMonitor.vue 直连 ws/gatewayWs.js 单例（auth/心跳/重连齐备），
+  // 本 store 只负责 REST 轮询——此前的 connectWs TODO 空壳与 ws 变量为死代码，已移除
+  // （2026-11-22 D 级审计清理）。
 
   function updateTagValue(tagId, value) {
     tagValues.value[tagId] = value
@@ -125,7 +115,6 @@ export const useMonitorStore = defineStore('monitor', () => {
     selectedGroupId,
     loading,
     error,
-    connected,
     // Getters
     southNodes,
     currentNode,
@@ -139,8 +128,6 @@ export const useMonitorStore = defineStore('monitor', () => {
     pollValues,
     startPolling,
     stopPolling,
-    connectWs,
-    disconnectWs,
     updateTagValue,
   }
 })
