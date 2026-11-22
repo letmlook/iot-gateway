@@ -21,6 +21,8 @@ pub struct FlowState {
     pub last_rate: HashMap<Uuid, HashMap<String, (f64, u64)>>,
     /// deduplicate 快照：节点 id → 上一帧 values
     pub last_frames: HashMap<Uuid, Vec<(gateway_sdk::TagId, DataValue)>>,
+    /// expr_route AST 缓存：节点 id → 缓存条目（spec §4.5）。不落盘，重启清零。
+    pub script_asts: HashMap<Uuid, crate::operators::CachedScript>,
 }
 
 /// 一次求值的 sink 投递（server 按此分发：sink_north → 北向插件，sink_alarm → 告警存储）。

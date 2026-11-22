@@ -14,7 +14,7 @@ pub mod validate;
 pub use engine::{evaluate, evaluate_with_inject, FlowState, SinkDelivery};
 pub use error::FlowError;
 pub use flow::{Flow, FlowEdge, FlowGraph, FlowNode, FlowStatus, NodeKind, Position};
-pub use operators::{validate_config, OPERATOR_NAMES};
+pub use operators::{validate_config, CachedScript, ExprRouteConfig, OPERATOR_NAMES};
 pub use payload::{AlarmEvent, AlarmLevel, FlowPayload};
 pub use plan::ExecutionPlan;
 pub use validate::validate;

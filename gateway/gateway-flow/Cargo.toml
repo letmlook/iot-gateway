@@ -11,3 +11,6 @@ serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
+# sync：Engine/AST 用 Arc 内部共享（Send+Sync）——FlowState 会被 tokio::spawn 的 flow 任务跨 await 持有
+rhai = { version = "1.27", features = ["sync"] }
+tracing = "0.1"

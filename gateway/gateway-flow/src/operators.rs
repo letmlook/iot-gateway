@@ -1,6 +1,6 @@
 //! MVP 算子集（design §1/§4.1）：threshold_alarm、state_change_alarm、route、
-//! alarm_to_data、sink_north、sink_alarm、rate_of_change、deduplicate（流算子第二批补入）。
-//! 脚本算子（rhai）明确不在 MVP（沙箱专项）。
+//! alarm_to_data、sink_north、sink_alarm、rate_of_change、deduplicate（流算子第二批补入）、
+//! expr_route（rhai 沙箱，spec §四）。
 
 use chrono::Utc;
 use gateway_sdk::{DataValue, GroupData};
@@ -12,7 +12,7 @@ use crate::error::FlowError;
 use crate::payload::{AlarmEvent, AlarmLevel, FlowPayload};
 
 /// 算子/端点注册表（server 侧 `GET /flows/operators` 发现用，前端不硬编码——踩坑 P6 对策）。
-pub const OPERATOR_NAMES: [&str; 8] = [
+pub const OPERATOR_NAMES: [&str; 9] = [
     "threshold_alarm",
     "state_change_alarm",
     "route",
@@ -21,6 +21,7 @@ pub const OPERATOR_NAMES: [&str; 8] = [
     "sink_alarm",
     "rate_of_change",
     "deduplicate",
+    "expr_route",
 ];
 
 /// Source 节点配置：绑定的南向 (节点, 组)。流程输入只允许来自南向组
@@ -81,6 +82,10 @@ impl PortSpec {
             "deduplicate" => PortSpec {
                 inputs: &["in"],
                 outputs: &["out"],
+            },
+            "expr_route" => PortSpec {
+                inputs: &["in"],
+                outputs: &["true", "false"],
             },
             // 告警 → 数据桥：把 Alarm 载荷转成 GroupData，交给 sink_north（MQTT/Kafka/
             // Webhook/SMTP 等北向节点）推送——告警通知渠道（蓝图 §7 Q6）的实现基础
@@ -168,6 +173,18 @@ pub fn validate_config(operator: &str, config: &serde_json::Value) -> Result<(),
         "alarm_to_data" => Ok(()),
         "sink_alarm" => Ok(()),
         "deduplicate" => Ok(()),
+        "expr_route" => {
+            let c: ExprRouteConfig = serde_json::from_value(config.clone())
+                .map_err(|e| format!("invalid config: {e}"))?;
+            if c.expression.trim().is_empty() {
+                return Err("expression is required".into());
+            }
+            // 发布门禁：编译校验（只编译不执行），语法错误拒绝发布
+            rhai_engine()
+                .compile(&c.expression)
+                .map_err(|e| format!("expression compile error: {e}"))?;
+            Ok(())
+        }
         other => Err(format!("unknown operator `{other}`")),
     }
 }
@@ -218,6 +235,43 @@ pub struct RateOfChangeConfig {
     pub level: String,
     #[serde(default)]
     pub message: Option<String>,
+}
+
+/// expr_route 配置：rhai 布尔表达式对组内点位求值路由（spec §四）。
+#[derive(Debug, Deserialize)]
+pub struct ExprRouteConfig {
+    pub expression: String,
+}
+
+/// expr_route 的 AST + 引擎缓存条目（FlowState.script_asts；spec §4.5）。
+pub struct CachedScript {
+    /// 缓存 key：config 的 expression 字符串
+    pub expression: String,
+    pub ast: rhai::AST,
+    /// 每节点私有引擎与 AST 同生命周期缓存（rhai Engine 求值状态在 Scope，可复用）
+    pub engine: rhai::Engine,
+    /// spec §4.4：首次错误 warn，后续 debug；求值成功后重置
+    pub warned: bool,
+}
+
+impl std::fmt::Debug for CachedScript {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedScript")
+            .field("expression", &self.expression)
+            .field("warned", &self.warned)
+            .finish_non_exhaustive()
+    }
+}
+
+/// expr_route 专用沙箱引擎（spec §4.3 边界定死；默认无文件/目录/网络/系统访问，不注册自定义函数）。
+pub fn rhai_engine() -> rhai::Engine {
+    let mut engine = rhai::Engine::new();
+    engine.set_max_operations(10_000); // 防死循环（超限 → 求值错误 → false 端）
+    engine.set_max_call_levels(16); // 防深递归
+    engine.set_max_expr_depths(32, 32); // 防深嵌套表达式
+    engine.set_max_string_size(4_096); // 防内存爆炸
+    engine.set_max_array_size(64);
+    engine
 }
 
 /// deduplicate 配置：无字段（spec §三）。
@@ -409,6 +463,99 @@ pub fn eval_deduplicate(
     }
 }
 
+/// GroupData → rhai Map（tag_name → Dynamic；spec §4.2 数据暴露）。
+/// 数值全统一 f64；Bool→bool；String→String；Bytes→UNIT（null）。
+fn tags_map(gd: &GroupData) -> rhai::Map {
+    let mut map = rhai::Map::new();
+    let Some(names) = &gd.tag_names else {
+        return map;
+    };
+    for (tag_id, value) in &gd.values {
+        let Some(name) = names.get(tag_id) else {
+            continue;
+        };
+        let d = match value {
+            DataValue::Bool(b) => rhai::Dynamic::from(*b),
+            DataValue::Int8(v) => rhai::Dynamic::from(*v as f64),
+            DataValue::Int16(v) => rhai::Dynamic::from(*v as f64),
+            DataValue::Int32(v) => rhai::Dynamic::from(*v as f64),
+            DataValue::Int64(v) => rhai::Dynamic::from(*v as f64),
+            DataValue::UInt8(v) => rhai::Dynamic::from(*v as f64),
+            DataValue::UInt16(v) => rhai::Dynamic::from(*v as f64),
+            DataValue::UInt32(v) => rhai::Dynamic::from(*v as f64),
+            DataValue::UInt64(v) => rhai::Dynamic::from(*v as f64),
+            DataValue::Float32(v) => rhai::Dynamic::from(*v as f64),
+            DataValue::Float64(v) => rhai::Dynamic::from(*v),
+            DataValue::String(s) => rhai::Dynamic::from(s.clone()),
+            DataValue::Bytes(_) => rhai::Dynamic::UNIT,
+        };
+        map.insert(name.clone().into(), d);
+    }
+    map
+}
+
+/// expr_route 求值（spec §4.4）：Ok(bool) 按值路由 true/false 端；
+/// 求值错误（缺位 tag、类型不匹配、超操作数）或非 bool 返回一律走 false 端（缺测不误触发）。
+/// AST 缓存：expression 变更即重编译并替换条目。
+pub fn eval_expr_route(
+    cfg: &ExprRouteConfig,
+    node_id: Uuid,
+    state: &mut HashMap<Uuid, CachedScript>,
+    gd: &GroupData,
+) -> (Option<FlowPayload>, Option<FlowPayload>) {
+    let hit = state
+        .get(&node_id)
+        .map(|c| c.expression == cfg.expression)
+        .unwrap_or(false);
+    if !hit {
+        match rhai_engine().compile(&cfg.expression) {
+            Ok(ast) => {
+                state.insert(
+                    node_id,
+                    CachedScript {
+                        expression: cfg.expression.clone(),
+                        ast,
+                        engine: rhai_engine(),
+                        warned: false,
+                    },
+                );
+            }
+            Err(e) => {
+                // publish 门禁已拦语法错误；运行期防御走 false 端
+                tracing::debug!(node = %node_id, "expr_route compile error: {e}");
+                return (None, Some(FlowPayload::Data(gd.clone())));
+            }
+        }
+    }
+    let entry = state.get_mut(&node_id).expect("cache entry just ensured");
+    let mut scope = rhai::Scope::new();
+    scope.push("tags", rhai::Dynamic::from_map(tags_map(gd)));
+    let result: Result<rhai::Dynamic, _> = entry.engine.eval_ast_with_scope(&mut scope, &entry.ast);
+    let route = match result {
+        Ok(d) => d.as_bool().map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    };
+    match route {
+        Ok(true) => {
+            entry.warned = false;
+            (Some(FlowPayload::Data(gd.clone())), None)
+        }
+        Ok(false) => {
+            entry.warned = false;
+            (None, Some(FlowPayload::Data(gd.clone())))
+        }
+        Err(msg) => {
+            if entry.warned {
+                tracing::debug!(node = %node_id, "expr_route eval error: {msg}");
+            } else {
+                tracing::warn!(node = %node_id, "expr_route eval error: {msg}");
+                entry.warned = true;
+            }
+            (None, Some(FlowPayload::Data(gd.clone())))
+        }
+    }
+}
+
 fn display_value(v: &DataValue) -> String {
     match v {
         DataValue::String(s) => s.clone(),
@@ -567,6 +714,19 @@ pub fn evaluate_node(
                 None => Ok(vec![]),
             }
         }
+        "expr_route" => {
+            let cfg: ExprRouteConfig = serde_json::from_value(config.clone())
+                .map_err(|e| FlowError::Operator(operator.into(), e.to_string()))?;
+            let (t, f) = eval_expr_route(&cfg, node_id, &mut state.script_asts, &gd);
+            let mut out = Vec::new();
+            if let Some(t) = t {
+                out.push(("true", t));
+            }
+            if let Some(f) = f {
+                out.push(("false", f));
+            }
+            Ok(out)
+        }
         other => Err(FlowError::Operator(
             other.to_string(),
             "not an operator".into(),
@@ -684,5 +844,97 @@ mod tests {
         let spec = PortSpec::operator("alarm_to_data");
         assert!(spec.inputs.contains(&"in"));
         assert!(spec.outputs.contains(&"out"));
+    }
+
+    // ===== expr_route（spec §四）=====
+
+    fn group_data_f(temp: f64) -> gateway_sdk::GroupData {
+        let mut names = std::collections::HashMap::new();
+        let tid = gateway_sdk::TagId::new();
+        names.insert(tid, "temperature".to_string());
+        gateway_sdk::GroupData {
+            node_id: gateway_sdk::NodeId::new(),
+            group_id: gateway_sdk::GroupId::new(),
+            ts: Utc::now(),
+            values: vec![(tid, DataValue::Float64(temp))],
+            node_name: Some("sim".into()),
+            group_name: Some("g".into()),
+            tag_names: Some(names),
+        }
+    }
+
+    #[test]
+    fn expr_route_config_validation_rejects_syntax_errors() {
+        assert!(validate_config("expr_route", &serde_json::json!({"expression": ""})).is_err());
+        assert!(
+            validate_config(
+                "expr_route",
+                &serde_json::json!({"expression": "tags.temp >"})
+            )
+            .is_err(),
+            "语法错误必须拒绝（publish 门禁）"
+        );
+        assert!(validate_config("expr_route", &serde_json::json!({})).is_err());
+        assert!(validate_config(
+            "expr_route",
+            &serde_json::json!({"expression": "tags.temperature > 50"})
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn expr_route_has_true_false_ports() {
+        let spec = PortSpec::operator("expr_route");
+        assert_eq!(spec.inputs, &["in"]);
+        assert_eq!(spec.outputs, &["true", "false"]);
+    }
+
+    #[test]
+    fn expr_route_eval_routes_and_recompiles_on_change() {
+        let mut state = crate::engine::FlowState::default();
+        let nid = Uuid::new_v4();
+        let gd = group_data_f(60.0);
+        let cfg1 = ExprRouteConfig {
+            expression: "tags.temperature > 50".into(),
+        };
+        let (t, f) = eval_expr_route(&cfg1, nid, &mut state.script_asts, &gd);
+        assert!(t.is_some() && f.is_none(), "60>50 走 true 端");
+        let cfg2 = ExprRouteConfig {
+            expression: "tags.temperature < 50".into(),
+        };
+        let (t, f) = eval_expr_route(&cfg2, nid, &mut state.script_asts, &gd);
+        assert!(t.is_none() && f.is_some(), "换表达式后重新编译且语义生效");
+    }
+
+    #[test]
+    fn expr_route_missing_tag_and_non_bool_go_false() {
+        let mut state = crate::engine::FlowState::default();
+        let nid = Uuid::new_v4();
+        let gd = group_data_f(60.0);
+        // 缺位 tag 访问 → 运行期错误 → false 端
+        let cfg = ExprRouteConfig {
+            expression: "tags.ghost > 10".into(),
+        };
+        let (t, f) = eval_expr_route(&cfg, nid, &mut state.script_asts, &gd);
+        assert!(t.is_none() && f.is_some());
+        // 非 bool 返回 → false 端
+        let cfg = ExprRouteConfig {
+            expression: "tags.temperature".into(),
+        };
+        let (t, f) = eval_expr_route(&cfg, nid, &mut state.script_asts, &gd);
+        assert!(t.is_none() && f.is_some());
+    }
+
+    #[test]
+    fn expr_route_infinite_loop_hits_operation_limit() {
+        // 沙箱生效证明：while true {} 超操作数走 false 端而非挂死
+        let mut state = crate::engine::FlowState::default();
+        let nid = Uuid::new_v4();
+        let gd = group_data_f(60.0);
+        let cfg = ExprRouteConfig {
+            expression: "while true {}".into(),
+        };
+        let (t, f) = eval_expr_route(&cfg, nid, &mut state.script_asts, &gd);
+        assert!(t.is_none() && f.is_some(), "超操作数必须走 false 端");
     }
 }

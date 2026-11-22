@@ -339,8 +339,8 @@ async fn role_matrix_and_name_uniqueness() {
     assert_eq!(status, 200);
     assert_eq!(
         ops["operators"].as_array().unwrap().len(),
-        8,
-        "算子 8 个（MVP 6 + rate_of_change/deduplicate，流算子第二批）"
+        9,
+        "算子 9 个（MVP 6 + 流算子第二批 2 + expr_route，表达式批）"
     );
 
     // 同租户重名 → 400
