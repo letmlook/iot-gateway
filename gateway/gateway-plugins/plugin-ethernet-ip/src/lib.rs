@@ -60,28 +60,52 @@ impl SouthPlugin for EthernetIpPlugin {
         PluginMeta {
             name: "ethernet-ip",
             kind: PluginKind::South,
-            description: Some("EtherNet/IP 南向驱动（ODVA CIP 协议，支持 CIP 标签读写）"),
+            description: Some(
+                "[STUB] EtherNet/IP 南向驱动（桩实现：读返回占位值、写模拟成功，无真实 CIP 网络通信）",
+            ),
             version: "0.1.0",
             name_zh: Some("EtherNet/IP"),
             name_en: Some("EtherNet/IP"),
-            description_zh: Some("EtherNet/IP 南向驱动（ODVA CIP 协议，支持 CIP 标签读写）"),
+            description_zh: Some(
+                "[STUB] EtherNet/IP 南向驱动（桩实现：读返回占位值、写模拟成功，无真实 CIP 网络通信）",
+            ),
             description_en: Some(
-                "EtherNet/IP south driver, ODVA CIP protocol for CIP tag read/write",
+                "[STUB] EtherNet/IP south driver (stub: reads return placeholder values, writes succeed silently, no real CIP network I/O)",
             ),
         }
     }
 
     fn config_schema(&self) -> Option<ConfigSchema> {
         use gateway_sdk::ParamAttribute;
+        // 诚实标注（对齐 plugin-kafka 的缺陷④对策）：本插件目前只有桩实现（无可用纯 Rust
+        // CIP 协议栈），读返回占位值、写模拟成功——不标注的话用户会以为数据真的采到了
+        // （下游把占位值当真实工艺数据用）。标注挂在首个（必填）参数 host 的描述上，
+        // 前端配置表单必然可见。
+        let host_desc = "Remote EtherNet/IP device IP address".to_string();
+        let host_desc_zh = "远程 EtherNet/IP 设备 IP 地址".to_string();
+        let host_desc_en = "Remote EtherNet/IP device IP address".to_string();
+        let host_desc = format!(
+            "[STUB] 本插件为桩实现：poll 读返回占位值（按数据类型的 0/空值），write_tags 模拟\
+             成功，无任何真实 CIP/TCP 网络通信；接入真实设备前勿用于生产。{host_desc}"
+        );
+        let host_desc_zh = format!(
+            "[STUB] 本插件为桩实现：poll 读返回占位值（按数据类型的 0/空值），write_tags 模拟\
+             成功，无任何真实 CIP/TCP 网络通信；接入真实设备前勿用于生产。{host_desc_zh}"
+        );
+        let host_desc_en = format!(
+            "[STUB] This plugin is a stub: poll returns placeholder values (zero/empty per data \
+             type), write_tags succeeds silently, and there is no real CIP/TCP network I/O. Do \
+             not use against real devices. {host_desc_en}"
+        );
         Some(
             ConfigSchema::new()
                 .param(ParamSchema {
                     name: "host".to_string(),
                     name_zh: Some("IP地址".to_string()),
                     name_en: Some("IP Address".to_string()),
-                    description: Some("Remote EtherNet/IP device IP address".to_string()),
-                    description_zh: Some("远程 EtherNet/IP 设备 IP 地址".to_string()),
-                    description_en: Some("Remote EtherNet/IP device IP address".to_string()),
+                    description: Some(host_desc),
+                    description_zh: Some(host_desc_zh),
+                    description_en: Some(host_desc_en),
                     attribute: ParamAttribute::Required,
                     ty: ParamType::String,
                     default: Some(serde_json::json!("192.168.1.100")),
