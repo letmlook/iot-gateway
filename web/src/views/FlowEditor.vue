@@ -153,7 +153,7 @@ function onSourceNodeChange(nodeId) {
   if (nodeId) loadGroups(nodeId)
 }
 
-const OPS_WITH_FORM = ['threshold_alarm', 'state_change_alarm', 'route', 'sink_north']
+const OPS_WITH_FORM = ['threshold_alarm', 'state_change_alarm', 'route', 'sink_north', 'rate_of_change']
 const panelMode = computed(() => {
   const n = selectedNode.value
   if (!n) return null
@@ -331,6 +331,18 @@ onUnmounted(() => {})
                   />
                 </el-select>
               </el-form-item>
+              <el-form-item :label="t('flowsEditor.staleTimeout')">
+                <el-input-number v-model="selectedNode.data.config.stale_timeout_ms" :min="0" :controls="false" class="w-full" />
+              </el-form-item>
+              <el-form-item v-if="selectedNode.data.config.stale_timeout_ms > 0" :label="t('flowsEditor.staleLevel')">
+                <el-select v-model="selectedNode.data.config.stale_level">
+                  <el-option value="critical" :label="t('alarms.level_critical')" />
+                  <el-option value="high" :label="t('alarms.level_high')" />
+                  <el-option value="medium" :label="t('alarms.level_medium')" />
+                  <el-option value="low" :label="t('alarms.level_low')" />
+                  <el-option value="info" :label="t('alarms.level_info')" />
+                </el-select>
+              </el-form-item>
             </template>
 
             <!-- threshold_alarm -->
@@ -397,6 +409,28 @@ onUnmounted(() => {})
               </el-form-item>
               <el-form-item :label="t('flowsEditor.compareValue')" required>
                 <el-input-number v-model="selectedNode.data.config.value" :controls="false" class="w-full" />
+              </el-form-item>
+            </template>
+
+            <!-- rate_of_change -->
+            <template v-else-if="panelMode === 'rate_of_change'">
+              <el-form-item :label="t('flowsEditor.tagName')" required>
+                <el-input v-model="selectedNode.data.config.tag_name" />
+              </el-form-item>
+              <el-form-item :label="t('flowsEditor.maxRate')" required>
+                <el-input-number v-model="selectedNode.data.config.max_rate" :min="0" :controls="false" class="w-full" />
+              </el-form-item>
+              <el-form-item :label="t('flowsEditor.level')">
+                <el-select v-model="selectedNode.data.config.level">
+                  <el-option value="critical" :label="t('alarms.level_critical')" />
+                  <el-option value="high" :label="t('alarms.level_high')" />
+                  <el-option value="medium" :label="t('alarms.level_medium')" />
+                  <el-option value="low" :label="t('alarms.level_low')" />
+                  <el-option value="info" :label="t('alarms.level_info')" />
+                </el-select>
+              </el-form-item>
+              <el-form-item :label="t('flowsEditor.message')">
+                <el-input v-model="selectedNode.data.config.message" />
               </el-form-item>
             </template>
 

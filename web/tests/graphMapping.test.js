@@ -21,6 +21,8 @@ const OPERATORS = [
   { name: 'route', inputs: ['in'], outputs: ['true', 'false'] },
   { name: 'sink_north', inputs: ['in'], outputs: [] },
   { name: 'sink_alarm', inputs: ['in'], outputs: [] },
+  { name: 'rate_of_change', inputs: ['in'], outputs: ['alarm', 'normal'] },
+  { name: 'deduplicate', inputs: ['in'], outputs: ['out'] },
 ]
 
 function sampleGraph() {
@@ -148,4 +150,11 @@ test('defaultConfig 覆盖全部需要表单的算子', () => {
   }
   assert.deepEqual(defaultConfig('sink_alarm'), {})
   assert.deepEqual(defaultConfig(null), {})
+})
+
+test('defaultConfig 新算子', () => {
+  assert.deepEqual(defaultConfig('rate_of_change'), {
+    tag_name: '', max_rate: null, level: 'high', message: '',
+  })
+  assert.deepEqual(defaultConfig('deduplicate'), {})
 })

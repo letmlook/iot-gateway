@@ -125,6 +125,10 @@ export function defaultConfig(operator) {
       return { tag_name: '', op: 'gt', value: 0 }
     case 'sink_north':
       return { node_id: '' }
+    case 'rate_of_change':
+      return { tag_name: '', max_rate: null, level: 'high', message: '' }
+    case 'deduplicate':
+      return {}
     default:
       return {}
   }
