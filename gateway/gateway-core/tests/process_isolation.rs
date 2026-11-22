@@ -17,14 +17,24 @@ use gateway_core::Manager;
 use gateway_sdk::{NodeId, PluginConfig};
 use std::path::{Path, PathBuf};
 
-/// 测试可执行文件位于 `<target>/<profile>/deps/<name>-<hash>`，上两级即 target profile 目录
-fn target_dir() -> PathBuf {
-    std::env::current_exe()
-        .expect("current_exe")
-        .parent()
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
-        .expect("locate target profile dir")
+/// workspace target profile 目录候选（按优先级，调用方取第一个含目标的）。
+/// 1) 运行时 current_exe 上两级——cargo 标准布局（deps/<bin>-<hash> → <profile>）；
+/// 2) 编译期 CARGO_MANIFEST_DIR 上两级 → target/debug——CI 曾观测到 cargo 将测试
+///    二进制置于 build/<pkg>/<hash>/out/ 下执行使候选 1 失效；cargo test 默认
+///    dev profile，夹具由 cargo test 同批构建必落在 target/debug（2026-11-22）。
+/// 注意 PROFILE/OUT_DIR 是 build script（或含 build.rs 的 crate）专属注入，
+/// 无 build.rs 的测试目标编译期不可用。
+fn target_dir_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent().and_then(Path::parent) {
+            out.push(dir.to_path_buf());
+        }
+    }
+    if let Some(root) = Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2) {
+        out.push(root.join("target").join("debug"));
+    }
+    out
 }
 
 fn host_bin() -> PathBuf {
@@ -33,15 +43,17 @@ fn host_bin() -> PathBuf {
     } else {
         "gateway-plugin-host"
     };
-    let p = target_dir().join(name);
-    assert!(
-        p.exists(),
-        "缺少插件宿主可执行文件 {}（current_exe = {}）；请先执行 `cargo build -p gateway-plugin-host`\
-         （或直接 `cargo test --workspace`）",
-        p.display(),
-        std::env::current_exe().map(|e| e.display().to_string()).unwrap_or_default()
+    let cands = target_dir_candidates();
+    if let Some(dir) = cands.iter().find(|d| d.join(name).exists()) {
+        return dir.join(name);
+    }
+    panic!(
+        "缺少插件宿主可执行文件 {name}（候选目录 {cands:?}，current_exe = {:?}）；\
+         请先执行 `cargo build -p gateway-plugin-host`",
+        std::env::current_exe()
+            .map(|e| e.display().to_string())
+            .unwrap_or_default()
     );
-    p
 }
 
 fn faulty_dylib() -> PathBuf {
@@ -51,14 +63,17 @@ fn faulty_dylib() -> PathBuf {
         "plugin_faulty",
         std::env::consts::DLL_SUFFIX
     );
-    let p = target_dir().join(file);
-    assert!(
-        p.exists(),
-        "缺少夹具动态库 {}（current_exe = {}）；请先执行 `cargo build -p plugin-faulty`（或 `cargo test --workspace`）",
-        p.display(),
-        std::env::current_exe().map(|e| e.display().to_string()).unwrap_or_default()
+    let cands = target_dir_candidates();
+    if let Some(dir) = cands.iter().find(|d| d.join(&file).exists()) {
+        return dir.join(&file);
+    }
+    panic!(
+        "缺少夹具动态库 {file}（候选目录 {cands:?}，current_exe = {:?}）；\
+         请先执行 `cargo build -p plugin-faulty`",
+        std::env::current_exe()
+            .map(|e| e.display().to_string())
+            .unwrap_or_default()
     );
-    p
 }
 
 fn cfg_with(panic_on: Option<&str>) -> PluginConfig {

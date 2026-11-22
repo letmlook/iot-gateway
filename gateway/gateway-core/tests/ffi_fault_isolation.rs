@@ -29,16 +29,27 @@ use gateway_sdk::types::DataValue;
 use gateway_sdk::{GroupId, NodeId, PluginConfig, Tag};
 use std::path::{Path, PathBuf};
 
-/// 测试可执行文件位于 `<target>/<profile>/deps/<name>-<hash>`，上两级即 target profile 目录
-fn target_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe");
-    exe.parent()
-        .and_then(|p| p.parent())
-        .map(Path::to_path_buf)
-        .expect("locate target profile dir")
+/// workspace target profile 目录候选（按优先级，调用方取第一个含夹具的）。
+/// 1) 运行时 current_exe 上两级——cargo 标准布局（deps/<bin>-<hash> → <profile>）；
+/// 2) 编译期 CARGO_MANIFEST_DIR 上两级 → target/debug——CI 曾观测到 cargo 将测试
+///    二进制置于 build/<pkg>/<hash>/out/ 下执行使候选 1 失效；cargo test 默认
+///    dev profile，夹具由 cargo test 同批构建必落在 target/debug（2026-11-22）。
+/// 注意 PROFILE/OUT_DIR 是 build script（或含 build.rs 的 crate）专属注入，
+/// 无 build.rs 的测试目标编译期不可用。
+fn target_dir_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent().and_then(Path::parent) {
+            out.push(dir.to_path_buf());
+        }
+    }
+    if let Some(root) = Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2) {
+        out.push(root.join("target").join("debug"));
+    }
+    out
 }
 
-/// 定位夹具动态库；缺失时给出可执行的修复命令，而不是静默跳过
+/// 定位夹具动态库；候选目录逐一查找，缺失时给出可执行的修复命令与诊断信息
 fn fixture_dylib(crate_name: &str) -> PathBuf {
     let file = format!(
         "{}{}{}",
@@ -46,15 +57,17 @@ fn fixture_dylib(crate_name: &str) -> PathBuf {
         crate_name,
         std::env::consts::DLL_SUFFIX
     );
-    let path = target_dir().join(&file);
-    assert!(
-        path.exists(),
-        "缺少夹具动态库 {}（current_exe = {}）；请先执行 `cargo build -p plugin-faulty -p plugin-abi-mismatch`\
-         （或直接运行 `cargo test --workspace`，会顺带构建）",
-        path.display(),
-        std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default()
+    let cands = target_dir_candidates();
+    if let Some(dir) = cands.iter().find(|d| d.join(&file).exists()) {
+        return dir.join(&file);
+    }
+    panic!(
+        "缺少夹具动态库 {file}（候选目录 {cands:?}，current_exe = {:?}）；\
+         请先执行 `cargo build -p plugin-faulty -p plugin-abi-mismatch`",
+        std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
     );
-    path
 }
 
 /// 把夹具复制进一个独立目录并加载，返回 (Manager, Loader, 临时目录)
