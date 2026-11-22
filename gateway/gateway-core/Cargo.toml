@@ -7,6 +7,8 @@ description = "核心：消息总线、路由、节点/组/标签管理"
 [dependencies]
 gateway-sdk = { path = "../gateway-sdk" }
 libloading = "0.8"
+# RTLD_NODELETE（插件 dylib 不真正 unmap，见 loader.rs load_plugin_file_impl 注释）
+libc = "0.2"
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time", "fs", "process", "io-util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

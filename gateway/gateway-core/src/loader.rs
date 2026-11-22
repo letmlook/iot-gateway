@@ -14,22 +14,17 @@ use std::path::Path;
 use std::sync::Arc;
 use tracing::{info, warn};
 
-type CreateFn = unsafe extern "C-unwind" fn() -> *mut c_void;
-type DestroyFn = unsafe extern "C-unwind" fn(*mut c_void);
-type MetaFn = unsafe extern "C-unwind" fn(*mut c_void) -> *mut c_char;
-type FreeStringFn = unsafe extern "C-unwind" fn(*mut c_char);
-type StrStrFn =
-    unsafe extern "C-unwind" fn(*mut c_void, *const c_char, *const c_char) -> *mut c_char;
-type StrFn = unsafe extern "C-unwind" fn(*mut c_void, *const c_char) -> *mut c_char;
-type StrStrStrFn = unsafe extern "C-unwind" fn(
-    *mut c_void,
-    *const c_char,
-    *const c_char,
-    *const c_char,
-) -> *mut c_char;
-type VoidFn = unsafe extern "C-unwind" fn(*mut c_void) -> *mut c_char;
+type CreateFn = unsafe extern "C" fn() -> *mut c_void;
+type DestroyFn = unsafe extern "C" fn(*mut c_void);
+type MetaFn = unsafe extern "C" fn(*mut c_void) -> *mut c_char;
+type FreeStringFn = unsafe extern "C" fn(*mut c_char);
+type StrStrFn = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> *mut c_char;
+type StrFn = unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char;
+type StrStrStrFn =
+    unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, *const c_char) -> *mut c_char;
+type VoidFn = unsafe extern "C" fn(*mut c_void) -> *mut c_char;
 /// set_log(handle, node_id_cstr, log_callback)
-type SetLogFn = unsafe extern "C-unwind" fn(*mut c_void, *const c_char, *const c_void);
+type SetLogFn = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_void);
 
 /// 持有已加载的 .so，保证符号在插件生命周期内有效。
 pub struct PluginLoader {
@@ -50,7 +45,7 @@ fn cstr(s: &str) -> CString {
 
 /// 宿主提供给 .so 插件的节点日志回调：将插件发来的 level/node_id/message 转为 tracing 事件，由 NodeFileLayer 按节点写文件。
 #[allow(dead_code)]
-pub unsafe extern "C-unwind" fn gateway_host_log(
+pub unsafe extern "C" fn gateway_host_log(
     level: u8,
     node_id: *const c_char,
     message: *const c_char,
@@ -971,12 +966,30 @@ impl PluginLoader {
 
 /// [`PluginLoader::load_plugin_file`] 的实现：ABI 校验 → 解析符号 → 构造南/北向适配器。
 fn load_plugin_file_impl(path: &Path) -> Result<LoadedPlugin, String> {
+    // unix 下带 RTLD_NODELETE 打开：dlclose（Library drop）不再真正 unmap image——
+    // 插件与宿主各自链接一份 Rust 运行时，卸载含 TLS destructor 的插件 image 后
+    // 残留的 __cxa_thread_atexit 回调会打到已卸载地址（Linux CI 实测 SIGABRT，
+    // macOS dyld 行为宽容故本地无法复现）。插件本就启动时一次加载、无运行时
+    // 卸载需求，image 常驻到进程退出由 OS 回收（Firefox/Chromium 同策略）。
+    // 符号地址在 dlclose 后依然有效，适配器 Drop 回调 destroy 导出不受影响。
+    #[cfg(unix)]
+    let lib: Library = unsafe {
+        libloading::os::unix::Library::open(
+            Some(path),
+            libloading::os::unix::RTLD_LAZY
+                | libloading::os::unix::RTLD_LOCAL
+                | libc::RTLD_NODELETE,
+        )
+    }
+    .map_err(|e| format!("Library::open: {}", e))?
+    .into();
+    #[cfg(not(unix))]
     let lib = unsafe { Library::new(path) }.map_err(|e| format!("Library::new: {}", e))?;
 
     // ABI 版本校验：符号存在且版本不符时拒绝加载。
     // 版本不一致意味着跨边界的数据结构约定已改变，早失败远好于运行期错乱。
     if let Ok(f) =
-        unsafe { lib.get::<unsafe extern "C-unwind" fn() -> u32>(b"gateway_plugin_abi_version\0") }
+        unsafe { lib.get::<unsafe extern "C" fn() -> u32>(b"gateway_plugin_abi_version\0") }
     {
         let plugin_abi = unsafe { f() };
         let host_abi = gateway_sdk::ffi::FFI_ABI_VERSION;
