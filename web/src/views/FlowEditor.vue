@@ -332,7 +332,7 @@ onUnmounted(() => {})
                 </el-select>
               </el-form-item>
               <el-form-item :label="t('flowsEditor.staleTimeout')">
-                <el-input-number v-model="selectedNode.data.config.stale_timeout_ms" :min="0" :controls="false" class="w-full" />
+                <el-input-number v-model="selectedNode.data.config.stale_timeout_ms" :min="0" :value-on-clear="0" :controls="false" class="w-full" />
               </el-form-item>
               <el-form-item v-if="selectedNode.data.config.stale_timeout_ms > 0" :label="t('flowsEditor.staleLevel')">
                 <el-select v-model="selectedNode.data.config.stale_level">

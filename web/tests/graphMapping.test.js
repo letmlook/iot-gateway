@@ -14,11 +14,12 @@ import {
   SOURCE_PORTS,
 } from '../src/utils/graphMapping.js'
 
-// /flows/operators 的真实返回形状(5 个 MVP 算子)
+// /flows/operators 的真实返回形状(8 个算子 = MVP 6 + 流算子第二批 rate_of_change/deduplicate)
 const OPERATORS = [
   { name: 'threshold_alarm', inputs: ['in'], outputs: ['alarm', 'normal'] },
   { name: 'state_change_alarm', inputs: ['in'], outputs: ['alarm', 'normal'] },
   { name: 'route', inputs: ['in'], outputs: ['true', 'false'] },
+  { name: 'alarm_to_data', inputs: ['in'], outputs: ['out'] },
   { name: 'sink_north', inputs: ['in'], outputs: [] },
   { name: 'sink_alarm', inputs: ['in'], outputs: [] },
   { name: 'rate_of_change', inputs: ['in'], outputs: ['alarm', 'normal'] },
