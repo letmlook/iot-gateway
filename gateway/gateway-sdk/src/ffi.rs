@@ -14,13 +14,13 @@ pub const FFI_ABI_VERSION: u32 = 1;
 
 /// 插件 ABI 版本（由 SDK 导出，宿主通过 libloading 读取）
 #[no_mangle]
-pub extern "C-unwind" fn gateway_plugin_abi_version() -> u32 {
+pub extern "C" fn gateway_plugin_abi_version() -> u32 {
     FFI_ABI_VERSION
 }
 
 /// 宿主提供给 .so 插件的节点日志回调：level (0=Error,1=Warn,2=Info,3=Debug,4=Trace)，node_id 与 message 均为 UTF-8 C 字符串。
 pub type PluginLogCallback =
-    unsafe extern "C-unwind" fn(level: u8, node_id: *const c_char, message: *const c_char);
+    unsafe extern "C" fn(level: u8, node_id: *const c_char, message: *const c_char);
 
 /// 结果 JSON：`{"ok":true}` 或 `{"ok":false,"err":"..."}`。插件分配，宿主复制后调用 `gateway_plugin_free_string` 释放。
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -160,7 +160,7 @@ pub fn alloc_c_string(s: &str) -> *mut c_char {
 /// 释放 `alloc_c_string` 分配的指针；.so 插件须重新导出此符号供宿主调用。
 #[no_mangle]
 #[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C-unwind" fn gateway_plugin_free_string(ptr: *mut c_char) {
+pub unsafe extern "C" fn gateway_plugin_free_string(ptr: *mut c_char) {
     if ptr.is_null() {
         return;
     }
@@ -235,6 +235,16 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 /// `export_north_plugin!` 宏自动套用，手写导出时请自行包裹。
 ///
 /// 捕获到的 panic 仍会经 panic hook 打印到 stderr，便于现场定位。
+///
+/// # 为什么导出函数用 `extern "C"` 而非 `extern "C-unwind"`（2026-11-22）
+///
+/// C-unwind 允许 unwind 穿出 dylib——但宿主与插件各自链接一份 Rust 运行时（各自的
+/// eh_frame/personality 注册），Linux libgcc unwinder 在跨库边界查找 landing pad 的
+/// 行为不可靠：CI 实测 panic 被 guard_ptr 兜住后进程仍以 abort 收场（SIGABRT、无
+/// FAILED 断言输出），macOS 同代码同 dylib 全绿。catch_unwind 已保证 panic 不出
+/// 函数，C-unwind 的「允许传播」语义从未被合法用到、只剩跨库 unwind 风险——
+/// 故全部导出回归标准 `extern "C"`（panic 到达边界时按 Rust 定义就地 abort，
+/// 不再跨库）。
 pub fn guard_ptr<F>(f: F) -> *mut c_char
 where
     F: FnOnce() -> *mut c_char,
@@ -344,15 +354,13 @@ macro_rules! export_south_plugin {
         }
 
         #[no_mangle]
-        pub extern "C-unwind" fn gateway_south_plugin_create() -> *mut ::std::os::raw::c_void {
+        pub extern "C" fn gateway_south_plugin_create() -> *mut ::std::os::raw::c_void {
             ::std::boxed::Box::into_raw(::std::boxed::Box::new(<$plugin_ty>::new()))
                 as *mut ::std::os::raw::c_void
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_south_plugin_destroy(
-            handle: *mut ::std::os::raw::c_void,
-        ) {
+        pub unsafe extern "C" fn gateway_south_plugin_destroy(handle: *mut ::std::os::raw::c_void) {
             // 析构里的 panic 无法转成返回值：吞掉并泄漏，也好过 abort 整个网关
             let _ = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
                 if !handle.is_null() {
@@ -362,7 +370,7 @@ macro_rules! export_south_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_south_plugin_meta(
+        pub unsafe extern "C" fn gateway_south_plugin_meta(
             handle: *mut ::std::os::raw::c_void,
         ) -> *mut ::std::os::raw::c_char {
             $crate::ffi::guard_ptr(|| match $crate::ffi::handle_ref::<$plugin_ty>(handle) {
@@ -372,7 +380,7 @@ macro_rules! export_south_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_south_plugin_open(
+        pub unsafe extern "C" fn gateway_south_plugin_open(
             handle: *mut ::std::os::raw::c_void,
             node_id_json: *const ::std::os::raw::c_char,
             config_json: *const ::std::os::raw::c_char,
@@ -390,7 +398,7 @@ macro_rules! export_south_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_south_plugin_close(
+        pub unsafe extern "C" fn gateway_south_plugin_close(
             handle: *mut ::std::os::raw::c_void,
             node_id_json: *const ::std::os::raw::c_char,
         ) -> *mut ::std::os::raw::c_char {
@@ -405,7 +413,7 @@ macro_rules! export_south_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_south_plugin_init(
+        pub unsafe extern "C" fn gateway_south_plugin_init(
             handle: *mut ::std::os::raw::c_void,
             node_id_json: *const ::std::os::raw::c_char,
         ) -> *mut ::std::os::raw::c_char {
@@ -420,7 +428,7 @@ macro_rules! export_south_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_south_plugin_uninit(
+        pub unsafe extern "C" fn gateway_south_plugin_uninit(
             handle: *mut ::std::os::raw::c_void,
             node_id_json: *const ::std::os::raw::c_char,
         ) -> *mut ::std::os::raw::c_char {
@@ -435,7 +443,7 @@ macro_rules! export_south_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_south_plugin_start(
+        pub unsafe extern "C" fn gateway_south_plugin_start(
             handle: *mut ::std::os::raw::c_void,
             node_id_json: *const ::std::os::raw::c_char,
         ) -> *mut ::std::os::raw::c_char {
@@ -450,7 +458,7 @@ macro_rules! export_south_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_south_plugin_stop(
+        pub unsafe extern "C" fn gateway_south_plugin_stop(
             handle: *mut ::std::os::raw::c_void,
             node_id_json: *const ::std::os::raw::c_char,
         ) -> *mut ::std::os::raw::c_char {
@@ -465,7 +473,7 @@ macro_rules! export_south_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_south_plugin_setting(
+        pub unsafe extern "C" fn gateway_south_plugin_setting(
             handle: *mut ::std::os::raw::c_void,
             node_id_json: *const ::std::os::raw::c_char,
             config_json: *const ::std::os::raw::c_char,
@@ -483,7 +491,7 @@ macro_rules! export_south_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_south_plugin_validate_tag(
+        pub unsafe extern "C" fn gateway_south_plugin_validate_tag(
             handle: *mut ::std::os::raw::c_void,
             node_id_json: *const ::std::os::raw::c_char,
             tag_json: *const ::std::os::raw::c_char,
@@ -508,7 +516,7 @@ macro_rules! export_south_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_south_plugin_poll_group(
+        pub unsafe extern "C" fn gateway_south_plugin_poll_group(
             handle: *mut ::std::os::raw::c_void,
             node_id_json: *const ::std::os::raw::c_char,
             group_id_json: *const ::std::os::raw::c_char,
@@ -531,7 +539,7 @@ macro_rules! export_south_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_south_plugin_write_tags(
+        pub unsafe extern "C" fn gateway_south_plugin_write_tags(
             handle: *mut ::std::os::raw::c_void,
             node_id_json: *const ::std::os::raw::c_char,
             values_json: *const ::std::os::raw::c_char,
@@ -551,7 +559,7 @@ macro_rules! export_south_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_south_plugin_list_groups(
+        pub unsafe extern "C" fn gateway_south_plugin_list_groups(
             handle: *mut ::std::os::raw::c_void,
             node_id_json: *const ::std::os::raw::c_char,
         ) -> *mut ::std::os::raw::c_char {
@@ -566,7 +574,7 @@ macro_rules! export_south_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_south_plugin_list_tags(
+        pub unsafe extern "C" fn gateway_south_plugin_list_tags(
             handle: *mut ::std::os::raw::c_void,
             node_id_json: *const ::std::os::raw::c_char,
             group_id_json: *const ::std::os::raw::c_char,
@@ -586,7 +594,7 @@ macro_rules! export_south_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_south_plugin_config_schema(
+        pub unsafe extern "C" fn gateway_south_plugin_config_schema(
             handle: *mut ::std::os::raw::c_void,
         ) -> *mut ::std::os::raw::c_char {
             $crate::ffi::guard_ptr(|| match $crate::ffi::handle_ref::<$plugin_ty>(handle) {
@@ -599,7 +607,7 @@ macro_rules! export_south_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_south_plugin_tag_schema(
+        pub unsafe extern "C" fn gateway_south_plugin_tag_schema(
             handle: *mut ::std::os::raw::c_void,
         ) -> *mut ::std::os::raw::c_char {
             $crate::ffi::guard_ptr(|| match $crate::ffi::handle_ref::<$plugin_ty>(handle) {
@@ -637,15 +645,13 @@ macro_rules! export_north_plugin {
         }
 
         #[no_mangle]
-        pub extern "C-unwind" fn gateway_north_plugin_create() -> *mut ::std::os::raw::c_void {
+        pub extern "C" fn gateway_north_plugin_create() -> *mut ::std::os::raw::c_void {
             ::std::boxed::Box::into_raw(::std::boxed::Box::new(<$plugin_ty>::new()))
                 as *mut ::std::os::raw::c_void
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_north_plugin_destroy(
-            handle: *mut ::std::os::raw::c_void,
-        ) {
+        pub unsafe extern "C" fn gateway_north_plugin_destroy(handle: *mut ::std::os::raw::c_void) {
             let _ = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
                 if !handle.is_null() {
                     let _ = ::std::boxed::Box::from_raw(handle as *mut $plugin_ty);
@@ -654,7 +660,7 @@ macro_rules! export_north_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_north_plugin_meta(
+        pub unsafe extern "C" fn gateway_north_plugin_meta(
             handle: *mut ::std::os::raw::c_void,
         ) -> *mut ::std::os::raw::c_char {
             $crate::ffi::guard_ptr(|| match $crate::ffi::handle_ref::<$plugin_ty>(handle) {
@@ -664,7 +670,7 @@ macro_rules! export_north_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_north_plugin_open(
+        pub unsafe extern "C" fn gateway_north_plugin_open(
             handle: *mut ::std::os::raw::c_void,
             node_id_json: *const ::std::os::raw::c_char,
             config_json: *const ::std::os::raw::c_char,
@@ -682,7 +688,7 @@ macro_rules! export_north_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_north_plugin_close(
+        pub unsafe extern "C" fn gateway_north_plugin_close(
             handle: *mut ::std::os::raw::c_void,
             node_id_json: *const ::std::os::raw::c_char,
         ) -> *mut ::std::os::raw::c_char {
@@ -697,7 +703,7 @@ macro_rules! export_north_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_north_plugin_init(
+        pub unsafe extern "C" fn gateway_north_plugin_init(
             handle: *mut ::std::os::raw::c_void,
             node_id_json: *const ::std::os::raw::c_char,
         ) -> *mut ::std::os::raw::c_char {
@@ -712,7 +718,7 @@ macro_rules! export_north_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_north_plugin_uninit(
+        pub unsafe extern "C" fn gateway_north_plugin_uninit(
             handle: *mut ::std::os::raw::c_void,
             node_id_json: *const ::std::os::raw::c_char,
         ) -> *mut ::std::os::raw::c_char {
@@ -727,7 +733,7 @@ macro_rules! export_north_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_north_plugin_start(
+        pub unsafe extern "C" fn gateway_north_plugin_start(
             handle: *mut ::std::os::raw::c_void,
             node_id_json: *const ::std::os::raw::c_char,
         ) -> *mut ::std::os::raw::c_char {
@@ -742,7 +748,7 @@ macro_rules! export_north_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_north_plugin_stop(
+        pub unsafe extern "C" fn gateway_north_plugin_stop(
             handle: *mut ::std::os::raw::c_void,
             node_id_json: *const ::std::os::raw::c_char,
         ) -> *mut ::std::os::raw::c_char {
@@ -757,7 +763,7 @@ macro_rules! export_north_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_north_plugin_setting(
+        pub unsafe extern "C" fn gateway_north_plugin_setting(
             handle: *mut ::std::os::raw::c_void,
             node_id_json: *const ::std::os::raw::c_char,
             config_json: *const ::std::os::raw::c_char,
@@ -775,7 +781,7 @@ macro_rules! export_north_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_north_plugin_set_subscriptions(
+        pub unsafe extern "C" fn gateway_north_plugin_set_subscriptions(
             handle: *mut ::std::os::raw::c_void,
             node_id_json: *const ::std::os::raw::c_char,
             subscriptions_json: *const ::std::os::raw::c_char,
@@ -797,7 +803,7 @@ macro_rules! export_north_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_north_plugin_on_group_data(
+        pub unsafe extern "C" fn gateway_north_plugin_on_group_data(
             handle: *mut ::std::os::raw::c_void,
             node_id_json: *const ::std::os::raw::c_char,
             group_data_json: *const ::std::os::raw::c_char,
@@ -822,7 +828,7 @@ macro_rules! export_north_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_north_plugin_connection_status(
+        pub unsafe extern "C" fn gateway_north_plugin_connection_status(
             handle: *mut ::std::os::raw::c_void,
             node_id_json: *const ::std::os::raw::c_char,
         ) -> *mut ::std::os::raw::c_char {
@@ -840,7 +846,7 @@ macro_rules! export_north_plugin {
         }
 
         #[no_mangle]
-        pub unsafe extern "C-unwind" fn gateway_north_plugin_config_schema(
+        pub unsafe extern "C" fn gateway_north_plugin_config_schema(
             handle: *mut ::std::os::raw::c_void,
         ) -> *mut ::std::os::raw::c_char {
             $crate::ffi::guard_ptr(|| match $crate::ffi::handle_ref::<$plugin_ty>(handle) {
