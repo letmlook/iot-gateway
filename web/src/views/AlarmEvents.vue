@@ -1,12 +1,15 @@
 <script setup>
-// 告警中心（v2.0 T1-④）：REST 轮询为可靠来源（redesign 规格结论），WS 帧机会式增强随后续批接上。
-// 生命周期清理进 onUnmounted（redesign 踩坑 P5 对策）。
+// 告警中心（v2.0 T1-④）：REST 轮询为可靠来源（redesign 规格结论），
+// WS alarm 帧机会式刷新已接入（与 DataMonitor 同模式：on('connected') 重订阅、
+// 卸载只 off handler 不退订 topic——topic 订阅被其它页面覆盖是既有单例语义，
+// 重连时各自 on('connected') 里恢复）。
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import { api } from '../api.js'
 import { getErrorMessage } from '../i18n'
+import { gatewayWs, FrameType } from '../ws/gatewayWs.js'
 import PageHeader from '../components/PageHeader.vue'
 
 const { t } = useI18n()
@@ -73,11 +76,40 @@ async function resolve(a) {
   }
 }
 
+// ---------- WS 机会式刷新（B4） ----------
+// alarm 帧到达时机会式刷新列表；500ms 防抖合并告警风暴，避免打爆 REST 端点。
+// REST 5s 轮询保留不动——它是可靠来源，WS 只是让「新告警」从最长 5s 延迟缩到亚秒。
+let wsDebounce = null
+function onWsAlarm() {
+  if (wsDebounce) return
+  wsDebounce = setTimeout(() => {
+    wsDebounce = null
+    load()
+  }, 500)
+}
+function onWsConnected() {
+  // 认证成功后订阅 alarms topic（重连恢复走同一入口；subscribe 覆盖单例的重连恢复帧
+  // 是既有语义，DataMonitor 靠同样的 on('connected') 重订阅兜底）
+  if (gatewayWs.authenticated) {
+    gatewayWs.subscribe([FrameType.ALARMS_TOPIC])
+  }
+}
+
 onMounted(() => {
   load()
   timer = setInterval(load, 5000)
+  gatewayWs.connect() // 单例幂等，不会重复连接
+  gatewayWs.on('connected', onWsConnected)
+  gatewayWs.on(FrameType.ALARM, onWsAlarm)
+  onWsConnected() // 已认证连接（如从其它页面切回）立即订阅
 })
 onUnmounted(() => {
+  gatewayWs.off('connected', onWsConnected)
+  gatewayWs.off(FrameType.ALARM, onWsAlarm)
+  if (wsDebounce) {
+    clearTimeout(wsDebounce)
+    wsDebounce = null
+  }
   if (timer) clearInterval(timer)
   timer = null
 })

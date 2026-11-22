@@ -30,6 +30,9 @@ const FrameType = {
   VALUES: 'values',
   NODES: 'nodes',
   ALARM: 'alarm',
+  // topic 名（subscribe 帧 payload；与后端 Topics::from_strs 对齐——注意帧类型
+  // ALARM 是 'alarm'，topic 名带 s，两者不是同一个字符串）
+  ALARMS_TOPIC: 'alarms',
   HELLO: 'hello',
   ERROR: 'error',
 }

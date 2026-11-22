@@ -145,13 +145,21 @@ test('缺 position/config 的节点映射不抛错(草稿图允许不完整,P2 �
   assert.equal(back.nodes[0].name, 'x')
 })
 
-test('defaultConfig 覆盖全部需要表单的算子', () => {
-  for (const op of ['threshold_alarm', 'state_change_alarm', 'route', 'sink_north']) {
+test('defaultConfig 覆盖全部需要表单的算子(backlog 补测:switch 全分支枚举)', () => {
+  // 与 graphMapping.js defaultConfig 的 switch 逐 case 对齐——新增算子若需要
+  // 表单默认值，必须同步补进本列表（漏掉的 case 会静默落到 default {}）
+  const withForm = ['threshold_alarm', 'state_change_alarm', 'route', 'sink_north', 'rate_of_change', 'expr_route']
+  for (const op of withForm) {
     const cfg = defaultConfig(op)
-    assert.equal(typeof cfg, 'object')
+    assert.equal(typeof cfg, 'object', `${op} must return object`)
+    assert.ok(Object.keys(cfg).length > 0, `${op} 需要 form 默认值,不得落空`)
   }
+  // 无表单/未知算子兜底为空对象
   assert.deepEqual(defaultConfig('sink_alarm'), {})
+  assert.deepEqual(defaultConfig('alarm_to_data'), {})
+  assert.deepEqual(defaultConfig('deduplicate'), {})
   assert.deepEqual(defaultConfig(null), {})
+  assert.deepEqual(defaultConfig('nope'), {})
 })
 
 test('defaultConfig 新算子', () => {
