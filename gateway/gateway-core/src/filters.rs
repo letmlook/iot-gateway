@@ -304,6 +304,73 @@ fn should_report(
 }
 
 // ---------------------------------------------------------------------------
+// totalizer 状态机
+// ---------------------------------------------------------------------------
+
+/// totalizer 状态推进（纯函数，便于测试）：
+/// 1) 累计：上升累加；高位回绕按 rollover 补差；未配 rollover（或低位）下降视为
+///    换表——total 保留、基线重置（不累计负增量）并 warn；
+/// 2) 周期重置：到期时先累计本次增量，再发 [旧total, 0] 两条（周期值不丢，下游以 0 为新周期起点）；
+/// 3) 发射：首见后首次推进必发（确立基线）；此后仅变化发射；emit_ms > 0 时周期心跳强发。
+fn totalizer_advance(
+    st: &mut TotalizerState,
+    cfg: &TotalizerTag,
+    new_val: f64,
+    ts_ms: u64,
+) -> Vec<f64> {
+    if st.last_counter.is_none() {
+        // 首见：只记基线
+        st.last_counter = Some(new_val);
+        st.period_start_ms = ts_ms;
+        return Vec::new();
+    }
+    if let Some(last) = st.last_counter {
+        if new_val >= last {
+            st.total += new_val - last;
+        } else if let Some(ro) = cfg.rollover {
+            if last > ro * 0.5 {
+                st.total += (ro - last) + new_val; // 高位回绕：翻转补差
+            } else {
+                tracing::warn!(
+                    tag = %cfg.tag_name,
+                    total = st.total,
+                    "totalizer counter dropped below half-rollover, treating as table swap"
+                );
+            }
+        } else {
+            tracing::warn!(
+                tag = %cfg.tag_name,
+                total = st.total,
+                "totalizer counter dropped without rollover, treating as table swap"
+            );
+        }
+    }
+    st.last_counter = Some(new_val);
+
+    // 周期重置（先累计后重置，发 [旧total, 0]）
+    if cfg.reset_period_ms > 0 && ts_ms.saturating_sub(st.period_start_ms) >= cfg.reset_period_ms {
+        let old = st.total;
+        st.total = 0.0;
+        st.period_start_ms = ts_ms;
+        st.last_emitted_total = Some(0.0);
+        st.last_emit_ms = ts_ms;
+        return vec![old, 0.0];
+    }
+
+    let first_advance = st.last_emitted_total.is_none();
+    let changed = first_advance
+        || st.last_emitted_total.map(|e| e != st.total).unwrap_or(false);
+    let due = cfg.emit_ms > 0 && ts_ms.saturating_sub(st.last_emit_ms) >= cfg.emit_ms;
+    if changed || due {
+        st.last_emitted_total = Some(st.total);
+        st.last_emit_ms = ts_ms;
+        vec![st.total]
+    } else {
+        Vec::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 窗口聚合
 // ---------------------------------------------------------------------------
 
@@ -665,6 +732,38 @@ pub fn apply(
                     if !synthetic.is_empty() {
                         window_emitted = 1; // 本批有窗口发射
                     }
+                }
+            }
+        }
+    }
+
+    // ---- totalizer（独立于 mode 与 window，输入永远是原始值）----
+    if let Some(tots) = &policy.totalizer {
+        if !tots.is_empty() {
+            let group_state = state().states.entry((node_id, group_id)).or_default();
+            let cfg_by_name: HashMap<&str, &TotalizerTag> =
+                tots.iter().map(|t| (t.tag_name.as_str(), t)).collect();
+            for (tid, value) in values {
+                let Some(f) = numeric_f64(value) else {
+                    continue; // 非数值不进 totalizer（与窗口聚合口径一致，静默跳过）
+                };
+                let Some(tag_name) = store.tag_get(*tid).map(|t| t.name) else {
+                    continue;
+                };
+                let Some(cfg) = cfg_by_name.get(tag_name.as_str()) else {
+                    continue;
+                };
+                // 锁顺序与窗口段一致：totalizers → synthetic_ids（无反向获取，无死锁）
+                let mut guard = group_state.totalizers.write().unwrap();
+                let st = guard.entry(*tid).or_default();
+                let syn_name = format!("{}_total", tag_name);
+                for emit_val in totalizer_advance(st, cfg, f, ts_ms) {
+                    let syn_id = {
+                        let mut sguard = group_state.synthetic_ids.write().unwrap();
+                        *sguard.entry(syn_name.clone()).or_default()
+                    };
+                    synthetic.push((syn_id, DataValue::Float64(emit_val)));
+                    synthetic_names.insert(syn_id, syn_name.clone());
                 }
             }
         }
@@ -1466,6 +1565,135 @@ mod tests {
         let json = r#"{"south_node_id":"00000000-0000-0000-0000-000000000000","group_id":"00000000-0000-0000-0000-000000000000","mode":"passthrough"}"#;
         let p: GroupPolicy = serde_json::from_str(json).expect("旧 JSON 必须可反序列化");
         assert!(p.totalizer.is_none());
+    }
+
+    // ===== Totalizer 状态机（纯函数）=====
+
+    #[test]
+    fn totalizer_advance_monotonic_accumulation() {
+        let cfg = TotalizerTag {
+            tag_name: "m".into(),
+            reset_period_ms: 0,
+            rollover: None,
+            emit_ms: 0,
+        };
+        let mut st = TotalizerState::default();
+        // 首见读数：不输出
+        assert_eq!(totalizer_advance(&mut st, &cfg, 100.0, 1000), Vec::<f64>::new());
+        // 首见后首次推进：确立基线必发一次（total=10）
+        assert_eq!(totalizer_advance(&mut st, &cfg, 110.0, 2000), vec![10.0]);
+        // 读数不变：不发
+        assert_eq!(totalizer_advance(&mut st, &cfg, 110.0, 3000), Vec::<f64>::new());
+        // 110→111：total=11
+        assert_eq!(totalizer_advance(&mut st, &cfg, 111.0, 4000), vec![11.0]);
+        // 下降（无 rollover → 换表）：total 保持 11，不输出
+        assert_eq!(totalizer_advance(&mut st, &cfg, 90.0, 5000), Vec::<f64>::new());
+        // 换表后继续累计：90→95 → total=16
+        assert_eq!(totalizer_advance(&mut st, &cfg, 95.0, 6000), vec![16.0]);
+    }
+
+    #[test]
+    fn totalizer_advance_rollover_wraps() {
+        let cfg = TotalizerTag {
+            tag_name: "m".into(),
+            reset_period_ms: 0,
+            rollover: Some(1000.0),
+            emit_ms: 0,
+        };
+        let mut st = TotalizerState::default();
+        assert_eq!(totalizer_advance(&mut st, &cfg, 990.0, 1000), Vec::<f64>::new());
+        assert_eq!(totalizer_advance(&mut st, &cfg, 990.0, 2000), vec![0.0]);
+        // 990→10：last=990 > 1000*0.5 → 翻转补差 (1000-990)+10 → total=20
+        assert_eq!(totalizer_advance(&mut st, &cfg, 10.0, 3000), vec![20.0]);
+        // 10→20：total=30
+        assert_eq!(totalizer_advance(&mut st, &cfg, 20.0, 4000), vec![30.0]);
+    }
+
+    #[test]
+    fn totalizer_advance_rollover_low_drop_is_table_swap() {
+        // last 低于 rollover 一半时的下降：视为换表，total 不变
+        let cfg = TotalizerTag {
+            tag_name: "m".into(),
+            reset_period_ms: 0,
+            rollover: Some(1000.0),
+            emit_ms: 0,
+        };
+        let mut st = TotalizerState::default();
+        assert_eq!(totalizer_advance(&mut st, &cfg, 100.0, 1000), Vec::<f64>::new());
+        assert_eq!(totalizer_advance(&mut st, &cfg, 120.0, 2000), vec![20.0]);
+        // 120→5：last=120 < 500 → 换表，total 保持 20
+        assert_eq!(totalizer_advance(&mut st, &cfg, 5.0, 3000), Vec::<f64>::new());
+        // 5→15：total=30
+        assert_eq!(totalizer_advance(&mut st, &cfg, 15.0, 4000), vec![30.0]);
+    }
+
+    #[test]
+    fn totalizer_advance_period_reset_emits_old_then_zero() {
+        let cfg = TotalizerTag {
+            tag_name: "m".into(),
+            reset_period_ms: 1000,
+            rollover: None,
+            emit_ms: 0,
+        };
+        let mut st = TotalizerState::default();
+        assert_eq!(totalizer_advance(&mut st, &cfg, 10.0, 0), Vec::<f64>::new());
+        assert_eq!(totalizer_advance(&mut st, &cfg, 30.0, 500), vec![20.0]);
+        // t=1200 ≥ period_start(0)+1000：本次增量先累计（20+2=22），再重置 → 发 [22, 0]
+        assert_eq!(totalizer_advance(&mut st, &cfg, 32.0, 1200), vec![22.0, 0.0]);
+        // 新周期：基线 32 继续累计
+        assert_eq!(totalizer_advance(&mut st, &cfg, 35.0, 1500), vec![3.0]);
+    }
+
+    #[test]
+    fn totalizer_advance_heartbeat_forces_emit() {
+        let cfg = TotalizerTag {
+            tag_name: "m".into(),
+            reset_period_ms: 0,
+            rollover: None,
+            emit_ms: 1000,
+        };
+        let mut st = TotalizerState::default();
+        assert_eq!(totalizer_advance(&mut st, &cfg, 10.0, 1000), Vec::<f64>::new());
+        // 首见后首次推进必发（基线 0）
+        assert_eq!(totalizer_advance(&mut st, &cfg, 10.0, 1500), vec![0.0]);
+        // t=2000 距上次发射 500ms < emit_ms(1000)：未到期且无变化 → 不发
+        assert_eq!(totalizer_advance(&mut st, &cfg, 10.0, 2000), Vec::<f64>::new());
+        // t=2600 距上次发射 1100ms ≥ 1000：心跳到期 → 强制输出（total 仍 0）
+        assert_eq!(totalizer_advance(&mut st, &cfg, 10.0, 2600), vec![0.0]);
+        // 心跳未到且无变化：不发
+        assert_eq!(totalizer_advance(&mut st, &cfg, 10.0, 2800), Vec::<f64>::new());
+    }
+
+    #[test]
+    fn totalizer_flows_through_apply() {
+        with_lock(|| {
+            let nid = nid();
+            let gid = gid();
+            let tid = tid();
+            let store = store_with(nid, gid, tid, "meter");
+            let mut p = passthrough_policy(nid, gid);
+            p.totalizer = Some(vec![TotalizerTag {
+                tag_name: "meter".into(),
+                reset_period_ms: 0,
+                rollover: None,
+                emit_ms: 0,
+            }]);
+            store.policy_insert(p);
+            forget_group(nid, gid);
+            let out = apply(&store, nid, gid, &[(tid, DataValue::Float64(100.0))], 1000);
+            assert!(out.synthetic.is_empty(), "首见不输出");
+            let out = apply(&store, nid, gid, &[(tid, DataValue::Float64(110.0))], 2000);
+            assert_eq!(out.synthetic.len(), 1);
+            assert_eq!(
+                out.synthetic_names.values().next().map(String::as_str),
+                Some("meter_total")
+            );
+            if let DataValue::Float64(f) = &out.synthetic[0].1 {
+                assert!((*f - 10.0).abs() < 1e-9, "total got {f}");
+            } else {
+                panic!("expect Float64");
+            }
+        });
     }
 
     // ===== Property tests（T5 质量纵深）=====
