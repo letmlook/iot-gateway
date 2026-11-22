@@ -132,7 +132,8 @@ impl FlowRuntime {
         let flow_name = row.name.clone();
         let handle = tokio::spawn(async move {
             let mut flow_state = gateway_flow::FlowState::default();
-            let mut stale_alarm_id: Option<Uuid> = None;
+            // 本批断流告警的全部 raise id（多 sink_alarm 出口各一条；恢复时逐个 resolve）
+            let mut stale_alarm_ids: Vec<Uuid> = Vec::new();
             let mut deadline = match &stale {
                 Some(s) => {
                     tokio::time::Instant::now()
@@ -151,12 +152,15 @@ impl FlowRuntime {
                     msg = rx.recv() => {
                         match msg {
                             Ok(data) => {
-                                // 数据恢复：自动解除 active 断流告警（spec §4.2）
-                                if let Some(id) = stale_alarm_id.take() {
+                                // 数据恢复：自动解除 active 断流告警（spec §4.2）。
+                                // 多出口逐条 resolve，单条失败 warn 继续，不中断其余。
+                                if !stale_alarm_ids.is_empty() {
                                     let scope =
                                         crate::api::scope::TenantScope::One(tenant.clone());
-                                    if let Err(e) = alarm_store.resolve(id, &scope) {
-                                        warn!(flow_id = ?flow_id, "stale alarm resolve error: {e}");
+                                    for id in stale_alarm_ids.drain(..) {
+                                        if let Err(e) = alarm_store.resolve(id, &scope) {
+                                            warn!(flow_id = ?flow_id, "stale alarm resolve error: {e}");
+                                        }
                                     }
                                 }
                                 let deliveries = gateway_flow::evaluate(
@@ -207,8 +211,8 @@ impl FlowRuntime {
                                     &sinks, &manager, &alarm_store, &alarm_feed,
                                     &tenant, flow_id, d,
                                 ).await;
-                                // 只记录断流告警自身的 id（本批 raise 的最后一个）
-                                stale_alarm_id = ids.last().copied();
+                                // 记录本批 raise 的全部告警 id（多 sink_alarm 各一条）
+                                stale_alarm_ids = ids;
                             }
                             Err(e) => {
                                 error!(flow_id = ?flow_id, "stale inject evaluate error: {e}");
@@ -407,5 +411,48 @@ mod tests {
             "group_id": uuid::Uuid::new_v4()
         }));
         assert!(off.is_none(), "缺省 0 = 不检测");
+    }
+
+    #[tokio::test]
+    async fn stale_inject_batch_collects_all_sink_alarm_ids() {
+        // 多 sink_alarm 出口（publish 门禁允许 ≥1）：同一注入批次的 raise id 必须
+        // 全数返回——AlarmStore 去重键含 node_name，各出口是独立条目，恢复路径
+        // 才能逐条 resolve（fix I-1：此前只收 last，其余永久残留 active）。
+        let mut sinks: HashMap<Uuid, (String, SinkTarget)> = HashMap::new();
+        let sink_a = Uuid::new_v4();
+        let sink_b = Uuid::new_v4();
+        sinks.insert(sink_a, ("alarm-a".into(), SinkTarget::Alarm));
+        sinks.insert(sink_b, ("alarm-b".into(), SinkTarget::Alarm));
+
+        let manager = Arc::new(gateway_core::Manager::new());
+        let alarm_store = crate::alarms::AlarmStore::open_best_effort(None);
+        let alarm_feed = crate::ws::AlarmFeed::new();
+        let flow_id = Uuid::new_v4();
+        let ev = gateway_flow::AlarmEvent {
+            level: gateway_flow::AlarmLevel::High,
+            tag: "grp1".into(),
+            value: None,
+            threshold: Some(5000.0),
+            message: "组 grp1 超过 5 秒未上报数据".into(),
+            ts: chrono::Utc::now(),
+        };
+        let deliveries = vec![
+            gateway_flow::SinkDelivery {
+                node_id: sink_a,
+                payload: gateway_flow::FlowPayload::Alarm(ev.clone()),
+            },
+            gateway_flow::SinkDelivery {
+                node_id: sink_b,
+                payload: gateway_flow::FlowPayload::Alarm(ev),
+            },
+        ];
+
+        let ids = deliver_deliveries(
+            &sinks, &manager, &alarm_store, &alarm_feed, "t1", flow_id, deliveries,
+        )
+        .await;
+
+        assert_eq!(ids.len(), 2, "两个 sink_alarm 各应产出一条 raise id");
+        assert_ne!(ids[0], ids[1], "不同出口 node_name → 不同条目，不得去重合并");
     }
 }
