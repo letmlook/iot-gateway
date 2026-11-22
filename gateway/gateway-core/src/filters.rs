@@ -106,7 +106,9 @@ pub fn validate_policy(policy: &GroupPolicy) -> Result<(), String> {
         if w.aggregates.kinds.is_empty() {
             return Err("aggregates.kinds must be non-empty".to_string());
         }
-        let valid = ["avg", "min", "max", "count", "first", "last"];
+        let valid = [
+            "avg", "min", "max", "count", "first", "last", "sum", "stddev", "delta",
+        ];
         for k in &w.aggregates.kinds {
             if !valid.contains(&k.as_str()) {
                 return Err(format!("unknown aggregate kind: {}", k));
@@ -274,6 +276,29 @@ fn aggregate(kind: &str, samples: &[(u64, f64)]) -> Option<f64> {
         "count" => Some(samples.len() as f64),
         "first" => samples.first().map(|(_, v)| *v),
         "last" => samples.last().map(|(_, v)| *v),
+        "sum" => Some(samples.iter().map(|(_, v)| v).sum()),
+        "stddev" => {
+            // 样本标准差（n−1 分母）；n<2 统计上无定义 → None（不输出该虚拟点位）
+            if samples.len() < 2 {
+                return None;
+            }
+            let mean = samples.iter().map(|(_, v)| v).sum::<f64>() / samples.len() as f64;
+            let var = samples
+                .iter()
+                .map(|(_, v)| {
+                    let d = v - mean;
+                    d * d
+                })
+                .sum::<f64>()
+                / (samples.len() - 1) as f64;
+            Some(var.sqrt())
+        }
+        "delta" => {
+            // 窗口首尾差（时间序）；单样本 → 0（该窗无变化）
+            let first = samples.first().map(|(_, v)| *v)?;
+            let last = samples.last().map(|(_, v)| *v)?;
+            Some(last - first)
+        }
         _ => None,
     }
 }
@@ -977,6 +1002,40 @@ mod tests {
         });
     }
 
+    #[test]
+    fn aggregate_sum_stddev_delta() {
+        // 教科书样本 [2,4,4,4,5,5,7,9]：sum=40，平方偏差和=32，样本方差=32/7，stddev=√(32/7)
+        let vals = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
+        let s: Vec<(u64, f64)> = vals.iter().enumerate().map(|(i, v)| (i as u64, *v)).collect();
+        assert_eq!(aggregate("sum", &s), Some(40.0));
+        let sd = aggregate("stddev", &s).unwrap();
+        assert!((sd - (32.0f64 / 7.0).sqrt()).abs() < 1e-12, "stddev got {sd}");
+
+        // n=1：stddev 无定义 → None；delta → 0
+        let one = vec![(0u64, 7.0)];
+        assert_eq!(aggregate("stddev", &one), None);
+        assert_eq!(aggregate("delta", &one), Some(0.0));
+
+        // delta = 时间序 last − first
+        let s2 = vec![(1u64, 10.0), (2, 25.0), (3, 15.0)];
+        assert_eq!(aggregate("delta", &s2), Some(5.0));
+        assert_eq!(aggregate("sum", &s2), Some(50.0));
+
+        // 空窗 → None（现有机制）
+        let empty: Vec<(u64, f64)> = Vec::new();
+        assert_eq!(aggregate("sum", &empty), None);
+        assert_eq!(aggregate("stddev", &empty), None);
+        assert_eq!(aggregate("delta", &empty), None);
+    }
+
+    #[test]
+    fn validate_accepts_new_simple_kinds() {
+        let nid = nid();
+        let gid = gid();
+        let p = win_policy(nid, gid, 1000, 100, vec!["sum", "stddev", "delta"]);
+        assert!(validate_policy(&p).is_ok());
+    }
+
     // ===== forget =====
 
     #[test]
@@ -1080,7 +1139,7 @@ mod tests {
                 window_ms: 1000,
                 emit_ms: 100,
                 aggregates: WindowAgg {
-                    kinds: vec!["median".to_string()],
+                    kinds: vec!["bogus".to_string()],
                 },
             }),
             tags: vec![],
