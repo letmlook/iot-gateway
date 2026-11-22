@@ -2219,6 +2219,13 @@ pub struct CreateRuleReq {
     pub for_ms: u64,
     #[serde(default)]
     pub clear_ms: u64,
+    #[serde(default)]
+    pub extra_conditions: Vec<gateway_core::TagCondition>,
+    /// all | any；缺省 all
+    #[serde(default)]
+    pub logic: gateway_core::Logic,
+    #[serde(default)]
+    pub clear_condition: Option<gateway_core::ClearCondition>,
     pub action: gateway_core::RuleAction,
 }
 
@@ -2241,6 +2248,9 @@ impl CreateRuleReq {
             condition: self.condition,
             for_ms: self.for_ms,
             clear_ms: self.clear_ms,
+            extra_conditions: self.extra_conditions,
+            logic: self.logic,
+            clear_condition: self.clear_condition,
             action: self.action,
             tenant_id,
         }

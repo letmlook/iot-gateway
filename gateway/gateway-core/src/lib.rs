@@ -34,7 +34,8 @@ pub use persist::{
     SNAPSHOT_VERSION,
 };
 pub use rules::{
-    engine as rule_engine, value_for_tag as rule_value_for_tag, CompareOp, Firing, Rule,
-    RuleAction, RuleCondition, RuleEngine, RuleRuntime, RuleSource, RuleView,
+    engine as rule_engine, value_for_tag as rule_value_for_tag, ClearCondition, CompareOp, Firing,
+    Logic, Rule, RuleAction, RuleCondition, RuleEngine, RuleExtras, RuleRuntime, RuleSource,
+    RuleView, TagCondition,
 };
 pub use store::Store;

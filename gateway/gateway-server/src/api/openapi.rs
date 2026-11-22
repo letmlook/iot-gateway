@@ -210,6 +210,14 @@ pub struct CreateRuleReq {
     pub condition: serde_json::Value,
     pub for_ms: u64,
     pub clear_ms: u64,
+    /// 追加触发条件数组，元素 {tag_name, op, threshold}；上限 8
+    #[schema(value_type = Object)]
+    pub extra_conditions: Vec<serde_json::Value>,
+    /// 条件组逻辑：all | any（缺省 all）
+    pub logic: Option<String>,
+    /// 独立恢复条件 {tag_name?, op, threshold}
+    #[schema(value_type = Object)]
+    pub clear_condition: Option<serde_json::Value>,
     /// RuleAction
     #[schema(value_type = Object)]
     pub action: serde_json::Value,

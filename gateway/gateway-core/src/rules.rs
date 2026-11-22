@@ -8,6 +8,8 @@
 //! 2. 持续满足期间**不重复触发**；
 //! 3. 条件恢复（不满足）并持续 `clear_ms` 后，才允许下一次触发；
 //!    —— 中途再次满足会重置恢复计时，避免抖动导致动作被反复执行；
+//!    —— 配置了 `clear_condition`（hysteresis 独立恢复条件）时，恢复判定以恢复条件
+//!    为准、且要求持续满足（不满足期间保持 fired、clear 计时归零）；
 //! 4. `for_ms = 0` 表示满足即触发；`clear_ms = 0` 表示恢复即重新武装。
 //!
 //! # 为什么用「边沿触发」而不是「电平触发」
@@ -88,6 +90,49 @@ pub struct RuleCondition {
     pub threshold: f64,
 }
 
+/// 追加触发条件（与主条件组成条件组，按 rule.logic 求值；spec §三）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TagCondition {
+    pub tag_name: String,
+    pub op: CompareOp,
+    pub threshold: f64,
+}
+
+/// 独立恢复条件（hysteresis；spec §二）。None = 现状语义（触发条件不满足 + clear_ms 去抖）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClearCondition {
+    /// 恢复条件监测的点位；None = 主点位（source.tag_name）
+    #[serde(default)]
+    pub tag_name: Option<String>,
+    pub op: CompareOp,
+    pub threshold: f64,
+}
+
+/// 条件组逻辑（spec §三）；单条件时 all/any 等价
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Logic {
+    All,
+    Any,
+}
+
+impl Default for Logic {
+    fn default() -> Self {
+        Logic::All
+    }
+}
+
+/// rules 表 extra 列的 JSON 形状（三个新字段打包存储；persist 层用）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RuleExtras {
+    #[serde(default)]
+    pub extra_conditions: Vec<TagCondition>,
+    #[serde(default)]
+    pub logic: Logic,
+    #[serde(default)]
+    pub clear_condition: Option<ClearCondition>,
+}
+
 /// 触发后执行的动作
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -99,7 +144,7 @@ pub enum RuleAction {
 }
 
 /// 一条规则
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Rule {
     pub id: String,
     pub name: String,
@@ -113,6 +158,15 @@ pub struct Rule {
     /// 条件恢复后需持续多久才允许再次触发（毫秒）；0 = 恢复即重新武装
     #[serde(default)]
     pub clear_ms: u64,
+    /// 追加触发条件（上限 8，validate 保证）；空 = 现状单条件
+    #[serde(default)]
+    pub extra_conditions: Vec<TagCondition>,
+    /// 条件组逻辑；缺省 all
+    #[serde(default)]
+    pub logic: Logic,
+    /// 独立恢复条件（hysteresis）；None = 触发条件不满足即恢复计时
+    #[serde(default)]
+    pub clear_condition: Option<ClearCondition>,
     pub action: RuleAction,
     /// 所属租户 ID（服务端以 source 节点域盖章，请求传入值忽略）
     #[serde(default = "default_tenant")]
@@ -148,6 +202,25 @@ impl Rule {
         }
         if self.clear_ms > MAX_MS {
             return Err(format!("clear_ms must be <= {}", MAX_MS));
+        }
+        if self.extra_conditions.len() > 8 {
+            return Err("extra_conditions must have at most 8 items".to_string());
+        }
+        for c in &self.extra_conditions {
+            if c.tag_name.trim().is_empty() {
+                return Err("extra_conditions[].tag_name must not be empty".to_string());
+            }
+            if !c.threshold.is_finite() {
+                return Err("extra_conditions[].threshold must be a finite number".to_string());
+            }
+        }
+        if let Some(cc) = &self.clear_condition {
+            if cc.tag_name.as_deref().map(str::trim) == Some("") {
+                return Err("clear_condition.tag_name must not be empty".to_string());
+            }
+            if !cc.threshold.is_finite() {
+                return Err("clear_condition.threshold must be a finite number".to_string());
+            }
         }
         match &self.action {
             RuleAction::WriteTag { tag_name, value } => {
@@ -238,7 +311,25 @@ impl RuleEngine {
             let mut st = self.states.entry(rule.id.clone()).or_default();
             st.last_value = Some(value);
 
-            if rule.condition.op.eval(value, rule.condition.threshold) {
+            // 触发判定（spec §三）：logic 作用于 [主条件, ...extra_conditions]。
+            // extra 点位缺位判 false（缺测不误触发；显式 false 而非 NaN 代缺位——
+            // Ne 与 NaN 组合会判 true）；主点位缺位在上方 continue，整条不推进。
+            let triggered = {
+                let mut parts = vec![rule.condition.op.eval(value, rule.condition.threshold)];
+                for c in &rule.extra_conditions {
+                    parts.push(
+                        values
+                            .get(&c.tag_name)
+                            .map_or(false, |v| c.op.eval(*v, c.threshold)),
+                    );
+                }
+                match rule.logic {
+                    Logic::All => parts.iter().all(|&p| p),
+                    Logic::Any => parts.iter().any(|&p| p),
+                }
+            };
+
+            if triggered {
                 // 满足：清理恢复计时
                 st.clear_since_ms = None;
                 let since = *st.since_ms.get_or_insert(now_ms);
@@ -253,12 +344,25 @@ impl RuleEngine {
                     });
                 }
             } else if st.fired {
-                // 已触发但条件恢复：需持续 clear_ms 才重新武装
-                let clear_since = *st.clear_since_ms.get_or_insert(now_ms);
-                if now_ms.saturating_sub(clear_since) >= rule.clear_ms {
-                    st.fired = false;
+                // 恢复判定（spec §二）：配了 clear_condition 时以恢复条件为准，
+                // 且要求恢复条件持续满足（不满足期间保持 fired、clear 计时归零）；
+                // 未配时进入本分支即视为恢复（现状语义不变）。
+                let cleared = match &rule.clear_condition {
+                    Some(cc) => {
+                        let tag = cc.tag_name.as_deref().unwrap_or(&rule.source.tag_name);
+                        values.get(tag).map_or(false, |v| cc.op.eval(*v, cc.threshold))
+                    }
+                    None => true,
+                };
+                if cleared {
+                    let clear_since = *st.clear_since_ms.get_or_insert(now_ms);
+                    if now_ms.saturating_sub(clear_since) >= rule.clear_ms {
+                        st.fired = false;
+                        st.clear_since_ms = None;
+                        st.since_ms = None;
+                    }
+                } else {
                     st.clear_since_ms = None;
-                    st.since_ms = None;
                 }
             } else {
                 // 未触发且不满足：重置保持计时，下次满足重新开始计 for_ms
@@ -449,6 +553,9 @@ mod tests {
             condition: RuleCondition { op, threshold },
             for_ms,
             clear_ms,
+            extra_conditions: Vec::new(),
+            logic: Logic::All,
+            clear_condition: None,
             action: RuleAction::Log {
                 message: "hot".to_string(),
             },
@@ -834,5 +941,254 @@ mod tests {
             };
             assert_eq!(value_for_tag(&tag, v), expect, "data_type={dt:?} v={v}");
         }
+    }
+
+    // ===== 第三批：hysteresis 独立恢复条件 + 多条件组合（spec §二/§三）=====
+
+    fn vals2(v: f64, extra: &[(&str, f64)]) -> HashMap<String, f64> {
+        let mut m = vals(v);
+        for (k, x) in extra {
+            m.insert(k.to_string(), *x);
+        }
+        m
+    }
+
+    #[test]
+    fn hysteresis_holds_fired_in_deadband() {
+        // 触发 >80、恢复 <75（主点位）；75~80 临界带保持 fired 不重复触发
+        let e = RuleEngine::new();
+        let mut r = rule("r1", CompareOp::Gt, 80.0, 0, 0);
+        r.clear_condition = Some(ClearCondition {
+            tag_name: None,
+            op: CompareOp::Lt,
+            threshold: 75.0,
+        });
+        assert_eq!(e.advance(std::slice::from_ref(&r), &vals(85.0), 0).len(), 1);
+        for t in [100u64, 200, 300] {
+            assert!(
+                e.advance(std::slice::from_ref(&r), &vals(78.0), t)
+                    .is_empty(),
+                "临界带（78∈[75,80]）必须保持 fired"
+            );
+        }
+        let st = e.runtime("r1");
+        assert!(st.fired, "临界带保持 fired");
+        assert_eq!(st.fire_count, 1, "临界带不得重复触发");
+        // 恢复条件满足（clear_ms=0 立即）→ 重新武装
+        assert!(e.advance(std::slice::from_ref(&r), &vals(70.0), 400).is_empty());
+        assert!(!e.runtime("r1").fired, "低于 75 应重新武装");
+        // 再次超温可再次触发
+        assert_eq!(e.advance(std::slice::from_ref(&r), &vals(85.0), 500).len(), 1);
+    }
+
+    #[test]
+    fn hysteresis_recovery_bounce_resets_clear_timer() {
+        // 恢复条件满足中途反弹 → clear 计时归零重计（要求持续满足）
+        let e = RuleEngine::new();
+        let mut r = rule("r1", CompareOp::Gt, 80.0, 0, 500);
+        r.clear_condition = Some(ClearCondition {
+            tag_name: None,
+            op: CompareOp::Lt,
+            threshold: 75.0,
+        });
+        assert_eq!(e.advance(std::slice::from_ref(&r), &vals(85.0), 0).len(), 1);
+        e.advance(std::slice::from_ref(&r), &vals(70.0), 100); // 恢复计时开始
+        e.advance(std::slice::from_ref(&r), &vals(76.0), 300); // 反弹 76≥75：clear 计时归零
+        assert!(e.runtime("r1").fired, "反弹后仍 fired");
+        e.advance(std::slice::from_ref(&r), &vals(70.0), 700); // 重新满足：clear_since 重启为 700，0 < 500
+        assert!(e.runtime("r1").fired, "clear 未满 500ms 不重新武装");
+        e.advance(std::slice::from_ref(&r), &vals(70.0), 1200); // 1200-700=500 ≥ 500
+        assert!(!e.runtime("r1").fired, "恢复条件持续 500ms 后重新武装");
+    }
+
+    #[test]
+    fn hysteresis_clear_condition_on_other_tag() {
+        // 恢复条件监测非主点位；该点位缺位判 false（保持 fired）。
+        // 主点位停在临界带（78：<80 不触发、≥75 不满足恢复主条件）——
+        // spec §2.2：恢复判定仅在「已触发且触发条件不满足」时进行。
+        let e = RuleEngine::new();
+        let mut r = rule("r1", CompareOp::Gt, 80.0, 0, 0);
+        r.clear_condition = Some(ClearCondition {
+            tag_name: Some("cooler_on".into()),
+            op: CompareOp::Eq,
+            threshold: 1.0,
+        });
+        e.advance(std::slice::from_ref(&r), &vals(85.0), 0);
+        assert!(e.runtime("r1").fired);
+        // cooler_on 缺位 → false → 保持 fired
+        e.advance(std::slice::from_ref(&r), &vals(78.0), 100);
+        assert!(e.runtime("r1").fired, "恢复点位缺位不得重新武装");
+        // cooler_on=0 → false → 保持 fired
+        e.advance(std::slice::from_ref(&r), &vals2(78.0, &[("cooler_on", 0.0)]), 200);
+        assert!(e.runtime("r1").fired);
+        // cooler_on=1 → true → 重新武装
+        e.advance(std::slice::from_ref(&r), &vals2(78.0, &[("cooler_on", 1.0)]), 300);
+        assert!(!e.runtime("r1").fired);
+    }
+
+    #[test]
+    fn multi_condition_all_and_any() {
+        let e = RuleEngine::new();
+        // All：主 + extra 全满足才触发
+        let mut r = rule("r1", CompareOp::Gt, 80.0, 0, 0);
+        r.extra_conditions = vec![TagCondition {
+            tag_name: "pressure".into(),
+            op: CompareOp::Gt,
+            threshold: 10.0,
+        }];
+        r.logic = Logic::All;
+        assert!(
+            e.advance(std::slice::from_ref(&r), &vals(85.0), 0)
+                .is_empty(),
+            "仅主条件满足（pressure 缺位）不得触发"
+        );
+        e.advance(std::slice::from_ref(&r), &vals2(85.0, &[("pressure", 5.0)]), 100);
+        assert_eq!(e.runtime("r1").fire_count, 0, "pressure=5≤10 不满足");
+        assert_eq!(
+            e.advance(std::slice::from_ref(&r), &vals2(85.0, &[("pressure", 12.0)]), 200)
+                .len(),
+            1,
+            "全部满足应触发"
+        );
+        // Any：任一满足即触发（注意新 rule id，避免状态串扰）
+        let mut r2 = rule("r2", CompareOp::Lt, 80.0, 0, 0); // 主条件 temp<80
+        r2.extra_conditions = vec![TagCondition {
+            tag_name: "pressure".into(),
+            op: CompareOp::Gt,
+            threshold: 10.0,
+        }];
+        r2.logic = Logic::Any;
+        let fires = e.advance(std::slice::from_ref(&r2), &vals2(85.0, &[("pressure", 12.0)]), 300);
+        assert_eq!(fires.len(), 1, "Any：主条件 false 但 extra true 应触发");
+        assert_eq!(fires[0].value, 85.0, "Firing.value 仍是主点位值");
+    }
+
+    #[test]
+    fn multi_condition_missing_extra_tag_is_false() {
+        let e = RuleEngine::new();
+        let mut r = rule("r1", CompareOp::Gt, 10.0, 0, 0);
+        r.extra_conditions = vec![TagCondition {
+            tag_name: "ghost".into(),
+            op: CompareOp::Ne,
+            threshold: 0.0,
+        }];
+        r.logic = Logic::All;
+        // 显式 false 而非 NaN 代缺位：Ne 与 NaN 组合会判 true，必须不得触发
+        assert!(
+            e.advance(std::slice::from_ref(&r), &vals(11.0), 0)
+                .is_empty(),
+            "extra 点位缺位必须判 false（哪怕 op=ne）"
+        );
+        r.logic = Logic::Any;
+        assert_eq!(
+            e.advance(std::slice::from_ref(&r), &vals(11.0), 100).len(),
+            1,
+            "Any 下缺位项 false、主条件 true → 触发"
+        );
+    }
+
+    #[test]
+    fn multi_condition_missing_primary_tag_does_not_advance() {
+        // 主点位缺位：整条不推进（runtime 不变）——extra 在也不推进
+        let e = RuleEngine::new();
+        let mut r = rule("r1", CompareOp::Gt, 10.0, 0, 0);
+        r.extra_conditions = vec![TagCondition {
+            tag_name: "pressure".into(),
+            op: CompareOp::Gt,
+            threshold: 1.0,
+        }];
+        r.logic = Logic::Any;
+        let mut only_pressure = HashMap::new();
+        only_pressure.insert("pressure".to_string(), 5.0);
+        assert!(e.advance(std::slice::from_ref(&r), &only_pressure, 0).is_empty());
+        assert_eq!(e.runtime("r1").last_value, None, "主点位缺位不推进状态");
+    }
+
+    #[test]
+    fn multi_condition_trigger_with_clear_condition_recovery() {
+        // 组合（spec §3.3）：多条件触发 + 独立单条恢复条件恢复
+        let e = RuleEngine::new();
+        let mut r = rule("r1", CompareOp::Gt, 80.0, 0, 100);
+        r.extra_conditions = vec![TagCondition {
+            tag_name: "pressure".into(),
+            op: CompareOp::Gt,
+            threshold: 10.0,
+        }];
+        r.logic = Logic::All;
+        r.clear_condition = Some(ClearCondition {
+            tag_name: Some("cooler_on".into()),
+            op: CompareOp::Eq,
+            threshold: 1.0,
+        });
+        e.advance(std::slice::from_ref(&r), &vals2(85.0, &[("pressure", 12.0)]), 0);
+        assert!(e.runtime("r1").fired);
+        // 温度回落但 pressure 仍满足 → 恢复点位缺位（cleared=false）→ 保持 fired
+        e.advance(std::slice::from_ref(&r), &vals2(70.0, &[("pressure", 12.0)]), 100);
+        assert!(e.runtime("r1").fired, "多条件仍满足时不得进恢复分支");
+        // 全部不满足且 cooler_on=1 → 恢复计时满 clear_ms 后重新武装
+        e.advance(
+            std::slice::from_ref(&r),
+            &vals2(70.0, &[("pressure", 5.0), ("cooler_on", 1.0)]),
+            200,
+        );
+        assert!(e.runtime("r1").fired, "clear 未满 100ms 保持 fired");
+        e.advance(
+            std::slice::from_ref(&r),
+            &vals2(70.0, &[("pressure", 5.0), ("cooler_on", 1.0)]),
+            300,
+        );
+        assert!(!e.runtime("r1").fired, "多条件不满足+恢复条件满足应重新武装");
+    }
+
+    #[test]
+    fn legacy_rule_json_deserializes_with_defaults() {
+        // 旧 JSON（无新字段）零迁移兼容（spec §三）
+        let raw = r#"{"id":"r1","name":"legacy","source":{"south_node_id":"550e8400-e29b-41d4-a716-446655440001","group_id":"550e8400-e29b-41d4-a716-446655440002","tag_name":"temperature"},"condition":{"op":"gt","threshold":80.0},"action":{"type":"log","message":"hot"}}"#;
+        let r: Rule = serde_json::from_str(raw).unwrap();
+        assert!(r.extra_conditions.is_empty());
+        assert_eq!(r.logic, Logic::All);
+        assert!(r.clear_condition.is_none());
+        // 行为回归：advance 与现状一致（立即触发）
+        let e = RuleEngine::new();
+        assert_eq!(e.advance(std::slice::from_ref(&r), &vals(85.0), 0).len(), 1);
+    }
+
+    #[test]
+    fn rule_validation_rejects_bad_extras_and_clear() {
+        let mut r = rule("r1", CompareOp::Gt, 10.0, 0, 0);
+        assert!(r.validate().is_ok());
+        // extra 超 8 项
+        r.extra_conditions = (0..9)
+            .map(|i| TagCondition {
+                tag_name: format!("t{i}"),
+                op: CompareOp::Gt,
+                threshold: 1.0,
+            })
+            .collect();
+        assert!(r.validate().is_err(), "extra_conditions 上限 8");
+        r.extra_conditions.truncate(8);
+        assert!(r.validate().is_ok());
+        // extra threshold 非有限
+        r.extra_conditions[0].threshold = f64::NAN;
+        assert!(r.validate().is_err());
+        // extra tag_name 空串
+        r.extra_conditions[0].threshold = 1.0;
+        r.extra_conditions[0].tag_name = "  ".into();
+        assert!(r.validate().is_err());
+        r.extra_conditions.clear();
+        // clear_condition：threshold 非有限 / tag_name 空串
+        r.clear_condition = Some(ClearCondition {
+            tag_name: None,
+            op: CompareOp::Lt,
+            threshold: f64::INFINITY,
+        });
+        assert!(r.validate().is_err());
+        let cc = r.clear_condition.as_mut().unwrap();
+        cc.threshold = 1.0;
+        cc.tag_name = Some(String::new());
+        assert!(r.validate().is_err(), "clear_condition.tag_name 空串拒绝");
+        let cc = r.clear_condition.as_mut().unwrap();
+        cc.tag_name = Some("ok".into());
+        assert!(r.validate().is_ok());
     }
 }

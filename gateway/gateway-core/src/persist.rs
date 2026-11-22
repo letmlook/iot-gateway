@@ -73,7 +73,8 @@ CREATE TABLE IF NOT EXISTS rules (
   for_ms INTEGER NOT NULL,
   clear_ms INTEGER NOT NULL,
   action TEXT NOT NULL,
-  tenant_id TEXT NOT NULL DEFAULT 'default'
+  tenant_id TEXT NOT NULL DEFAULT 'default',
+  extra TEXT
 );
 CREATE TABLE IF NOT EXISTS policies (
   south_node_id TEXT NOT NULL,
@@ -283,6 +284,21 @@ fn ensure_schema(conn: &Connection, db_path: &Path) -> Result<(), rusqlite::Erro
         // 3) 版本推进
         conn.execute("UPDATE meta SET version = 3", [])?;
         info!("schema migrated v2 → v3 (hot-path indexes + rollback point)");
+    }
+
+    // 迁移 rules 表：extra 列（表达式批三字段打包 JSON；NULL = 全缺省）。
+    // 不挂在版本号下：既有 v1/v2/v3 库都要补列（load 的 SELECT 引用该列）；
+    // 幂等靠列存在性检查，全部已迁移的库重开时不再 ALTER。
+    let rules_has_extra: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('rules') WHERE name = 'extra'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .unwrap_or(false);
+    if !rules_has_extra {
+        conn.execute("ALTER TABLE rules ADD COLUMN extra TEXT", [])?;
     }
 
     Ok(())
@@ -539,7 +555,7 @@ fn load_from_db(conn: &Connection) -> Result<Snapshot, PersistError> {
     // 规则：action 以 JSON 存储，其余字段分列（便于人工查库）
     let mut rules = Vec::new();
     let mut stmt = conn.prepare(
-        "SELECT id, name, enabled, south_node_id, group_id, tag_name, op, threshold, for_ms, clear_ms, action, tenant_id FROM rules",
+        "SELECT id, name, enabled, south_node_id, group_id, tag_name, op, threshold, for_ms, clear_ms, action, tenant_id, extra FROM rules",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok((
@@ -555,6 +571,7 @@ fn load_from_db(conn: &Connection) -> Result<Snapshot, PersistError> {
             row.get::<_, i64>(9)?,
             row.get::<_, String>(10)?,
             row.get::<_, String>(11)?,
+            row.get::<_, Option<String>>(12)?,
         ))
     })?;
     for row in rows {
@@ -571,11 +588,19 @@ fn load_from_db(conn: &Connection) -> Result<Snapshot, PersistError> {
             clear_ms,
             action,
             tenant_id,
+            extra_json,
         ) = row?;
         let op = serde_json::from_str::<crate::rules::CompareOp>(&format!("\"{}\"", op))
             .map_err(|e| PersistError::Validation(format!("rule {}: bad op: {}", id, e)))?;
         let action: crate::rules::RuleAction = serde_json::from_str(&action)
             .map_err(|e| PersistError::Validation(format!("rule {}: bad action: {}", id, e)))?;
+        // extra 列：三新字段打包 JSON；NULL / 空串 = 全缺省
+        let extras: crate::rules::RuleExtras = match extra_json {
+            Some(s) if !s.trim().is_empty() => serde_json::from_str(&s).map_err(|e| {
+                PersistError::Validation(format!("rule {}: bad extras: {}", id, e))
+            })?,
+            _ => crate::rules::RuleExtras::default(),
+        };
         rules.push(crate::rules::Rule {
             id,
             name,
@@ -588,6 +613,9 @@ fn load_from_db(conn: &Connection) -> Result<Snapshot, PersistError> {
             condition: crate::rules::RuleCondition { op, threshold },
             for_ms: for_ms.max(0) as u64,
             clear_ms: clear_ms.max(0) as u64,
+            extra_conditions: extras.extra_conditions,
+            logic: extras.logic,
+            clear_condition: extras.clear_condition,
             action,
             tenant_id,
         });
@@ -847,8 +875,8 @@ fn save_to_db(conn: &Connection, s: &Snapshot) -> Result<(), PersistError> {
 
     {
         let mut stmt = tx.prepare_cached(
-            "INSERT INTO rules (id, name, enabled, south_node_id, group_id, tag_name, op, threshold, for_ms, clear_ms, action, tenant_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            "INSERT INTO rules (id, name, enabled, south_node_id, group_id, tag_name, op, threshold, for_ms, clear_ms, action, tenant_id, extra)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 enabled = excluded.enabled,
@@ -860,7 +888,8 @@ fn save_to_db(conn: &Connection, s: &Snapshot) -> Result<(), PersistError> {
                 for_ms = excluded.for_ms,
                 clear_ms = excluded.clear_ms,
                 action = excluded.action,
-                tenant_id = excluded.tenant_id",
+                tenant_id = excluded.tenant_id,
+                extra = excluded.extra",
         )?;
         for r in &s.rules {
             stmt.execute(params![
@@ -876,6 +905,7 @@ fn save_to_db(conn: &Connection, s: &Snapshot) -> Result<(), PersistError> {
                 r.clear_ms as i64,
                 serde_json::to_string(&r.action)?,
                 r.tenant_id,
+                rule_extra_json(r),
             ])?;
         }
     }
@@ -1435,6 +1465,22 @@ pub fn has_plaintext_secrets(s: &Snapshot) -> bool {
 /// 不加密的保存（保持向后兼容）
 pub async fn save(path: &Path, s: &Snapshot) -> Result<(), PersistError> {
     save_secret(path, s, None).await
+}
+
+/// 三新字段打包进 extra 列；全缺省存 NULL（旧行紧凑，spec 零迁移兼容）
+fn rule_extra_json(r: &crate::rules::Rule) -> Option<String> {
+    let all_default = r.extra_conditions.is_empty()
+        && r.logic == crate::rules::Logic::All
+        && r.clear_condition.is_none();
+    if all_default {
+        return None;
+    }
+    serde_json::to_string(&crate::rules::RuleExtras {
+        extra_conditions: r.extra_conditions.clone(),
+        logic: r.logic,
+        clear_condition: r.clear_condition.clone(),
+    })
+    .ok()
 }
 
 /// 不解密的加载（保持向后兼容）
@@ -2298,6 +2344,9 @@ mod tests {
                 },
                 for_ms: 0,
                 clear_ms: 0,
+                extra_conditions: Vec::new(),
+                logic: crate::rules::Logic::All,
+                clear_condition: None,
                 action: crate::rules::RuleAction::Log {
                     message: "hi".to_string(),
                 },
@@ -2323,6 +2372,114 @@ mod tests {
         assert_eq!(t1.config.tenant_id, "tenant-a");
         assert_eq!(t2.config.tenant_id, "tenant-b");
         assert_eq!(loaded.rules[0].tenant_id, "tenant-a");
+
+        cleanup_all(&path);
+    }
+
+    /// extra 列读写往返：带 extras 的规则经 JSON 还原相等；全缺省规则存 NULL（旧行紧凑）
+    #[tokio::test]
+    async fn rule_extra_fields_round_trip_through_sqlite() {
+        let _backup_guard = BACKUP_TEST_LOCK.lock().await;
+        let path = temp_db("rule-extra-rt");
+
+        let make_rule = |id: &str, extras: bool| -> crate::rules::Rule {
+            crate::rules::Rule {
+                id: id.to_string(),
+                name: format!("rule-{}", id),
+                enabled: true,
+                source: crate::rules::RuleSource {
+                    south_node_id: NodeId::new(),
+                    group_id: GroupId::new(),
+                    tag_name: "temperature".to_string(),
+                },
+                condition: crate::rules::RuleCondition {
+                    op: crate::rules::CompareOp::Gt,
+                    threshold: 80.0,
+                },
+                for_ms: 0,
+                clear_ms: 500,
+                extra_conditions: if extras {
+                    vec![crate::rules::TagCondition {
+                        tag_name: "pressure".into(),
+                        op: crate::rules::CompareOp::Gt,
+                        threshold: 10.0,
+                    }]
+                } else {
+                    Vec::new()
+                },
+                logic: crate::rules::Logic::All,
+                clear_condition: if extras {
+                    Some(crate::rules::ClearCondition {
+                        tag_name: Some("cooler_on".into()),
+                        op: crate::rules::CompareOp::Lt,
+                        threshold: 75.0,
+                    })
+                } else {
+                    None
+                },
+                action: crate::rules::RuleAction::Log {
+                    message: "hot".to_string(),
+                },
+                tenant_id: "default".into(),
+            }
+        };
+
+        let with_extras = make_rule("rx", true);
+        let plain = make_rule("rd", false);
+        let snap = Snapshot {
+            version: SNAPSHOT_VERSION,
+            nodes: vec![],
+            rules: vec![with_extras.clone(), plain.clone()],
+            ..Default::default()
+        };
+        save(&path, &snap).await.expect("save");
+        let loaded = load(&path).await.expect("load").expect("some");
+        assert_eq!(loaded.rules.len(), 2);
+
+        // 带 extras：逐字段还原
+        let back = loaded
+            .rules
+            .iter()
+            .find(|r| r.id == "rx")
+            .expect("extras rule loaded");
+        assert_eq!(back, &with_extras, "extras 规则应逐字段还原相等");
+        assert_eq!(back.extra_conditions.len(), 1);
+        assert_eq!(back.extra_conditions[0].tag_name, "pressure");
+        assert_eq!(back.logic, crate::rules::Logic::All);
+        assert_eq!(
+            back.clear_condition.as_ref().unwrap().tag_name.as_deref(),
+            Some("cooler_on")
+        );
+        assert_eq!(back.clear_condition.as_ref().unwrap().threshold, 75.0);
+
+        // 全缺省：extra 列为 NULL，还原为全缺省 Rule
+        let back_plain = loaded
+            .rules
+            .iter()
+            .find(|r| r.id == "rd")
+            .expect("plain rule loaded");
+        assert_eq!(back_plain, &plain, "全缺省规则应还原相等");
+
+        // 直查 extra 列：带 extras 存 JSON、全缺省存 NULL
+        {
+            let conn = Connection::open(&path).unwrap();
+            let extras_col: Option<String> = conn
+                .query_row("SELECT extra FROM rules WHERE id = 'rx'", [], |r| r.get(0))
+                .unwrap();
+            assert!(extras_col.is_some(), "带 extras 的规则必须存 JSON");
+            let plain_col: Option<String> = conn
+                .query_row("SELECT extra FROM rules WHERE id = 'rd'", [], |r| r.get(0))
+                .unwrap();
+            assert!(plain_col.is_none(), "全缺省规则必须存 NULL（旧行紧凑）");
+        }
+
+        // rule_extra_json 辅助直测：全缺省 → None；带 extras → Some(json) 且可还原
+        assert_eq!(rule_extra_json(&plain), None);
+        let json = rule_extra_json(&with_extras).expect("extras → Some");
+        let parsed: crate::rules::RuleExtras = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.extra_conditions, with_extras.extra_conditions);
+        assert_eq!(parsed.logic, with_extras.logic);
+        assert_eq!(parsed.clear_condition, with_extras.clear_condition);
 
         cleanup_all(&path);
     }

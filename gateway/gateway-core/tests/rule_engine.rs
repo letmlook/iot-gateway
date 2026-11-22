@@ -152,6 +152,9 @@ fn rule(id: &str, env: &Env, op: CompareOp, threshold: f64, value: f64) -> Rule 
         condition: RuleCondition { op, threshold },
         for_ms: 0,
         clear_ms: 0,
+        extra_conditions: Vec::new(),
+        logic: gateway_core::Logic::All,
+        clear_condition: None,
         action: RuleAction::WriteTag {
             tag_name: "heater".to_string(),
             value,
