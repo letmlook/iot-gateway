@@ -1159,4 +1159,251 @@ mod tests {
         };
         assert!(validate_policy(&p).is_ok());
     }
+
+    // ===== Property tests（T5 质量纵深）=====
+    //
+    // 不引入 proptest/quickcheck 依赖：用确定性 xorshift 伪随机批量生成输入，
+    // 对文件头「对外承诺」语义的不变量逐条断言。种子固定 → 失败可重现。
+
+    struct PropRng(u64);
+
+    impl PropRng {
+        fn new(seed: u64) -> Self {
+            Self(seed | 1) // xorshift 全零态是吸收态，保证非零种子
+        }
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        /// [lo, hi) 内的有限 f64
+        fn f64_range(&mut self, lo: f64, hi: f64) -> f64 {
+            lo + (self.next_u64() as f64 / u64::MAX as f64) * (hi - lo)
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next_u64() % n
+        }
+    }
+
+    #[test]
+    fn prop_should_report_absolute_deadband_two_sides() {
+        // 性质（绝对死区，db>0）：|new-base| <= db 必抑制；|new-base| > db 必上报
+        let mut rng = PropRng::new(0xF100_0001);
+        for _ in 0..2000 {
+            let base = rng.f64_range(-1e6, 1e6);
+            let db = rng.f64_range(1e-3, 1e5);
+            let inside = rng.f64_range(-db, db); // |Δ| <= db
+            let outside = db + rng.f64_range(1e-3, db); // |Δ| > db
+            assert!(
+                !should_report(base + inside, Some(base), Some(db), None),
+                "死区内必须抑制: base={base} db={db} new={}",
+                base + inside
+            );
+            assert!(
+                should_report(base + outside, Some(base), Some(db), None),
+                "死区外必须上报: base={base} db={db} new={}",
+                base + outside
+            );
+        }
+    }
+
+    #[test]
+    fn prop_should_report_relative_deadband_two_sides() {
+        // 性质（相对死区，base != 0）：|Δ| > pct% * |base| 必上报；<= 必抑制
+        let mut rng = PropRng::new(0xF100_0002);
+        for _ in 0..2000 {
+            let base = rng.f64_range(-1e6, 1e6);
+            if base.abs() < 1.0 {
+                continue; // 避开退化基线（base==0 有专门语义，已有单测覆盖）
+            }
+            let pct = rng.f64_range(0.5, 100.0);
+            let allowed = (pct / 100.0) * base.abs();
+            let inside = rng.f64_range(-allowed, allowed);
+            let outside = allowed + rng.f64_range(1e-3, allowed.max(1.0));
+            assert!(
+                !should_report(base + inside, Some(base), None, Some(pct)),
+                "相对死区内必须抑制: base={base} pct={pct} new={}",
+                base + inside
+            );
+            assert!(
+                should_report(base + outside, Some(base), None, Some(pct)),
+                "相对死区外必须上报: base={base} pct={pct} new={}",
+                base + outside
+            );
+        }
+    }
+
+    #[test]
+    fn prop_aggregate_order_invariants() {
+        // 性质：非空样本集上 min <= avg <= max；count == len；first/last 与首尾一致；空集 → None
+        let mut rng = PropRng::new(0xF100_0003);
+        let kinds = ["avg", "min", "max", "count", "first", "last"];
+        for _ in 0..500 {
+            let n = (rng.below(50) + 1) as usize;
+            let samples: Vec<(u64, f64)> = (0..n)
+                .map(|i| (i as u64, rng.f64_range(-1e9, 1e9)))
+                .collect();
+            let vals: Vec<f64> = samples.iter().map(|(_, v)| *v).collect();
+            let min = vals.iter().cloned().reduce(f64::min).unwrap();
+            let max = vals.iter().cloned().reduce(f64::max).unwrap();
+
+            for kind in kinds {
+                let a = aggregate(kind, &samples).expect("非空样本必有聚合值");
+                match kind {
+                    "avg" => {
+                        let sum: f64 = vals.iter().sum();
+                        assert!((a - sum / n as f64).abs() <= 1e-9 * a.abs().max(1.0));
+                        assert!(min <= a && a <= max, "avg 必须落在 [min, max]");
+                    }
+                    "min" => assert_eq!(a, min),
+                    "max" => assert_eq!(a, max),
+                    "count" => assert_eq!(a, n as f64),
+                    "first" => assert_eq!(a, vals[0]),
+                    "last" => assert_eq!(a, vals[n - 1]),
+                    _ => unreachable!(),
+                }
+            }
+        }
+        assert!(aggregate("avg", &[]).is_none(), "空样本集必须返回 None");
+    }
+
+    #[test]
+    fn prop_validate_policy_binary_never_panics() {
+        // 性质：任意（含非法组合的）policy，validate_policy 要么 Ok 要么返回非空错误，绝不 panic
+        let mut rng = PropRng::new(0xF100_0004);
+        for _ in 0..1000 {
+            let pick = |r: &mut PropRng| {
+                let x = r.below(5);
+                match x {
+                    0 => None,
+                    1 => Some(r.f64_range(-1e3, 1e3)), // 含负数（非法）
+                    2 => Some(r.f64_range(0.0, 100.0)),
+                    3 => Some(f64::INFINITY),            // 非有限（非法）
+                    _ => Some(r.f64_range(-5.0, -0.01)), // 负死区（非法）
+                }
+            };
+            let nid = nid();
+            let gid = gid();
+            let kinds_pool = ["avg", "min", "bogus", ""];
+            let kinds: Vec<String> = (0..rng.below(3) + 1)
+                .map(|_| kinds_pool[rng.below(4) as usize].to_string())
+                .collect();
+            let tag_count = rng.below(3);
+            let mut names = std::collections::HashSet::<String>::new();
+            let mut tags = Vec::new();
+            for i in 0..tag_count {
+                // 一半概率构造重名（触发去重校验分支）
+                let name = if rng.below(2) == 0 && !names.is_empty() {
+                    names.iter().next().unwrap().to_string()
+                } else {
+                    let n = format!("t{i}");
+                    names.insert(n.clone());
+                    n
+                };
+                tags.push(TagDeadband {
+                    tag_name: name,
+                    deadband: pick(&mut rng),
+                    deadband_percent: pick(&mut rng),
+                });
+            }
+            let p = GroupPolicy {
+                south_node_id: nid,
+                group_id: gid,
+                mode: if rng.below(2) == 0 {
+                    FilterMode::OnChange
+                } else {
+                    FilterMode::Passthrough
+                },
+                deadband: pick(&mut rng),
+                deadband_percent: pick(&mut rng),
+                max_report_ms: rng.below(10_000),
+                window: if rng.below(2) == 0 {
+                    None
+                } else {
+                    Some(WindowPolicy {
+                        window_ms: [0, 50, 1000][rng.below(3) as usize], // 含 <100（非法）
+                        emit_ms: [0, 5, 100][rng.below(3) as usize],     // 含 <10（非法）
+                        aggregates: WindowAgg { kinds },
+                    })
+                },
+                tags,
+            };
+            match validate_policy(&p) {
+                Ok(()) => {}
+                Err(e) => assert!(!e.is_empty(), "校验失败必须带非空错误信息"),
+            }
+        }
+    }
+
+    #[test]
+    fn prop_passthrough_identity() {
+        // 性质：passthrough 模式（与无策略）对任意输入恒等透传，顺序与值都不变
+        let mut rng = PropRng::new(0xF100_0005);
+        let nid = nid();
+        let gid = gid();
+        let tid = tid();
+        let store = store_with(nid, gid, tid, "temp");
+        store.policy_insert(passthrough_policy(nid, gid));
+        with_lock(clear_all);
+        let values: Vec<(TagId, DataValue)> = (0..200)
+            .map(|_i| {
+                let v = match rng.below(3) {
+                    0 => DataValue::Float64(rng.f64_range(-1e6, 1e6)),
+                    1 => DataValue::Bool(rng.below(2) == 1),
+                    _ => DataValue::String(rng.next_u64().to_string()),
+                };
+                (tid, v)
+            })
+            .collect();
+        let expect = values.clone();
+        let out = apply(&store, nid, gid, &values, 1000);
+        assert_eq!(out.published, expect, "passthrough 必须逐值恒等透传");
+        assert!(out.synthetic.is_empty());
+        assert_eq!(out.suppressed_tags, 0);
+        assert_eq!(out.suppressed_msgs, 0);
+    }
+
+    #[test]
+    fn prop_apply_onchange_conservation() {
+        // 性质（onChange，数值点位）：published + suppressed_tags == 输入点位数（每个点位
+        // 要么发布要么抑制，不存在第三种去向）；suppressed_msgs == 1 当且仅当本批零输出
+        let mut rng = PropRng::new(0xF100_0006);
+        let nid = nid();
+        let gid = gid();
+        let tid = tid();
+        let store = store_with(nid, gid, tid, "temp");
+        let mut policy = on_change_policy(nid, gid, rng.f64_range(0.01, 50.0));
+        if rng.below(2) == 1 {
+            policy.deadband_percent = Some(rng.f64_range(1.0, 50.0));
+        }
+        if rng.below(3) == 1 {
+            policy.max_report_ms = rng.below(5000);
+        }
+        store.policy_insert(policy);
+        with_lock(clear_all);
+
+        let mut ts = 1000u64;
+        for _ in 0..300 {
+            let batch: Vec<(TagId, DataValue)> = (0..rng.below(4) + 1)
+                .map(|_| (tid, DataValue::Float64(rng.f64_range(-100.0, 100.0))))
+                .collect();
+            let expect_len = batch.len();
+            let out = apply(&store, nid, gid, &batch, ts);
+            assert_eq!(
+                out.published.len() as u64 + out.suppressed_tags,
+                expect_len as u64,
+                "每个点位必须恰好有一个去向（发布或抑制）"
+            );
+            let zero_output = out.published.is_empty() && out.synthetic.is_empty();
+            assert_eq!(
+                out.suppressed_msgs,
+                u64::from(zero_output),
+                "suppressed_msgs 必须等于「本批零输出」的指示位"
+            );
+            ts += rng.below(3000) + 1; // 单调推进，覆盖心跳区间
+        }
+    }
 }

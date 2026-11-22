@@ -657,4 +657,182 @@ mod tests {
         };
         assert!(r.validate().is_err());
     }
+
+    // ===== Property tests（T5 质量纵深）=====
+    //
+    // 不引入 proptest/quickcheck 依赖：确定性 xorshift 伪随机批量生成输入，
+    // 对模块头「对外承诺」语义的边沿触发不变量逐条断言。种子固定 → 失败可重现。
+
+    struct PropRng(u64);
+
+    impl PropRng {
+        fn new(seed: u64) -> Self {
+            Self(seed | 1) // xorshift 全零态是吸收态，保证非零种子
+        }
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        fn f64_range(&mut self, lo: f64, hi: f64) -> f64 {
+            lo + (self.next_u64() as f64 / u64::MAX as f64) * (hi - lo)
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next_u64() % n
+        }
+    }
+
+    #[test]
+    fn prop_compare_op_logical_consistency() {
+        // 性质（对任意 v,t，含 NaN/±inf）：
+        //   Ne ⇔ !Eq；Eq 对称；Ge ⇔ Gt ∨ Eq；Le ⇔ Lt ∨ Eq；
+        //   有限值上 Gt 与 Lt 互斥且随参数交换对称（Gt(v,t) ⇔ Lt(t,v)）
+        let mut rng = PropRng::new(0xE400_0001);
+        let specials = [0.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        for _ in 0..2000 {
+            let v = if rng.below(8) == 0 {
+                specials[rng.below(4) as usize]
+            } else {
+                rng.f64_range(-1e9, 1e9)
+            };
+            let t = if rng.below(8) == 0 {
+                specials[rng.below(4) as usize]
+            } else {
+                rng.f64_range(-1e9, 1e9)
+            };
+            let (gt, ge, lt, le, eq, ne) = (
+                CompareOp::Gt.eval(v, t),
+                CompareOp::Ge.eval(v, t),
+                CompareOp::Lt.eval(v, t),
+                CompareOp::Le.eval(v, t),
+                CompareOp::Eq.eval(v, t),
+                CompareOp::Ne.eval(v, t),
+            );
+            assert_eq!(ne, !eq, "Ne ⇔ !Eq: v={v} t={t}");
+            assert_eq!(CompareOp::Eq.eval(t, v), eq, "Eq 对称: v={v} t={t}");
+            assert_eq!(ge, gt || eq, "Ge ⇔ Gt ∨ Eq: v={v} t={t}");
+            assert_eq!(le, lt || eq, "Le ⇔ Lt ∨ Eq: v={v} t={t}");
+            if v.is_finite() && t.is_finite() {
+                assert_eq!(
+                    CompareOp::Gt.eval(t, v),
+                    lt,
+                    "Gt/Lt 参数交换对称: v={v} t={t}"
+                );
+                if v > t {
+                    assert!(gt && !lt && !eq, "v>t 判定: v={v} t={t}");
+                } else if v < t {
+                    assert!(lt && !gt && !eq, "v<t 判定: v={v} t={t}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn prop_advance_edge_trigger_invariants() {
+        // 性质（任意值/时间序列，for_ms/clear_ms 随机）：
+        //   1. 每步至多触发 1 次（单规则）
+        //   2. fire_count 单调不减
+        //   3. 触发当步条件必满足
+        //   4. 两次触发之间必存在「不满足步」（边沿触发语义）
+        //   5. last_value 始终等于最后推进的值
+        let mut rng = PropRng::new(0xE400_0002);
+        let threshold = rng.f64_range(50.0, 100.0);
+        for _round in 0..40 {
+            let e = RuleEngine::new();
+            let r = rule(
+                "prop",
+                if rng.below(2) == 0 {
+                    CompareOp::Gt
+                } else {
+                    CompareOp::Lt
+                },
+                threshold,
+                [0, 500, 1500][rng.below(3) as usize],
+                [0, 500, 1500][rng.below(3) as usize],
+            );
+            let mut now = 0u64;
+            let mut prev_count = 0u64;
+            let mut last_fire_step: Option<usize> = None;
+            let mut unsatisfied_since_last_fire = false;
+            for step in 0..500 {
+                let v = rng.f64_range(0.0, 200.0);
+                let fires = e.advance(std::slice::from_ref(&r), &vals(v), now);
+                let satisfied = r.condition.op.eval(v, threshold);
+
+                assert!(fires.len() <= 1, "单规则每步至多一次触发");
+                if fires.is_empty() {
+                    if !satisfied {
+                        // 「或」语义：不满足步一旦出现即保持到下次触发
+                        // （中途的满足步会打断恢复计时，但不改变「出现过不满足」的事实）
+                        unsatisfied_since_last_fire = true;
+                    }
+                } else {
+                    assert!(satisfied, "触发当步条件必满足: step={step} v={v}");
+                    let count = e.runtime("prop").fire_count;
+                    assert_eq!(count, prev_count + 1, "fire_count 必须恰好 +1");
+                    if let Some(prev) = last_fire_step {
+                        assert!(
+                            unsatisfied_since_last_fire,
+                            "两次触发之间必有不满足步（prev={prev} cur={step}）"
+                        );
+                    }
+                    last_fire_step = Some(step);
+                    unsatisfied_since_last_fire = false;
+                    prev_count = count;
+                }
+                assert_eq!(e.runtime("prop").last_value, Some(v));
+                now += rng.below(2000) + 1; // 单调时间，覆盖 for/clear 区间
+            }
+        }
+    }
+
+    #[test]
+    fn prop_for_ms_positive_blocks_immediate_fire() {
+        // 性质：for_ms > 0 时，首步（now=0，held=0）即使满足也不触发——
+        // 「持续 for_ms 才触发」在时间零点必须同样成立
+        let mut rng = PropRng::new(0xE400_0003);
+        for _ in 0..200 {
+            let e = RuleEngine::new();
+            let for_ms = rng.below(100_000) + 1; // 严格大于 0
+            let r = rule("prop", CompareOp::Gt, rng.f64_range(0.0, 100.0), for_ms, 0);
+            let v = rng.f64_range(101.0, 200.0); // 必满足
+            assert!(
+                e.advance(std::slice::from_ref(&r), &vals(v), 0).is_empty(),
+                "for_ms={for_ms} 时零点满足不得立即触发"
+            );
+        }
+    }
+
+    #[test]
+    fn prop_value_for_tag_writes_declared_type() {
+        // 性质：value_for_tag 按声明类型产出对应 DataValue 变体；
+        // 整型取值 == (v as T) 的截断语义；float64 恒等；未知/未声明类型回退 float64
+        let mut rng = PropRng::new(0xE400_0004);
+        use gateway_sdk::types::{DataValue, Tag as SdkTag, TagAttr};
+        for _ in 0..500 {
+            let v = rng.f64_range(-1e6, 1e6);
+            let case = rng.below(6);
+            let (dt, expect) = match case {
+                0 => (Some("int16"), DataValue::Int16(v as i16)),
+                1 => (Some("uint16"), DataValue::UInt16(v as u16)),
+                2 => (Some("int32"), DataValue::Int32(v as i32)),
+                3 => (Some("bool"), DataValue::Bool(v != 0.0)),
+                4 => (Some("float64"), DataValue::Float64(v)),
+                _ => (None, DataValue::Float64(v)), // 未声明 → 默认 float64
+            };
+            let tag = SdkTag {
+                id: gateway_sdk::TagId::new(),
+                group_id: GroupId::new(),
+                name: "t".to_string(),
+                address: "a".to_string(),
+                attr: TagAttr::ReadWrite,
+                data_type: dt.map(String::from),
+                description: None,
+            };
+            assert_eq!(value_for_tag(&tag, v), expect, "data_type={dt:?} v={v}");
+        }
+    }
 }
