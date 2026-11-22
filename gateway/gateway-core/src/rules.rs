@@ -418,18 +418,20 @@ pub async fn evaluate_and_fire(
     node_id: NodeId,
     group_id: GroupId,
     values: &[(gateway_sdk::TagId, gateway_sdk::types::DataValue)],
-) -> (u64, u64) {
+) -> (u64, u64, Vec<String>) {
     let rules = store.rules_by_group(node_id, group_id);
     if rules.is_empty() {
-        return (0, 0);
+        return (0, 0, Vec::new());
     }
     let numeric = numeric_values(store, values);
     let firings = engine().advance(&rules, &numeric, monotonic_ms());
 
     let mut fired = 0u64;
     let mut failed = 0u64;
+    let mut fired_rule_ids: Vec<String> = Vec::new();
     for firing in firings {
         fired += 1;
+        fired_rule_ids.push(firing.rule.id.clone());
         let rule = &firing.rule;
         match &rule.action {
             RuleAction::Log { message } => {
@@ -480,7 +482,7 @@ pub async fn evaluate_and_fire(
             }
         }
     }
-    (fired, failed)
+    (fired, failed, fired_rule_ids)
 }
 
 /// 按点位声明的数据类型把规则里的 f64 阈值转换成对应的 DataValue。

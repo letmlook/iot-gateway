@@ -68,6 +68,12 @@ pub struct DataFlowMetrics {
     pub window_emitted_msgs: AtomicU64,
     /// 按北向节点的 Lagged 条数（用于定位「是哪个北向节点在丢数据」）
     pub lagged_by_node: Arc<dashmap::DashMap<NodeId, AtomicU64>>,
+    /// 按南向节点的 poll 超时次数（定位「是哪个南向节点采集超时」）
+    pub south_poll_timeout_by_node: Arc<dashmap::DashMap<NodeId, AtomicU64>>,
+    /// 按南向节点的 poll 错误次数（定位「是哪个南向节点在报错」）
+    pub south_poll_err_by_node: Arc<dashmap::DashMap<NodeId, AtomicU64>>,
+    /// 按规则的触发次数（定位「是哪条规则在频繁触发」）
+    pub rules_fired_by_rule: Arc<dashmap::DashMap<String, AtomicU64>>,
     /// 点位级：南向 (south_node_id, group_id, tag_id) -> 发布次数
     pub published_per_tag: Arc<dashmap::DashMap<(NodeId, GroupId, TagId), AtomicU64>>,
     /// 点位级：北向 (north_node_id, south_node_id, group_id, tag_id) -> 转发次数
@@ -97,6 +103,9 @@ impl DataFlowMetrics {
             filters_suppressed_tags: AtomicU64::new(0),
             window_emitted_msgs: AtomicU64::new(0),
             lagged_by_node: Arc::new(dashmap::DashMap::new()),
+            south_poll_timeout_by_node: Arc::new(dashmap::DashMap::new()),
+            south_poll_err_by_node: Arc::new(dashmap::DashMap::new()),
+            rules_fired_by_rule: Arc::new(dashmap::DashMap::new()),
             published_per_tag: Arc::new(dashmap::DashMap::new()),
             forwarded_per_tag: Arc::new(dashmap::DashMap::new()),
         }
@@ -144,10 +153,39 @@ impl DataFlowMetrics {
             .fetch_add(skipped, Ordering::Relaxed);
     }
 
+    /// 记录某南向节点一次 poll 超时（全局计数 + 按节点维度）
+    pub fn record_south_poll_timeout(&self, south_node_id: NodeId) {
+        self.south_poll_timeout.fetch_add(1, Ordering::Relaxed);
+        self.south_poll_timeout_by_node
+            .entry(south_node_id)
+            .or_default()
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 记录某南向节点一次 poll 错误（全局计数 + 按节点维度）
+    pub fn record_south_poll_err(&self, south_node_id: NodeId) {
+        self.south_poll_err.fetch_add(1, Ordering::Relaxed);
+        self.south_poll_err_by_node
+            .entry(south_node_id)
+            .or_default()
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 记录某条规则触发一次（全局计数 + 按规则维度）
+    pub fn record_rule_fired(&self, rule_id: &str) {
+        self.rules_fired.fetch_add(1, Ordering::Relaxed);
+        self.rules_fired_by_rule
+            .entry(rule_id.to_string())
+            .or_default()
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// 清理已删除节点/组的点位级统计，避免指标 Map 只增不减造成内存缓慢增长
     pub fn forget_south_node(&self, south_node_id: NodeId) {
         self.published_per_tag.retain(|k, _| k.0 != south_node_id);
         self.forwarded_per_tag.retain(|k, _| k.1 != south_node_id);
+        self.south_poll_timeout_by_node.remove(&south_node_id);
+        self.south_poll_err_by_node.remove(&south_node_id);
     }
 
     /// 清理某南向组相关的点位级统计
@@ -169,6 +207,11 @@ impl DataFlowMetrics {
     pub fn forget_north_node(&self, north_node_id: NodeId) {
         self.forwarded_per_tag.retain(|k, _| k.0 != north_node_id);
         self.lagged_by_node.remove(&north_node_id);
+    }
+
+    /// 清理已删除规则的触发计数（Manager.rule_remove 调用，防止 map 只增不减）
+    pub fn forget_rule(&self, rule_id: &str) {
+        self.rules_fired_by_rule.remove(rule_id);
     }
 
     /// 快照：返回当前各计数的副本
@@ -197,6 +240,21 @@ impl DataFlowMetrics {
                 .lagged_by_node
                 .iter()
                 .map(|e| (*e.key(), e.value().load(Ordering::Relaxed)))
+                .collect(),
+            south_poll_timeout_by_node: self
+                .south_poll_timeout_by_node
+                .iter()
+                .map(|e| (*e.key(), e.value().load(Ordering::Relaxed)))
+                .collect(),
+            south_poll_err_by_node: self
+                .south_poll_err_by_node
+                .iter()
+                .map(|e| (*e.key(), e.value().load(Ordering::Relaxed)))
+                .collect(),
+            rules_fired_by_rule: self
+                .rules_fired_by_rule
+                .iter()
+                .map(|e| (e.key().clone(), e.value().load(Ordering::Relaxed)))
                 .collect(),
             published_per_tag: self.snapshot_published_per_tag(),
             forwarded_per_tag: self.snapshot_forwarded_per_tag(),
@@ -270,6 +328,12 @@ pub struct DataFlowMetricsSnapshot {
     pub window_emitted_msgs: u64,
     /// (北向节点, 跳过的消息条数)：定位是哪个北向节点在丢数据
     pub lagged_by_node: Vec<(NodeId, u64)>,
+    /// (南向节点, poll 超时次数)：定位是哪个南向节点采集超时
+    pub south_poll_timeout_by_node: Vec<(NodeId, u64)>,
+    /// (南向节点, poll 错误次数)：定位是哪个南向节点在报错
+    pub south_poll_err_by_node: Vec<(NodeId, u64)>,
+    /// (规则 id, 触发次数)：定位是哪条规则在频繁触发
+    pub rules_fired_by_rule: Vec<(String, u64)>,
     pub published_per_tag: Vec<TagPublishedStat>,
     pub forwarded_per_tag: Vec<TagForwardedStat>,
 }
@@ -369,5 +433,57 @@ mod tests {
         assert_eq!(crate::bus::BUS_CAPACITY, 4096);
         let m = crate::bus::Bus::with_capacity(128);
         assert_eq!(m.subscriber_count(), 0);
+    }
+
+    #[test]
+    fn poll_and_rule_events_are_attributed_per_node_and_rule() {
+        let m = DataFlowMetrics::new();
+        let a = nid();
+        let b = nid();
+
+        m.record_south_poll_timeout(a);
+        m.record_south_poll_timeout(a);
+        m.record_south_poll_timeout(b);
+        m.record_south_poll_err(b);
+
+        // 全局合计与维度归因同时正确
+        let snap = m.snapshot();
+        assert_eq!(snap.south_poll_timeout, 3);
+        assert_eq!(snap.south_poll_err, 1);
+        let count_of = |v: &[(NodeId, u64)], id: &NodeId| {
+            v.iter().find(|(n, _)| n == id).map(|(_, c)| *c).unwrap_or(0)
+        };
+        assert_eq!(count_of(&snap.south_poll_timeout_by_node, &a), 2);
+        assert_eq!(count_of(&snap.south_poll_timeout_by_node, &b), 1);
+        assert_eq!(count_of(&snap.south_poll_err_by_node, &b), 1);
+        assert_eq!(count_of(&snap.south_poll_err_by_node, &a), 0);
+
+        // 规则维度：触发计数 + 删除规则后清理（map 不只增不减）
+        let r1 = "rule-1".to_string();
+        let r2 = "rule-2".to_string();
+        m.record_rule_fired(&r1);
+        m.record_rule_fired(&r1);
+        m.record_rule_fired(&r2);
+        let snap = m.snapshot();
+        assert_eq!(snap.rules_fired, 3);
+        assert_eq!(
+            snap
+                .rules_fired_by_rule
+                .iter()
+                .find(|(id, _)| *id == r1)
+                .map(|(_, c)| *c),
+            Some(2)
+        );
+        m.forget_rule(&r1);
+        let snap = m.snapshot();
+        assert_eq!(snap.rules_fired, 3, "全局计数保留为历史总量");
+        assert!(!snap.rules_fired_by_rule.iter().any(|(id, _)| *id == r1));
+        assert!(snap.rules_fired_by_rule.iter().any(|(id, _)| *id == r2));
+
+        // 删除南向节点：清掉它的超时/错误维度记录
+        m.forget_south_node(a);
+        let snap = m.snapshot();
+        assert_eq!(count_of(&snap.south_poll_timeout_by_node, &a), 0);
+        assert_eq!(count_of(&snap.south_poll_timeout_by_node, &b), 1);
     }
 }

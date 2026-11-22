@@ -200,11 +200,12 @@ impl Manager {
         crate::rules::engine().forget(&rule_id);
     }
 
-    /// 删除规则，同时清掉它的运行期状态
+    /// 删除规则，同时清掉它的运行期状态与触发计数维度
     pub fn rule_remove(&self, id: &str) -> Option<crate::rules::Rule> {
         let removed = self.store.rule_remove(id);
         if removed.is_some() {
             crate::rules::engine().forget(id);
+            self.data_flow_metrics.forget_rule(id);
         }
         removed
     }
@@ -1245,7 +1246,7 @@ async fn poll_group_once(
     match poll_result {
         Err(_) => {
             let err_msg = format!("poll_group timeout after {} ms", poll_timeout_ms);
-            metrics.south_poll_timeout.fetch_add(1, Ordering::Relaxed);
+            metrics.record_south_poll_timeout(id);
             warn!(node_id = ?id, group_id = ?gid, "{}", err_msg);
             let mut st = south_conn.write().await;
             st.insert(
@@ -1258,10 +1259,13 @@ async fn poll_group_once(
         }
         Ok(Ok(values)) => {
             // 规则求值：无启用规则时零开销（store 查询后立即返回）
-            let (fired, failed) =
+            let (fired, failed, fired_rule_ids) =
                 crate::rules::evaluate_and_fire(store, plugin, id, gid, &values).await;
             if fired > 0 {
                 metrics.rules_fired.fetch_add(fired, Ordering::Relaxed);
+                for rid in &fired_rule_ids {
+                    metrics.record_rule_fired(rid);
+                }
             }
             if failed > 0 {
                 metrics
@@ -1362,7 +1366,7 @@ async fn poll_group_once(
             );
         }
         Ok(Err(e)) => {
-            metrics.south_poll_err.fetch_add(1, Ordering::Relaxed);
+            metrics.record_south_poll_err(id);
             let err_msg = e.to_string();
             warn!(node_id = ?id, group_id = ?gid, "poll_group error: {}", e);
             let mut st = south_conn.write().await;

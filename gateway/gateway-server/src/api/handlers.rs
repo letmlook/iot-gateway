@@ -932,6 +932,58 @@ pub async fn metrics(State(state): State<AppState>) -> (axum::http::StatusCode, 
             ));
         }
     }
+    // 维度化指标：定位「是哪个南向节点在超时/报错」「是哪条规则在频繁触发」
+    if !df.south_poll_timeout_by_node.is_empty() {
+        body.push_str(
+            "# HELP gateway_south_poll_timeout_by_node South poll_group timeouts, per south node.\n\
+             # TYPE gateway_south_poll_timeout_by_node counter\n",
+        );
+        for (nid, n) in &df.south_poll_timeout_by_node {
+            let name = state
+                .manager
+                .node_get(*nid)
+                .map(|node| node.config.name)
+                .unwrap_or_else(|| nid.0.to_string());
+            body.push_str(&format!(
+                "gateway_south_poll_timeout_by_node{{south_node=\"{}\",south_node_id=\"{}\"}} {}\n",
+                name, nid.0, n
+            ));
+        }
+    }
+    if !df.south_poll_err_by_node.is_empty() {
+        body.push_str(
+            "# HELP gateway_south_poll_err_by_node South poll_group errors, per south node.\n\
+             # TYPE gateway_south_poll_err_by_node counter\n",
+        );
+        for (nid, n) in &df.south_poll_err_by_node {
+            let name = state
+                .manager
+                .node_get(*nid)
+                .map(|node| node.config.name)
+                .unwrap_or_else(|| nid.0.to_string());
+            body.push_str(&format!(
+                "gateway_south_poll_err_by_node{{south_node=\"{}\",south_node_id=\"{}\"}} {}\n",
+                name, nid.0, n
+            ));
+        }
+    }
+    if !df.rules_fired_by_rule.is_empty() {
+        body.push_str(
+            "# HELP gateway_rules_fired_by_rule Rule firings, per rule.\n\
+             # TYPE gateway_rules_fired_by_rule counter\n",
+        );
+        for (rid, n) in &df.rules_fired_by_rule {
+            let name = state
+                .manager
+                .rule_get(rid)
+                .map(|r| r.name)
+                .unwrap_or_else(|| rid.clone());
+            body.push_str(&format!(
+                "gateway_rules_fired_by_rule{{rule=\"{}\",rule_id=\"{}\"}} {}\n",
+                name, rid, n
+            ));
+        }
+    }
     // 进程隔离模式：暴露插件子进程数量与重启次数（插件崩溃自愈的观测点）
     if let Some(loader) = &state.plugin_processes {
         body.push_str(
