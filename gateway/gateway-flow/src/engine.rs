@@ -36,6 +36,20 @@ pub fn evaluate(
     input: &GroupData,
     state: &mut FlowState,
 ) -> Result<Vec<SinkDelivery>, FlowError> {
+    evaluate_with_inject(plan, flow, input, state, None)
+}
+
+/// 断流告警注入求值（spec §4.3）：`inject = Some(ev)` 时 alarm_to_data 算子与
+/// sink_alarm sink 直接收 `Alarm(ev)`，其余节点（含 Source）无输入静默——
+/// 缺测不误触发；alarm_to_data 产出的 Data 沿图正常传播（下游 sink_north 推送）。
+/// 纯函数，下游传播复用分层循环；`inject = None` 时与 `evaluate` 逐行等价。
+pub fn evaluate_with_inject(
+    plan: &ExecutionPlan,
+    flow: &Flow,
+    input: &GroupData,
+    state: &mut FlowState,
+    inject: Option<&crate::payload::AlarmEvent>,
+) -> Result<Vec<SinkDelivery>, FlowError> {
     // node_id → 输出（port → payload 列表；MVP 算子每端口至多一条）
     let mut outputs: HashMap<Uuid, Vec<(&'static str, FlowPayload)>> = HashMap::new();
     let mut deliveries: Vec<SinkDelivery> = Vec::new();
@@ -45,28 +59,49 @@ pub fn evaluate(
             let node = plan
                 .node(flow, node_id)
                 .ok_or(FlowError::NodeNotFound(node_id))?;
-            let payload: FlowPayload = match node.kind {
-                NodeKind::Source => FlowPayload::Data(input.clone()),
-                NodeKind::Operator | NodeKind::Sink => {
-                    // MVP：每节点恰好一个输入（validate 保证）
-                    let edge = flow
-                        .graph
-                        .edges
-                        .iter()
-                        .find(|e| e.target_node_id == node_id)
-                        .ok_or_else(|| {
-                            FlowError::Validation(format!("node `{}` has no input edge", node.name))
-                        })?;
-                    let upstream = outputs
-                        .get(&edge.source_node_id)
-                        .and_then(|outs| outs.iter().find(|(port, _)| *port == edge.source_port))
-                        .map(|(_, p)| p);
-                    let Some(payload) = upstream else {
-                        // 上游该端口无输出（如 threshold 未命中 alarm 端）：本节点静默跳过
-                        continue;
-                    };
-                    payload.clone()
+            // 注入模式：告警直接送达 alarm_to_data / sink_alarm
+            let injected = match (inject, node.operator.as_deref(), node.kind) {
+                (Some(ev), Some("alarm_to_data"), NodeKind::Operator) => {
+                    Some(FlowPayload::Alarm(ev.clone()))
                 }
+                (Some(ev), Some("sink_alarm"), NodeKind::Sink) => {
+                    Some(FlowPayload::Alarm(ev.clone()))
+                }
+                _ => None,
+            };
+            let payload: Option<FlowPayload> = if let Some(p) = injected {
+                Some(p)
+            } else {
+                match node.kind {
+                    // 注入模式 Source 不输出（缺测不误触发），普通模式注入原始帧
+                    NodeKind::Source if inject.is_some() => None,
+                    NodeKind::Source => Some(FlowPayload::Data(input.clone())),
+                    NodeKind::Operator | NodeKind::Sink => {
+                        // MVP：每节点恰好一个输入（validate 保证）
+                        let edge = flow
+                            .graph
+                            .edges
+                            .iter()
+                            .find(|e| e.target_node_id == node_id)
+                            .ok_or_else(|| {
+                                FlowError::Validation(format!(
+                                    "node `{}` has no input edge",
+                                    node.name
+                                ))
+                            })?;
+                        // 上游该端口无输出（如 threshold 未命中 alarm 端、注入模式下
+                        // 上游 Source 静默）：本节点静默跳过
+                        outputs
+                            .get(&edge.source_node_id)
+                            .and_then(|outs| {
+                                outs.iter().find(|(port, _)| *port == edge.source_port)
+                            })
+                            .map(|(_, p)| p.clone())
+                    }
+                }
+            };
+            let Some(payload) = payload else {
+                continue;
             };
 
             match node.kind {

@@ -29,13 +29,26 @@ pub const OPERATOR_NAMES: [&str; 8] = [
 pub struct SourceConfig {
     pub south_node_id: Uuid,
     pub group_id: Uuid,
+    /// 断流检测超时（毫秒）；0 或缺省 = 不检测（spec §4.1）
+    #[serde(default)]
+    pub stale_timeout_ms: u64,
+    /// 断流告警等级；stale_timeout_ms > 0 时必须是 AlarmLevel 合法值
+    #[serde(default = "default_stale_level")]
+    pub stale_level: String,
+}
+
+fn default_stale_level() -> String {
+    "high".into()
 }
 
 /// Source 配置校验（publish 门禁的一部分）。
 pub fn validate_source_config(config: &serde_json::Value) -> Result<(), String> {
-    serde_json::from_value::<SourceConfig>(config.clone())
-        .map(|_| ())
-        .map_err(|e| format!("invalid source config (need south_node_id + group_id): {e}"))
+    let c: SourceConfig = serde_json::from_value(config.clone())
+        .map_err(|e| format!("invalid source config (need south_node_id + group_id): {e}"))?;
+    if c.stale_timeout_ms > 0 {
+        AlarmLevel::parse(&c.stale_level)?;
+    }
+    Ok(())
 }
 
 /// 节点端口规范（校验与编辑器面板共用）。

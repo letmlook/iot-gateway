@@ -11,7 +11,7 @@ pub mod payload;
 pub mod plan;
 pub mod validate;
 
-pub use engine::{evaluate, FlowState, SinkDelivery};
+pub use engine::{evaluate, evaluate_with_inject, FlowState, SinkDelivery};
 pub use error::FlowError;
 pub use flow::{Flow, FlowEdge, FlowGraph, FlowNode, FlowStatus, NodeKind, Position};
 pub use operators::{validate_config, OPERATOR_NAMES};
@@ -691,5 +691,132 @@ mod tests {
     #[test]
     fn dedup_validate_accepts_empty_config() {
         assert!(validate_config("deduplicate", &json!({})).is_ok());
+    }
+
+    // ---------- 断流告警注入（spec §4.3） ----------
+
+    #[test]
+    fn inject_reaches_alarm_to_data_and_sink_alarm_only() {
+        // source → threshold → { alarm→sink_alarm, normal→sink_north }，旁挂 alarm_to_data → sink_north2
+        let (flow, sa, sn) = alarm_graph();
+        let a2d = node(
+            "a2d",
+            NodeKind::Operator,
+            Some("alarm_to_data"),
+            json!({}),
+        );
+        let sn2 = node(
+            "north-sink-2",
+            NodeKind::Sink,
+            Some("sink_north"),
+            json!({"node_id": Uuid::new_v4()}),
+        );
+        let mut flow = flow;
+        flow.graph.nodes.push(a2d.clone());
+        flow.graph.nodes.push(sn2.clone());
+        flow.graph.edges.push(edge(&flow.graph.nodes[0], "out", &a2d));
+        flow.graph.edges.push(edge(&a2d, "out", &sn2));
+        let plan = ExecutionPlan::build(&flow).expect("plan");
+        let mut state = FlowState::default();
+
+        let ev = AlarmEvent {
+            level: AlarmLevel::High,
+            tag: "grp1".into(),
+            value: None,
+            threshold: Some(5000.0),
+            message: "组 grp1 超过 5 秒未上报数据".into(),
+            ts: Utc::now(),
+        };
+        let outs =
+            evaluate_with_inject(&plan, &flow, &group_data(0.0, None), &mut state, Some(&ev))
+                .expect("inject eval");
+
+        // sink_alarm 收到 Alarm(ev)
+        let to_alarm = outs.iter().find(|d| d.node_id == sa.id).expect("sink_alarm 应收到断流告警");
+        match &to_alarm.payload {
+            FlowPayload::Alarm(e) => assert_eq!(e.tag, "grp1"),
+            other => panic!("sink_alarm 应收 Alarm，实际 {other:?}"),
+        }
+        // alarm_to_data 的下游 sink_north2 收到 Data（伪源 alarms/events）
+        let to_north2 = outs.iter().find(|d| d.node_id == sn2.id).expect("alarm_to_data 下游应收到");
+        match &to_north2.payload {
+            FlowPayload::Data(gd) => {
+                assert_eq!(gd.node_name.as_deref(), Some("alarms"));
+            }
+            other => panic!("a2d 下游应收 Data，实际 {other:?}"),
+        }
+        // 注入不进入 threshold 分支：原 sink_north（threshold normal 端）无投递
+        assert!(!outs.iter().any(|d| d.node_id == sn.id), "注入模式下普通算子分支静默");
+    }
+
+    #[test]
+    fn inject_none_matches_plain_evaluate() {
+        let (flow, _sa, _sn) = alarm_graph();
+        let plan = ExecutionPlan::build(&flow).expect("plan");
+        let mut state = FlowState::default();
+        let a = evaluate(&plan, &flow, &group_data(85.0, None), &mut state).unwrap();
+        let b = evaluate_with_inject(&plan, &flow, &group_data(85.0, None), &mut state, None).unwrap();
+        assert_eq!(a.len(), b.len());
+        assert_eq!(
+            a.iter().map(|d| d.node_id).collect::<Vec<_>>(),
+            b.iter().map(|d| d.node_id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn validate_source_stale_config_and_alarm_exit() {
+        // stale_timeout_ms > 0 且 level 非法 → 校验报错
+        let src_bad = node(
+            "src",
+            NodeKind::Source,
+            None,
+            json!({"south_node_id": Uuid::new_v4(), "group_id": Uuid::new_v4(),
+                   "stale_timeout_ms": 5000, "stale_level": "nope"}),
+        );
+        let sa = node("sa", NodeKind::Sink, Some("sink_alarm"), json!({}));
+        let mut flow = alarm_graph().0;
+        flow.graph = FlowGraph {
+            nodes: vec![src_bad.clone(), sa.clone()],
+            edges: vec![edge(&src_bad, "out", &sa)],
+        };
+        let errs = validate(&flow);
+        assert!(errs.iter().any(|e| e.to_string().contains("level")), "{errs:?}");
+
+        // level 合法但图中无 sink_alarm/alarm_to_data → 拒绝发布
+        let src_ok = node(
+            "src",
+            NodeKind::Source,
+            None,
+            json!({"south_node_id": Uuid::new_v4(), "group_id": Uuid::new_v4(),
+                   "stale_timeout_ms": 5000, "stale_level": "high"}),
+        );
+        let sn = node(
+            "sn",
+            NodeKind::Sink,
+            Some("sink_north"),
+            json!({"node_id": Uuid::new_v4()}),
+        );
+        flow.graph = FlowGraph {
+            nodes: vec![src_ok.clone(), sn.clone()],
+            edges: vec![edge(&src_ok, "out", &sn)],
+        };
+        let errs = validate(&flow);
+        assert!(
+            errs.iter().any(|e| e.to_string().contains("sink_alarm/alarm_to_data")),
+            "断流告警无出口应报错: {errs:?}"
+        );
+
+        // 接上 sink_alarm 后通过；stale_timeout_ms=0 时不要求出口
+        let sa = node("sa", NodeKind::Sink, Some("sink_alarm"), json!({}));
+        flow.graph.nodes.push(sa.clone());
+        flow.graph.edges.push(edge(&src_ok, "out", &sa));
+        assert!(validate(&flow).is_empty(), "{:?}", validate(&flow));
+        // 保留原 id 换配置（struct update）：stale 关闭后无需告警出口仍应通过
+        let src_off = FlowNode {
+            config: json!({"south_node_id": Uuid::new_v4(), "group_id": Uuid::new_v4()}),
+            ..flow.graph.nodes[0].clone()
+        };
+        flow.graph.nodes[0] = src_off;
+        assert!(validate(&flow).is_empty(), "{:?}", validate(&flow));
     }
 }

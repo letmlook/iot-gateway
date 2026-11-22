@@ -1,7 +1,8 @@
 //! publish 时校验（design §3.3）：draft 保存允许不完整图，publish 才强制。
 //!
 //! 覆盖：非空图、恰好一个 Source、≥1 Sink、算子已知、算子配置合法、
-//! 边两端存在且端口名合法、每节点恰好一个输入、无环、无孤立节点。
+//! 边两端存在且端口名合法、每节点恰好一个输入、无环、无孤立节点、
+//! 断流检测配置必须有告警投递出口。
 
 use std::collections::{HashMap, HashSet};
 
@@ -136,6 +137,24 @@ pub fn validate(flow: &Flow) -> Vec<FlowError> {
                     n.name
                 )));
             }
+        }
+    }
+
+    // 断流检测配置了必须有告警投递出口（spec §五 publish 门禁）
+    let stale_on = nodes.iter().any(|n| {
+        n.kind == NodeKind::Source
+            && serde_json::from_value::<operators::SourceConfig>(n.config.clone())
+                .map(|c| c.stale_timeout_ms > 0)
+                .unwrap_or(false)
+    });
+    if stale_on {
+        let has_alarm_out = nodes
+            .iter()
+            .any(|n| matches!(n.operator.as_deref(), Some("sink_alarm") | Some("alarm_to_data")));
+        if !has_alarm_out {
+            errs.push(FlowError::Validation(
+                "stale detection is configured but the graph has no sink_alarm/alarm_to_data node to deliver the alarm".into(),
+            ));
         }
     }
 
