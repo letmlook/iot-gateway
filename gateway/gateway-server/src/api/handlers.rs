@@ -2382,6 +2382,32 @@ fn validate_rule_refs(state: &AppState, rule: &gateway_core::Rule) -> Result<(),
                 ApiError::bad_request(format!("action target tag not found: {}", tag_name))
             })?;
     }
+    // extra_conditions：每个 tag_name 都必须存在于该组（缺失 → 条件恒 false，规则静默不触发）
+    for c in &rule.extra_conditions {
+        state
+            .manager
+            .tag_get_by_name(rule.source.south_node_id, group.id, &c.tag_name)
+            .ok_or_else(|| {
+                ApiError::bad_request(format!(
+                    "extra_conditions tag not found in group: {}",
+                    c.tag_name
+                ))
+            })?;
+    }
+    // clear_condition：tag_name 为 Some 且非空才校验（None = 主点位，上面已校验过）
+    if let Some(cc) = &rule.clear_condition {
+        if let Some(name) = cc.tag_name.as_deref().filter(|n| !n.is_empty()) {
+            state
+                .manager
+                .tag_get_by_name(rule.source.south_node_id, group.id, name)
+                .ok_or_else(|| {
+                    ApiError::bad_request(format!(
+                        "clear_condition tag not found in group: {}",
+                        name
+                    ))
+                })?;
+        }
+    }
     Ok(())
 }
 
