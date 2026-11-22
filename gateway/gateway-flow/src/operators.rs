@@ -1,6 +1,6 @@
 //! MVP 算子集（design §1/§4.1）：threshold_alarm、state_change_alarm、route、
-//! alarm_to_data、sink_north、sink_alarm。脚本算子（rhai）与 rate_of_change 明确
-//! 不在 MVP（沙箱/语义专项）。
+//! alarm_to_data、sink_north、sink_alarm、rate_of_change（流算子第二批补入）。
+//! 脚本算子（rhai）明确不在 MVP（沙箱专项）。
 
 use chrono::Utc;
 use gateway_sdk::{DataValue, GroupData};
@@ -12,13 +12,14 @@ use crate::error::FlowError;
 use crate::payload::{AlarmEvent, AlarmLevel, FlowPayload};
 
 /// 算子/端点注册表（server 侧 `GET /flows/operators` 发现用，前端不硬编码——踩坑 P6 对策）。
-pub const OPERATOR_NAMES: [&str; 6] = [
+pub const OPERATOR_NAMES: [&str; 7] = [
     "threshold_alarm",
     "state_change_alarm",
     "route",
     "alarm_to_data",
     "sink_north",
     "sink_alarm",
+    "rate_of_change",
 ];
 
 /// Source 节点配置：绑定的南向 (节点, 组)。流程输入只允许来自南向组
@@ -58,6 +59,10 @@ impl PortSpec {
             "route" => PortSpec {
                 inputs: &["in"],
                 outputs: &["true", "false"],
+            },
+            "rate_of_change" => PortSpec {
+                inputs: &["in"],
+                outputs: &["alarm", "normal"],
             },
             // 告警 → 数据桥：把 Alarm 载荷转成 GroupData，交给 sink_north（MQTT/Kafka/
             // Webhook/SMTP 等北向节点）推送——告警通知渠道（蓝图 §7 Q6）的实现基础
@@ -121,6 +126,18 @@ pub fn validate_config(operator: &str, config: &serde_json::Value) -> Result<(),
             }
             Ok(())
         }
+        "rate_of_change" => {
+            let c: RateOfChangeConfig = serde_json::from_value(config.clone())
+                .map_err(|e| format!("invalid config: {e}"))?;
+            if c.tag_name.is_empty() {
+                return Err("tag_name is required".into());
+            }
+            if !(c.max_rate.is_finite() && c.max_rate > 0.0) {
+                return Err("max_rate must be a finite positive number".into());
+            }
+            AlarmLevel::parse(&c.level)?;
+            Ok(())
+        }
         "sink_north" => {
             let c: SinkNorthConfig = serde_json::from_value(config.clone())
                 .map_err(|e| format!("invalid config: {e}"))?;
@@ -172,6 +189,16 @@ pub struct RouteConfig {
     /// gt | lt | ge | le | eq | ne
     pub op: String,
     pub value: f64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RateOfChangeConfig {
+    pub tag_name: String,
+    /// 速率上限（正值，单位 = 值/秒）
+    pub max_rate: f64,
+    pub level: String,
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -290,6 +317,55 @@ pub fn eval_route(cfg: &RouteConfig, gd: &GroupData) -> (Option<FlowPayload>, Op
     }
 }
 
+/// rate_of_change 求值（spec §二）。`state`：flow 节点 id → tag_name → (上一值, 上一 ts 毫秒)。
+/// 缺值/非数值走 normal 端且不更新状态（缺测不误触发）；首见只建基线；
+/// 同时间戳视速率 0（防除零）；每次有效读数都更新基线。
+pub fn eval_rate_of_change(
+    cfg: &RateOfChangeConfig,
+    node_id: Uuid,
+    state: &mut HashMap<Uuid, HashMap<String, (f64, u64)>>,
+    gd: &GroupData,
+) -> (Option<FlowPayload>, Option<FlowPayload>) {
+    let now_ms = gd.ts.timestamp_millis().max(0) as u64;
+    let Some(v) = value_by_name(gd, &cfg.tag_name).and_then(|v| v.as_f64()) else {
+        return (None, Some(FlowPayload::Data(gd.clone())));
+    };
+    let node_state = state.entry(node_id).or_default();
+    let rate = match node_state.get(&cfg.tag_name) {
+        None => None,
+        Some(&(pv, pts)) => {
+            if now_ms == pts {
+                Some(0.0)
+            } else {
+                Some((v - pv) / ((now_ms - pts) as f64 / 1000.0))
+            }
+        }
+    };
+    node_state.insert(cfg.tag_name.clone(), (v, now_ms));
+    let over = rate.map(|r| r.abs() > cfg.max_rate).unwrap_or(false);
+    if !over {
+        return (None, Some(FlowPayload::Data(gd.clone())));
+    }
+    let r = rate.unwrap_or(0.0);
+    let event = AlarmEvent {
+        level: AlarmLevel::parse(&cfg.level).unwrap_or(AlarmLevel::Info),
+        tag: cfg.tag_name.clone(),
+        value: Some(v),
+        threshold: Some(cfg.max_rate),
+        message: cfg.message.clone().unwrap_or_else(|| {
+            format!(
+                "{}={} rate={:.3}/s crossed max {}/s",
+                cfg.tag_name, v, r, cfg.max_rate
+            )
+        }),
+        ts: Utc::now(),
+    };
+    (
+        Some(FlowPayload::Alarm(event)),
+        Some(FlowPayload::Data(gd.clone())),
+    )
+}
+
 fn display_value(v: &DataValue) -> String {
     match v {
         DataValue::String(s) => s.clone(),
@@ -362,7 +438,7 @@ pub fn evaluate_node(
     node_id: Uuid,
     config: &serde_json::Value,
     input: FlowPayload,
-    state: &mut HashMap<Uuid, HashMap<String, String>>,
+    state: &mut crate::engine::FlowState,
 ) -> Result<Vec<(&'static str, FlowPayload)>, FlowError> {
     // alarm_to_data 是唯一接受 Alarm 输入的算子（告警 → 数据桥）
     if operator == "alarm_to_data" {
@@ -404,7 +480,7 @@ pub fn evaluate_node(
         "state_change_alarm" => {
             let cfg: StateChangeConfig = serde_json::from_value(config.clone())
                 .map_err(|e| FlowError::Operator(operator.into(), e.to_string()))?;
-            let (alarm, normal) = eval_state_change(&cfg, node_id, state, &gd);
+            let (alarm, normal) = eval_state_change(&cfg, node_id, &mut state.last_values, &gd);
             let mut out = Vec::new();
             if let Some(a) = alarm {
                 out.push(("alarm", a));
@@ -424,6 +500,19 @@ pub fn evaluate_node(
             }
             if let Some(f) = f {
                 out.push(("false", f));
+            }
+            Ok(out)
+        }
+        "rate_of_change" => {
+            let cfg: RateOfChangeConfig = serde_json::from_value(config.clone())
+                .map_err(|e| FlowError::Operator(operator.into(), e.to_string()))?;
+            let (alarm, normal) = eval_rate_of_change(&cfg, node_id, &mut state.last_rate, &gd);
+            let mut out = Vec::new();
+            if let Some(a) = alarm {
+                out.push(("alarm", a));
+            }
+            if let Some(n) = normal {
+                out.push(("normal", n));
             }
             Ok(out)
         }
@@ -504,7 +593,7 @@ mod tests {
 
     #[test]
     fn evaluate_node_accepts_alarm_input_only() {
-        let mut state = HashMap::new();
+        let mut state = crate::engine::FlowState::default();
         let cfg = serde_json::json!({});
         // Alarm 输入 → ("out", Data)
         let out = evaluate_node(

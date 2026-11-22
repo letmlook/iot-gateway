@@ -22,7 +22,7 @@ pub use validate::validate;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
+    use chrono::{TimeZone, Utc};
     use gateway_sdk::{DataValue, GroupData, GroupId, NodeId, TagId};
     use serde_json::json;
     use std::collections::HashMap;
@@ -454,6 +454,163 @@ mod tests {
         assert!(validate_config(
             "threshold_alarm",
             &json!({"tag_name":"t","high":1.0,"low":0.0,"level":"critical"})
+        )
+        .is_ok());
+    }
+
+    // ---------- rate_of_change ----------
+
+    /// 固定时间戳的 group_data（rate 测试用；temperature 一路 + 可选 switch）
+    fn group_data_ts(temp: f64, ts_ms: i64) -> GroupData {
+        let mut gd = group_data(temp, None);
+        gd.ts = Utc.timestamp_millis_opt(ts_ms).unwrap();
+        gd
+    }
+
+    fn rate_graph() -> (Flow, FlowNode, FlowNode) {
+        // source → rate_of_change(temperature, max 1.0/s) → { sink_alarm(alarm), sink_north(normal) }
+        let src = node("src", NodeKind::Source, None, source_config());
+        let rc = node(
+            "rc",
+            NodeKind::Operator,
+            Some("rate_of_change"),
+            json!({"tag_name":"temperature","max_rate":1.0,"level":"medium"}),
+        );
+        let sa = node("alarm-sink", NodeKind::Sink, Some("sink_alarm"), json!({}));
+        let sn = node(
+            "north-sink",
+            NodeKind::Sink,
+            Some("sink_north"),
+            json!({"node_id": Uuid::new_v4()}),
+        );
+        let flow = Flow {
+            graph: FlowGraph {
+                nodes: vec![src.clone(), rc.clone(), sa.clone(), sn.clone()],
+                edges: vec![
+                    edge(&src, "out", &rc),
+                    edge(&rc, "alarm", &sa),
+                    edge(&rc, "normal", &sn),
+                ],
+            },
+            ..alarm_graph().0
+        };
+        (flow, sa, sn)
+    }
+
+    #[test]
+    fn rate_first_sighting_never_triggers() {
+        let (flow, sa, _sn) = rate_graph();
+        let plan = ExecutionPlan::build(&flow).expect("plan");
+        let mut state = FlowState::default();
+        let outs = evaluate(&plan, &flow, &group_data_ts(10.0, 1_000), &mut state).unwrap();
+        assert!(!outs.iter().any(|d| d.node_id == sa.id), "首见只建基线");
+    }
+
+    #[test]
+    fn rate_over_limit_triggers_both_directions() {
+        let (flow, sa, _sn) = rate_graph();
+        let plan = ExecutionPlan::build(&flow).expect("plan");
+        let mut state = FlowState::default();
+        // 基线 10.0 @1s
+        evaluate(&plan, &flow, &group_data_ts(10.0, 1_000), &mut state).unwrap();
+        // 上升：+5 in 2s = 2.5/s > 1.0 → 触发
+        let outs = evaluate(&plan, &flow, &group_data_ts(15.0, 3_000), &mut state).unwrap();
+        let hit = outs
+            .iter()
+            .find(|d| d.node_id == sa.id)
+            .expect("上升超速应触发");
+        match &hit.payload {
+            FlowPayload::Alarm(e) => {
+                assert_eq!(e.tag, "temperature");
+                assert_eq!(e.value, Some(15.0));
+                assert_eq!(e.threshold, Some(1.0));
+                assert_eq!(e.level, AlarmLevel::Medium);
+                assert!(
+                    e.message.contains("rate=2.500/s"),
+                    "默认消息含速率: {}",
+                    e.message
+                );
+            }
+            other => panic!("alarm 端应带 Alarm，实际 {other:?}"),
+        }
+        // 基线更新为 15.0 @3s；下降：−4 in 1s = 4/s → |rate| 触发
+        let outs = evaluate(&plan, &flow, &group_data_ts(11.0, 4_000), &mut state).unwrap();
+        assert!(outs.iter().any(|d| d.node_id == sa.id), "下降超速也应触发");
+    }
+
+    #[test]
+    fn rate_within_limit_passes_normal() {
+        let (flow, sa, sn) = rate_graph();
+        let plan = ExecutionPlan::build(&flow).expect("plan");
+        let mut state = FlowState::default();
+        evaluate(&plan, &flow, &group_data_ts(10.0, 1_000), &mut state).unwrap();
+        // +1 in 2s = 0.5/s ≤ 1.0 → 不触发，normal 端透传
+        let outs = evaluate(&plan, &flow, &group_data_ts(11.0, 3_000), &mut state).unwrap();
+        assert!(!outs.iter().any(|d| d.node_id == sa.id));
+        assert!(outs.iter().any(|d| d.node_id == sn.id), "normal 端仍透传");
+    }
+
+    #[test]
+    fn rate_missing_value_goes_normal_and_keeps_state() {
+        let (flow, sa, _sn) = rate_graph();
+        let plan = ExecutionPlan::build(&flow).expect("plan");
+        let mut state = FlowState::default();
+        evaluate(&plan, &flow, &group_data_ts(10.0, 1_000), &mut state).unwrap();
+        // 帧2：switch-only 帧（无 temperature）→ normal 端、不触发
+        let mut gd = group_data(0.0, Some("1"));
+        gd.values.retain(|(tid, _)| {
+            gd.tag_names.as_ref().unwrap().get(tid).map(String::as_str) != Some("temperature")
+        });
+        let outs = evaluate(&plan, &flow, &gd, &mut state).unwrap();
+        assert!(!outs.iter().any(|d| d.node_id == sa.id), "缺值不触发");
+        // 帧3：temperature 恢复 @2s，相对**帧1基线**算速率（缺值帧未更新状态）
+        // (12−10)/1s = 2/s > 1.0 → 触发
+        let outs = evaluate(&plan, &flow, &group_data_ts(12.0, 2_000), &mut state).unwrap();
+        assert!(
+            outs.iter().any(|d| d.node_id == sa.id),
+            "缺值帧不应更新基线"
+        );
+    }
+
+    #[test]
+    fn rate_same_timestamp_is_zero_rate() {
+        let (flow, sa, _sn) = rate_graph();
+        let plan = ExecutionPlan::build(&flow).expect("plan");
+        let mut state = FlowState::default();
+        evaluate(&plan, &flow, &group_data_ts(10.0, 1_000), &mut state).unwrap();
+        // 同 ts 值跳变：速率按 0 处理，不触发
+        let outs = evaluate(&plan, &flow, &group_data_ts(99.0, 1_000), &mut state).unwrap();
+        assert!(
+            !outs.iter().any(|d| d.node_id == sa.id),
+            "同 ts 不除零不触发"
+        );
+    }
+
+    #[test]
+    fn rate_validate_rejects_bad_config() {
+        assert!(validate_config(
+            "rate_of_change",
+            &json!({"tag_name":"t","max_rate":-1.0,"level":"high"})
+        )
+        .is_err());
+        assert!(validate_config(
+            "rate_of_change",
+            &json!({"tag_name":"","max_rate":1.0,"level":"high"})
+        )
+        .is_err());
+        assert!(validate_config(
+            "rate_of_change",
+            &json!({"tag_name":"t","max_rate":f64::NAN,"level":"high"})
+        )
+        .is_err());
+        assert!(validate_config(
+            "rate_of_change",
+            &json!({"tag_name":"t","max_rate":1.0,"level":"nope"})
+        )
+        .is_err());
+        assert!(validate_config(
+            "rate_of_change",
+            &json!({"tag_name":"t","max_rate":1.0,"level":"high"})
         )
         .is_ok());
     }
