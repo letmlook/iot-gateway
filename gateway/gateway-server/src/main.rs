@@ -48,47 +48,68 @@ fn plugin_host_bin(config: &crate::config::Config) -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from(name))
 }
 
-/// 注册内置静态插件（无 plugins 目录 / 目录为空 / 加载失败时的兜底，也是默认部署形态）。
-fn register_builtin_plugins(mgr: &mut gateway_core::Manager) {
-    // 2026-10-05 批：全部 8 个新插件均已启用 builtin 注册。
-    use plugin_bacnet::BacnetPlugin;
-    use plugin_ethernet_ip::EthernetIpPlugin;
-    use plugin_http::HttpPlugin;
-    use plugin_iec104::Iec104Plugin;
-    use plugin_influxdb::InfluxDbPlugin;
-    use plugin_modbus_rtu::ModbusRtuPlugin;
-    use plugin_modbus_tcp::ModbusTcpPlugin;
-    use plugin_mqtt::MqttPlugin;
-    use plugin_s7::S7Plugin;
-    use plugin_sim::SimPlugin;
-    mgr.register_south("sim", Arc::new(SimPlugin::new()));
-    mgr.register_south("s7", Arc::new(S7Plugin::new()));
-    mgr.register_south("bacnet", Arc::new(BacnetPlugin::new()));
-    mgr.register_south("ethernet-ip", Arc::new(EthernetIpPlugin::new()));
-    mgr.register_south("iec104", Arc::new(Iec104Plugin::new()));
-    mgr.register_south("modbus-tcp", Arc::new(ModbusTcpPlugin::new()));
-    mgr.register_south("modbus-rtu", Arc::new(ModbusRtuPlugin::new()));
+/// 注册内置静态插件：默认部署形态的插件来源，也是 .so 动态加载后的**逐插件**兜底。
+///
+/// 同名插件已注册（动态 .so 加载成功）时跳过——动态库优先，builtin 只补缺。
+/// 返回实际注册的插件个数，供调用点决定是否打日志。
+///
+/// 缺陷修复（2026-11-23，rc.5 镜像验证发现）：此前兜底是「全或无」——只有动态加载
+/// **一个插件都没有**时才整批注册 builtin。rc.5 镜像里 mqtt 等部分 .so 成功加载，
+/// 而插件 ffi.rs 为占位符导致加载失败的北向（http/influxdb/tdengine）就永远拿不到
+/// 实现；开发形态（无 plugins 目录）builtin 全量注册，该缺陷只在容器形态暴露。
+fn register_builtin_plugins(mgr: &mut gateway_core::Manager) -> usize {
+    // 缺哪个补哪个：同名已注册（.so 加载成功）时返回 0
+    macro_rules! reg_south {
+        ($name:literal, $ty:path) => {{
+            if mgr.south_plugin($name).is_none() {
+                mgr.register_south($name, Arc::new(<$ty>::new()));
+                1
+            } else {
+                0
+            }
+        }};
+    }
+    macro_rules! reg_north {
+        ($name:literal, $ty:path) => {{
+            if mgr.north_plugin($name).is_none() {
+                mgr.register_north($name, Arc::new(<$ty>::new()));
+                1
+            } else {
+                0
+            }
+        }};
+    }
+
+    let mut n = 0;
+    n += reg_south!("sim", plugin_sim::SimPlugin);
+    n += reg_south!("s7", plugin_s7::S7Plugin);
+    n += reg_south!("bacnet", plugin_bacnet::BacnetPlugin);
+    n += reg_south!("ethernet-ip", plugin_ethernet_ip::EthernetIpPlugin);
+    n += reg_south!("iec104", plugin_iec104::Iec104Plugin);
+    n += reg_south!("modbus-tcp", plugin_modbus_tcp::ModbusTcpPlugin);
+    n += reg_south!("modbus-rtu", plugin_modbus_rtu::ModbusRtuPlugin);
     // D 级审计（2026-11-22）：opcua 此前只能 .so 动态加载，默认部署形态下不可用。
     // 纳入 builtin（同 kafka 口径：默认构建为 stub——poll_group 恒为假零已由
     // config_schema 的 [STUB] 标注声明；`--features opcua-client` 时注册的就是
     // 完整客户端）。virb 保持 ffi-only（无 stub 形态，设计使然）。
-    mgr.register_south("opcua", Arc::new(plugin_opcua::OpcuaPlugin::new()));
+    n += reg_south!("opcua", plugin_opcua::OpcuaPlugin);
     // 北向
-    mgr.register_north("mqtt", Arc::new(MqttPlugin::new()));
-    mgr.register_north("http", Arc::new(HttpPlugin::new()));
-    mgr.register_north("influxdb", Arc::new(InfluxDbPlugin::new()));
-    mgr.register_north("tdengine", Arc::new(plugin_tdengine::TdEnginePlugin::new()));
+    n += reg_north!("mqtt", plugin_mqtt::MqttPlugin);
+    n += reg_north!("http", plugin_http::HttpPlugin);
+    n += reg_north!("influxdb", plugin_influxdb::InfluxDbPlugin);
+    n += reg_north!("tdengine", plugin_tdengine::TdEnginePlugin);
     // 缺陷④（docs/联调记录-2026-10-07.md §5.4）：kafka 纳入 builtin——默认构建
     // （无 kafka-client feature）注册的是 stub 模式：节点可创建、connection_status
     // 可观测（dropped_no_client 计数），config_schema 明确标注「当前构建为 stub，
     // 需 kafka-client feature 才真实发送」。kafka-client 不进默认 feature（rdkafka
     // 为重 C 库）；以 `--features kafka-client` 构建时这里注册的就是完整生产者客户端。
-    mgr.register_north("kafka", Arc::new(plugin_kafka::KafkaPlugin::new()));
+    n += reg_north!("kafka", plugin_kafka::KafkaPlugin);
     // 告警通知渠道（蓝图 §7 Q6，2026-11-21）：SMTP 北向。默认构建为 stub（同 kafka
     // 模式：schema 明确标注、connection_status 可观测）；`--features smtp-client`
     // 构建时注册的就是完整 lettre 发送客户端。与 flow 的 alarm_to_data 算子配合：
     // source → threshold_alarm → alarm_to_data → sink_north(smtp)。
-    mgr.register_north("smtp", Arc::new(plugin_smtp::SmtpPlugin::new()));
+    n += reg_north!("smtp", plugin_smtp::SmtpPlugin);
+    n
 }
 
 #[tokio::main]
@@ -121,22 +142,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 }
                 Err(e) => tracing::warn!("isolated plugin load failed: {}", e),
             }
-            if mgr.south_plugins().is_empty() && mgr.north_plugins().is_empty() {
-                tracing::warn!(
-                    "no plugins loaded from {} (isolated), using built-in",
+            // 逐插件补齐 builtin（同名 .so 已加载的让位）——不再是「全或无」
+            let added = register_builtin_plugins(&mut mgr);
+            if added > 0 {
+                tracing::info!(
+                    "{} builtin plugin(s) registered as fallback for names missing from {}",
+                    added,
                     config.plugins_dir.display()
                 );
-                register_builtin_plugins(&mut mgr);
             }
         } else if let Ok(loader) = PluginLoader::load(&config.plugins_dir, &mut mgr) {
             loader_opt = Some(loader);
-            // 若目录下未加载到任何插件（如空目录或仅有非插件库），则补充内置插件供管理页展示与使用
-            if mgr.south_plugins().is_empty() && mgr.north_plugins().is_empty() {
+            // 逐插件补齐 builtin（同名 .so 已加载的让位）——不再是「全或无」
+            let added = register_builtin_plugins(&mut mgr);
+            if added > 0 {
                 tracing::info!(
-                    "no plugins loaded from {}, using built-in",
+                    "{} builtin plugin(s) registered as fallback for names missing from {}",
+                    added,
                     config.plugins_dir.display()
                 );
-                register_builtin_plugins(&mut mgr);
             }
         } else {
             tracing::warn!(
