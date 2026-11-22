@@ -124,6 +124,8 @@ engine.set_max_array_size(64);
 - 求值错误（编译期错误已在 publish 拦截，运行期错误如对缺位点位的访问、类型不匹配、**超操作数**）或返回值非 bool：**走 false 端**；
 - 日志：同节点同 AST **首次**错误 `warn!`，后续同类错误 `debug!`（防高频采集日志爆炸），求值成功后重置——实现为 AST 缓存条目带 `warned: bool` 标志。
 
+**实施修正（终审实证）**：rhai 1.27 对 map 缺失属性的点访问得 UNIT，`tags.ghost > 10` 这类比较**静默判 false**（返回 Ok(false)——非求值错误、无日志）；上文「首错 warn 后续 debug」仅覆盖真运行期错误（如对 UNIT 做算术运算、类型不匹配、超操作数）。点位拼写错误因此无任何观测信号，观测增强列入 backlog。
+
 ### 4.5 AST 缓存
 
 `FlowState` 新增 `script_asts: HashMap<Uuid, CachedScript>`（键 = flow 节点 id）：

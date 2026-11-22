@@ -271,6 +271,9 @@ pub fn rhai_engine() -> rhai::Engine {
     engine.set_max_expr_depths(32, 32); // 防深嵌套表达式
     engine.set_max_string_size(4_096); // 防内存爆炸
     engine.set_max_array_size(64);
+    // 已发布脚本不得向进程 stdout/stderr 输出：print() / debug() 静默丢弃
+    engine.on_print(|_| {});
+    engine.on_debug(|_, _, _| {});
     engine
 }
 
@@ -494,8 +497,13 @@ fn tags_map(gd: &GroupData) -> rhai::Map {
     map
 }
 
-/// expr_route 求值（spec §4.4）：Ok(bool) 按值路由 true/false 端；
-/// 求值错误（缺位 tag、类型不匹配、超操作数）或非 bool 返回一律走 false 端（缺测不误触发）。
+/// expr_route 求值（spec §4.4）：Ok(bool) 按值路由 true/false 端。
+/// 注意两种 false 端来源机制不同：
+/// - 对 `tags` map 缺失属性的点访问**静默判 false**（rhai 中缺位属性得 UNIT，
+///   `tags.ghost > 10` 这类比较返回 Ok(false)——无错误、无日志）；
+/// - 真运行期错误（如对 UNIT 做算术运算、类型不匹配、超操作数上限）走 Err 路径，
+///   同节点同 AST 首次 warn!、后续 debug!（防高频采集日志爆炸）。
+/// 非 bool 返回也走 false 端（缺测不误触发）。
 /// AST 缓存：expression 变更即重编译并替换条目。
 pub fn eval_expr_route(
     cfg: &ExprRouteConfig,
@@ -521,6 +529,7 @@ pub fn eval_expr_route(
                 );
             }
             Err(e) => {
+                state.remove(&node_id); // 清残留旧条目：旧表达式已失效，防旧 AST 继续被求值
                 // publish 门禁已拦语法错误；运行期防御走 false 端
                 tracing::debug!(node = %node_id, "expr_route compile error: {e}");
                 return (None, Some(FlowPayload::Data(gd.clone())));
@@ -911,7 +920,8 @@ mod tests {
         let mut state = crate::engine::FlowState::default();
         let nid = Uuid::new_v4();
         let gd = group_data_f(60.0);
-        // 缺位 tag 访问 → 运行期错误 → false 端
+        // 缺位属性点访问静默判 false（rhai 中缺位属性得 UNIT，比较返回 Ok(false)，
+        // 非求值错误、无日志）；断言只验证 false 端，机制无关
         let cfg = ExprRouteConfig {
             expression: "tags.ghost > 10".into(),
         };
