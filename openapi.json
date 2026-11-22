@@ -977,6 +977,76 @@
         }
       }
     },
+    "/api/history/export": {
+      "post": {
+        "tags": [
+          "history"
+        ],
+        "summary": "历史报表导出：多序列原始精度样本，长表 CSV 下载（蓝图 T2 顺延项）。\nPOST 仅因参数结构（多三元组列表），语义纯读，Viewer 可用（required_role 特判）；\n行数超 EXPORT_MAX_ROWS（50 万）返回 400 而非截断，避免产出误导性报表。",
+        "operationId": "history_export",
+        "requestBody": {
+          "description": "导出请求：序列列表（≤50）+ 时间窗毫秒（from 缺省 to-1h，to 缺省当前）",
+          "content": {
+            "": {
+              "example": {
+                "from": 1700000000000,
+                "series": [
+                  {
+                    "group_id": "<uuid>",
+                    "node_id": "<uuid>",
+                    "tag": "temperature"
+                  },
+                  {
+                    "group_id": "<uuid>",
+                    "node_id": "<uuid>",
+                    "tag": "humidity"
+                  }
+                ],
+                "to": 1700003600000
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "长表 CSV（ts,node_id,group_id,tag,value，ts 为 ISO8601 UTC）",
+            "headers": {
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "attachment; filename=history-export-<ts>.csv"
+              }
+            }
+          },
+          "400": {
+            "description": "参数非法 / 行数超限 / 历史存储未启用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/api/history/series": {
       "get": {
         "tags": [

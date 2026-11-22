@@ -1489,6 +1489,36 @@ fn history_series() {}
 )]
 fn history_series_list() {}
 
+/// 历史报表导出：多序列原始精度样本，长表 CSV 下载（蓝图 T2 顺延项）。
+/// POST 仅因参数结构（多三元组列表），语义纯读，Viewer 可用（required_role 特判）；
+/// 行数超 EXPORT_MAX_ROWS（50 万）返回 400 而非截断，避免产出误导性报表。
+#[utoipa::path(
+    post,
+    path = "/api/history/export",
+    tag = "history",
+    security(("bearerAuth" = [])),
+    request_body(
+        description = "导出请求：序列列表（≤50）+ 时间窗毫秒（from 缺省 to-1h，to 缺省当前）",
+        example = json!({
+            "series": [
+                {"node_id": "<uuid>", "group_id": "<uuid>", "tag": "temperature"},
+                {"node_id": "<uuid>", "group_id": "<uuid>", "tag": "humidity"}
+            ],
+            "from": 1700000000000_i64,
+            "to": 1700003600000_i64
+        })
+    ),
+    responses(
+        (status = 200, description = "长表 CSV（ts,node_id,group_id,tag,value，ts 为 ISO8601 UTC）",
+            headers(
+                ("Content-Disposition" = String, description = "attachment; filename=history-export-<ts>.csv"),
+            )),
+        (status = 400, description = "参数非法 / 行数超限 / 历史存储未启用", body = Error),
+        (status = 401, description = "未认证", body = Error),
+    )
+)]
+fn history_export() {}
+
 /// 历史存储统计：行数、磁盘占用、时间范围与配置。
 #[utoipa::path(
     get,
@@ -1969,6 +1999,7 @@ fn resolve_alarm() {}
         delete_policy,
         history_series,
         history_series_list,
+        history_export,
         history_stats,
         list_flows,
         create_flow,
@@ -2161,6 +2192,7 @@ mod tests {
         "DELETE /api/nodes/{id}/groups/{gid}/policy",
         "GET /api/history/series",
         "GET /api/history/series/list",
+        "POST /api/history/export",
         "GET /api/history/stats",
         "GET /api/flows",
         "POST /api/flows",

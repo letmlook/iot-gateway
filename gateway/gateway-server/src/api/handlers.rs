@@ -2569,6 +2569,117 @@ pub async fn history_stats(State(state): State<AppState>) -> Json<serde_json::Va
     Json(v)
 }
 
+// ---------- 历史报表导出（蓝图 T2 顺延项，2026-11-22 B 级缺口补齐） ----------
+
+#[derive(Deserialize)]
+pub struct HistoryExportSeries {
+    pub node_id: String,
+    pub group_id: String,
+    pub tag: String,
+}
+
+#[derive(Deserialize)]
+pub struct HistoryExportReq {
+    pub series: Vec<HistoryExportSeries>,
+    /// 起始时间（毫秒，可选；默认 to - 1h）
+    pub from: Option<i64>,
+    /// 结束时间（毫秒，可选；默认当前）
+    pub to: Option<i64>,
+}
+
+/// CSV 字段转义（RFC 4180）：含分隔符/引号/换行的字段加引号并翻倍内部引号。
+/// 点位名/节点名是用户自由输入，转义缺失会让含逗号的名称把报表列挤歪。
+fn csv_field(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// 毫秒时间戳 → ISO8601 UTC（报表可读、Excel/pandas 直收）；越界值回退原始数字不丢行
+fn csv_ts(ts_ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ts_ms)
+        .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .unwrap_or_else(|| ts_ms.to_string())
+}
+
+/// 历史报表导出：多序列**原始精度**样本（不做降采样——报表要真值，画图才降采样），
+/// 长表 CSV（ts,node_id,group_id,tag,value；各序列采集周期不同，宽表对齐需引入插值
+/// 语义，透视留给报表工具）。行数超 EXPORT_MAX_ROWS 直接报错而非截断——截断会产出
+/// 「看起来完整」的误导报表。POST 仅因参数结构（多三元组列表），语义纯读，
+/// 权限与 history 查询同级（见 required_role 的 history/export 分支）。
+pub async fn history_export(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<crate::api::AuthContext>,
+    Json(body): Json<HistoryExportReq>,
+) -> Result<axum::response::Response, ApiError> {
+    if !state.config.history_enabled {
+        return Err(ApiError::bad_request(
+            "history storage is disabled; set GATEWAY_HISTORY_ENABLED=1 to enable it",
+        ));
+    }
+    if body.series.is_empty() {
+        return Err(ApiError::bad_request("series must not be empty"));
+    }
+    if body.series.len() > 50 {
+        return Err(ApiError::bad_request("at most 50 series per export"));
+    }
+    let to = body.to.unwrap_or_else(now_ms);
+    let from = body.from.unwrap_or(to - 3_600_000);
+    if from >= to {
+        return Err(ApiError::bad_request("from must be earlier than to"));
+    }
+    let tenant = crate::api::scope::history_tenant_filter(&ctx.tenant);
+    let refs: Vec<crate::history::ExportSeriesRef> = body
+        .series
+        .into_iter()
+        .map(|s| crate::history::ExportSeriesRef {
+            node_id: s.node_id,
+            group_id: s.group_id,
+            tag: s.tag,
+        })
+        .collect();
+    let db = state.config.history_db();
+    // SQLite 是阻塞 API：放到阻塞线程池，别占住 async worker（同 history_series）
+    let rows = tokio::task::spawn_blocking(move || {
+        crate::history::export_samples(&db, &refs, from, to, &tenant)
+    })
+    .await
+    .map_err(|e| ApiError::bad_request(e.to_string()))?
+    .map_err(ApiError::bad_request)?;
+
+    let mut csv = String::with_capacity(32 + rows.len() * 48);
+    csv.push_str("ts,node_id,group_id,tag,value\n");
+    for r in &rows {
+        csv.push_str(&csv_ts(r.ts_ms));
+        csv.push(',');
+        csv.push_str(&csv_field(&r.node_id));
+        csv.push(',');
+        csv.push_str(&csv_field(&r.group_id));
+        csv.push(',');
+        csv.push_str(&csv_field(&r.tag));
+        csv.push(',');
+        csv.push_str(&r.value.to_string());
+        csv.push('\n');
+    }
+    let filename = format!(
+        "history-export-{}.csv",
+        chrono::Utc::now().format("%Y%m%d-%H%M%S")
+    );
+    let mut res = (StatusCode::OK, csv).into_response();
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("text/csv; charset=utf-8"),
+    );
+    res.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        header::HeaderValue::try_from(format!("attachment; filename=\"{}\"", filename))
+            .unwrap_or(header::HeaderValue::from_static("attachment")),
+    );
+    Ok(res)
+}
+
 /// 点位实时值：**来自采集缓存，不访问设备**。
 ///
 /// 管理台的刷新按钮/定时刷新走这里；需要立即读取设备时用 `/values/read`（会真实下发）。

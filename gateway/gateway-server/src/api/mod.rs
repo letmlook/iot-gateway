@@ -155,6 +155,11 @@ fn required_role(method: &axum::http::Method, path: &str) -> crate::users::UserR
     if p.ends_with("/write_tags") {
         return Operator;
     }
+    // 历史报表导出：POST 仅因多序列参数结构，语义是纯读（原始样本查询的下载形态），
+    // 与 history 查询同级放行 Viewer；不落默认分支的话 POST 会被要求 Operator
+    if p == "history/export" {
+        return Viewer;
+    }
     // 告警事件（v2.0）：读 Viewer+；确认 Operator+；解除（终态操作）Admin
     if p == "alarms" || p.starts_with("alarms/") {
         let is_read = method == axum::http::Method::GET || method == axum::http::Method::HEAD;
@@ -513,6 +518,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         // ---- 历史数据（自带 from/to/bucket 分页参数，不过 v1 别名） ----
         .route("/history/series", get(handlers::history_series))
         .route("/history/series/list", get(handlers::history_series_list))
+        .route("/history/export", post(handlers::history_export))
         .route("/history/stats", get(handlers::history_stats))
         // ---- 流程编排（v2.0 T1；不过 v1 别名） ----
         .route(

@@ -576,6 +576,91 @@ pub fn list_series(
     Ok(out)
 }
 
+// ---------- 报表导出（蓝图 T2 顺延项） ----------
+
+/// 单序列导出引用
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportSeriesRef {
+    pub node_id: String,
+    pub group_id: String,
+    pub tag: String,
+}
+
+/// 导出的一行（长表：样本即行，不按点位对齐成宽表——各序列采集周期不同，
+/// 宽表对齐需要引入插值语义；长表让 Excel/pandas 透视一行代码完成）
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportRow {
+    pub ts_ms: i64,
+    pub node_id: String,
+    pub group_id: String,
+    pub tag: String,
+    pub value: f64,
+}
+
+/// 单次导出的行数上限：超过则报错而不是截断（截断会产出「看起来完整」的误导报表，
+/// 明确报错让用户缩小时间范围或减少序列）。50 万行 ≈ 20 MB CSV，可接受；
+/// 上限之上应走外接 TSDB（见模块头注释的定位边界）。
+pub const EXPORT_MAX_ROWS: u64 = 500_000;
+
+/// 导出原始精度样本（不做降采样——报表要的是真值；画图才降采样）。
+/// 逐序列查询（各自走 SERIES_INDEX 前缀索引），合并后按 ts 全局升序；
+/// 任一序列超限即失败，Err 文本带实际行数供上层提示。
+pub fn export_samples(
+    db_path: &Path,
+    series: &[ExportSeriesRef],
+    from_ms: i64,
+    to_ms: i64,
+    tenant_id: &str,
+) -> Result<Vec<ExportRow>, String> {
+    if !db_path.exists() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT ts, value FROM samples
+             WHERE node_id = ?1 AND group_id = ?2 AND tag = ?3 AND ts >= ?4 AND ts <= ?5
+               AND (?6 = '*' OR tenant_id = ?6)
+             ORDER BY ts ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let mut out: Vec<ExportRow> = Vec::new();
+    for s in series {
+        let rows = stmt
+            .query_map(
+                params![s.node_id, s.group_id, s.tag, from_ms, to_ms, tenant_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, f64>(1)?,
+                    ))
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        for r in rows {
+            let (ts, value) = r.map_err(|e| e.to_string())?;
+            out.push(ExportRow {
+                ts_ms: ts,
+                node_id: s.node_id.clone(),
+                group_id: s.group_id.clone(),
+                tag: s.tag.clone(),
+                value,
+            });
+        }
+        if out.len() as u64 > EXPORT_MAX_ROWS {
+            return Err(format!(
+                "export exceeds the {} row limit (accumulated {}); narrow the time range or select fewer series",
+                EXPORT_MAX_ROWS,
+                out.len()
+            ));
+        }
+    }
+    // 序列间按 ts 归并（逐序列已升序；stable 排序保持同 ts 内的序列顺序稳定）
+    out.sort_by_key(|r| r.ts_ms);
+    Ok(out)
+}
+
 /// 库级统计
 pub fn db_stats(db_path: &Path, cfg: &HistoryConfig) -> Result<serde_json::Value, String> {
     let mut rows = 0i64;
@@ -933,6 +1018,56 @@ mod tests {
         let sb = query_series(&db, &qb).unwrap();
         assert_eq!(sb.len(), 1);
         assert_eq!(sb[0].avg, 2.0);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    fn export_ref(node: &str, group: &str, tag: &str) -> ExportSeriesRef {
+        ExportSeriesRef {
+            node_id: node.into(),
+            group_id: group.into(),
+            tag: tag.into(),
+        }
+    }
+
+    /// 报表导出：多序列合并按 ts 升序、租户过滤、超限明确报错
+    #[test]
+    fn export_samples_merges_series_and_honors_limits() {
+        let db = tmp_db("export");
+        let conn = open_db(&db).unwrap();
+        ensure_history_schema(&conn).unwrap();
+        let a = sample(3000, "temperature", 21.5);
+        let b = sample(1000, "humidity", 55.0);
+        let mut other_tenant = sample(2000, "temperature", 99.0);
+        other_tenant.tenant_id = "tenant-b".into();
+        write_batch(&conn, &[a, b, other_tenant]).unwrap();
+        drop(conn);
+
+        let series = vec![
+            export_ref("n1", "g1", "temperature"),
+            export_ref("n1", "g1", "humidity"),
+        ];
+        // "*" 不过滤：temperature 两域各一行 + humidity 一行 = 3 行
+        let rows_all = export_samples(&db, &series, 0, 10_000, "*").unwrap();
+        assert_eq!(rows_all.len(), 3);
+        // 默认域查询：只含两个选中序列（99.0 属 tenant-b，排除）
+        let rows = export_samples(&db, &series, 0, 10_000, "default").unwrap();
+        assert_eq!(rows.len(), 2, "只应含默认域的两个选中序列");
+        // 全局按 ts 升序：humidity(1000) 在 temperature(3000) 前
+        assert_eq!(rows[0].tag, "humidity");
+        assert_eq!(rows[0].ts_ms, 1000);
+        assert_eq!(rows[1].tag, "temperature");
+        assert_eq!(rows[1].value, 21.5);
+
+        // 租户过滤：tenant-b 域查到的是同序列名的那行 99.0（域隔离：default 域查询看不到它）
+        let rows_b = export_samples(&db, &series, 0, 10_000, "tenant-b").unwrap();
+        assert_eq!(rows_b.len(), 1);
+        assert_eq!(rows_b[0].value, 99.0);
+        // 其他域查不到默认域样本
+        assert!(export_samples(&db, &series, 0, 10_000, "tenant-c").unwrap().is_empty());
+
+        // 库不存在 → 空（历史未启用/从未落盘时导出空表而非报错）
+        assert!(export_samples(Path::new("/nonexistent/gw-hist.db"), &series, 0, 1, "*").is_ok());
+
         let _ = std::fs::remove_file(&db);
     }
 }
