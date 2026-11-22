@@ -144,6 +144,12 @@ const routes = [
     name: 'Users',
     component: () => import('./views/Users.vue'),
     meta: { title: '用户', settingsGroup: true }
+  },
+  {
+    path: '/settings/audit',
+    name: 'Audit',
+    component: () => import('./views/Audit.vue'),
+    meta: { title: '审计日志', settingsGroup: true }
   }
 ]
 

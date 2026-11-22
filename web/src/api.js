@@ -313,6 +313,9 @@ export const api = {
   createTenant: (body) => req('POST', '/tenants', body),
   deleteTenant: (id) => req('DELETE', `/tenants/${id}`),
 
+  // 审计日志（Admin；T7 auth_middleware 异步落库的请求元数据，只读分页，信封 {items,total,page,pageSize}）
+  audit: (params) => req('GET', `/audit${params ? '?' + new URLSearchParams(params).toString() : ''}`),
+
   // 日志管理
   downloadLog: (type = 'all') => {
     return fetch(`${BASE}/logs/download?type=${type}`, { headers: authHeaders() }).then(async (r) => {

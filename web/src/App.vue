@@ -39,6 +39,7 @@ const systemNavItems = [
   { path: '/monitor/flow', labelKey: 'menu.dataFlowMetrics' },
   { path: '/settings/license', labelKey: 'menu.license' },
   { path: '/settings/users', labelKey: 'menu.users' },
+  { path: '/settings/audit', labelKey: 'menu.audit' },
   { path: '/settings/logs', labelKey: 'menu.logs' },
   { path: '/settings/config', labelKey: 'menu.systemConfig' },
 ]
