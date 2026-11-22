@@ -180,7 +180,7 @@ pub fn validate_config(operator: &str, config: &serde_json::Value) -> Result<(),
                 return Err("expression is required".into());
             }
             // 发布门禁：编译校验（只编译不执行），语法错误拒绝发布
-            rhai_engine()
+            shared_engine()
                 .compile(&c.expression)
                 .map_err(|e| format!("expression compile error: {e}"))?;
             Ok(())
@@ -243,13 +243,13 @@ pub struct ExprRouteConfig {
     pub expression: String,
 }
 
-/// expr_route 的 AST + 引擎缓存条目（FlowState.script_asts；spec §4.5）。
+/// expr_route 的 AST 缓存条目（FlowState.script_asts；spec §4.5）。
+/// 求值引擎用进程级共享单例（`shared_engine`）：rhai 的求值态在 Scope，
+/// Engine 本身无状态且 Send+Sync，per-node 各持一份是纯冗余（backlog 入账项）。
 pub struct CachedScript {
     /// 缓存 key：config 的 expression 字符串
     pub expression: String,
     pub ast: rhai::AST,
-    /// 每节点私有引擎与 AST 同生命周期缓存（rhai Engine 求值状态在 Scope，可复用）
-    pub engine: rhai::Engine,
     /// spec §4.4：首次错误 warn，后续 debug；求值成功后重置
     pub warned: bool,
 }
@@ -275,6 +275,13 @@ pub fn rhai_engine() -> rhai::Engine {
     engine.on_print(|_| {});
     engine.on_debug(|_, _, _| {});
     engine
+}
+
+/// 进程级共享沙箱引擎（backlog：per-node Engine 冗余 + recompile 双 Engine 构造的修正）。
+/// rhai 的求值态在 Scope，Engine 无内部可变状态、Send+Sync，`&Engine` 并发求值安全。
+fn shared_engine() -> &'static rhai::Engine {
+    static ENGINE: std::sync::OnceLock<rhai::Engine> = std::sync::OnceLock::new();
+    ENGINE.get_or_init(rhai_engine)
 }
 
 /// deduplicate 配置：无字段（spec §三）。
@@ -318,7 +325,8 @@ pub fn eval_threshold(
                 tag: cfg.tag_name.clone(),
                 value: Some(v),
                 threshold: cfg.high.or(cfg.low),
-                message: cfg.message.clone().unwrap_or_else(|| {
+                // M-5（backlog）：空串/空白串视同缺省——Some("") 会绕过默认文案
+                message: cfg.message.clone().filter(|m| !m.trim().is_empty()).unwrap_or_else(|| {
                     format!("{}={} crossed {:?}", cfg.tag_name, v, cfg.high.or(cfg.low))
                 }),
                 ts: Utc::now(),
@@ -363,7 +371,8 @@ pub fn eval_state_change(
             .and_then(|_| value_by_name(gd, &cfg.tag_name))
             .and_then(|v| v.as_f64()),
         threshold: None,
-        message: cfg.message.clone().unwrap_or_else(|| {
+        // M-5（backlog）：空串/空白串视同缺省
+        message: cfg.message.clone().filter(|m| !m.trim().is_empty()).unwrap_or_else(|| {
             format!(
                 "{}: {} -> {}",
                 cfg.tag_name,
@@ -398,8 +407,9 @@ pub fn eval_route(cfg: &RouteConfig, gd: &GroupData) -> (Option<FlowPayload>, Op
 }
 
 /// rate_of_change 求值（spec §二）。`state`：flow 节点 id → tag_name → (上一值, 上一 ts 毫秒)。
-/// 缺值/非数值走 normal 端且不更新状态（缺测不误触发）；首见只建基线；
-/// 同时间戳视速率 0（防除零）；每次有效读数都更新基线。
+/// 缺值/非数值/非有限值（NaN/±inf）走 normal 端且不更新状态（缺测不误触发；
+/// 非有限基线一旦入状态，(v-NaN)/dt 永远 NaN——不是「盲一拍」而是永久失明）；
+/// 首见只建基线；同时间戳视速率 0（防除零）；每次有效读数都更新基线。
 pub fn eval_rate_of_change(
     cfg: &RateOfChangeConfig,
     node_id: Uuid,
@@ -410,6 +420,11 @@ pub fn eval_rate_of_change(
     let Some(v) = value_by_name(gd, &cfg.tag_name).and_then(|v| v.as_f64()) else {
         return (None, Some(FlowPayload::Data(gd.clone())));
     };
+    if !v.is_finite() {
+        // NaN/±inf 读数：视同缺测——不判越过、不写基线（基线被 NaN 污染后
+        // 之后每拍 rate 恒为 NaN，越过判定永久失效）
+        return (None, Some(FlowPayload::Data(gd.clone())));
+    }
     let node_state = state.entry(node_id).or_default();
     let rate = match node_state.get(&cfg.tag_name) {
         None => None,
@@ -432,7 +447,8 @@ pub fn eval_rate_of_change(
         tag: cfg.tag_name.clone(),
         value: Some(v),
         threshold: Some(cfg.max_rate),
-        message: cfg.message.clone().unwrap_or_else(|| {
+        // M-5（backlog）：空串/空白串视同缺省
+        message: cfg.message.clone().filter(|m| !m.trim().is_empty()).unwrap_or_else(|| {
             format!(
                 "{}={} rate={:.3}/s crossed max {}/s",
                 cfg.tag_name, v, r, cfg.max_rate
@@ -516,14 +532,14 @@ pub fn eval_expr_route(
         .map(|c| c.expression == cfg.expression)
         .unwrap_or(false);
     if !hit {
-        match rhai_engine().compile(&cfg.expression) {
+        // 同一引擎实例编译：不再为 compile 临时构造第二个 Engine（backlog 入账项）
+        match shared_engine().compile(&cfg.expression) {
             Ok(ast) => {
                 state.insert(
                     node_id,
                     CachedScript {
                         expression: cfg.expression.clone(),
                         ast,
-                        engine: rhai_engine(),
                         warned: false,
                     },
                 );
@@ -539,7 +555,8 @@ pub fn eval_expr_route(
     let entry = state.get_mut(&node_id).expect("cache entry just ensured");
     let mut scope = rhai::Scope::new();
     scope.push("tags", rhai::Dynamic::from_map(tags_map(gd)));
-    let result: Result<rhai::Dynamic, _> = entry.engine.eval_ast_with_scope(&mut scope, &entry.ast);
+    let result: Result<rhai::Dynamic, _> =
+        shared_engine().eval_ast_with_scope(&mut scope, &entry.ast);
     let route = match result {
         Ok(d) => d.as_bool().map_err(|e| e.to_string()),
         Err(e) => Err(e.to_string()),
@@ -946,5 +963,93 @@ mod tests {
         };
         let (t, f) = eval_expr_route(&cfg, nid, &mut state.script_asts, &gd);
         assert!(t.is_none() && f.is_some(), "超操作数必须走 false 端");
+    }
+
+    #[test]
+    fn alarm_message_empty_string_falls_back_to_default() {
+        use crate::payload::FlowPayload;
+        // M-5：Some("") / Some("  ") 视同缺省，产生默认文案而非空消息告警
+        let gd = group_data_f(60.0);
+        let base = ThresholdConfig {
+            tag_name: "temperature".into(),
+            high: Some(50.0),
+            low: None,
+            level: "high".into(),
+            message: Some("  ".into()),
+        };
+        let (alarm, _) = eval_threshold(&base, &gd);
+        let Some(FlowPayload::Alarm(ev)) = alarm else {
+            panic!("60 > 50 must alarm")
+        };
+        assert!(
+            !ev.message.trim().is_empty(),
+            "空白 message 必须回退默认文案: {:?}",
+            ev.message
+        );
+        assert!(ev.message.contains("temperature"), "{}", ev.message);
+
+        // 非空 message 原样保留
+        let cfg = ThresholdConfig {
+            message: Some("超温停机".into()),
+            ..base
+        };
+        let (alarm, _) = eval_threshold(&cfg, &gd);
+        let Some(FlowPayload::Alarm(ev)) = alarm else {
+            panic!("must alarm")
+        };
+        assert_eq!(ev.message, "超温停机");
+    }
+
+    #[test]
+    fn rate_of_change_nan_reading_never_poisons_baseline() {
+        use crate::payload::FlowPayload;
+        // 非有限读数（NaN/inf）：视同缺测——不判越过、不写基线；
+        // 之后一拍恢复正常值时速率必须正常计算（基线未被 NaN 污染）
+        let cfg = RateOfChangeConfig {
+            tag_name: "temperature".into(),
+            max_rate: 1.0,
+            level: "high".into(),
+            message: None,
+        };
+        let nid = Uuid::new_v4();
+        let t0 = Utc::now();
+        let mk_gd = |v: f64, ts: chrono::DateTime<Utc>| {
+            let mut names = std::collections::HashMap::new();
+            let tid = gateway_sdk::TagId::new();
+            names.insert(tid, "temperature".to_string());
+            gateway_sdk::GroupData {
+                node_id: gateway_sdk::NodeId::new(),
+                group_id: gateway_sdk::GroupId::new(),
+                ts,
+                values: vec![(tid, DataValue::Float64(v))],
+                node_name: Some("sim".into()),
+                group_name: Some("g".into()),
+                tag_names: Some(names),
+            }
+        };
+        let mut state: HashMap<Uuid, HashMap<String, (f64, u64)>> = HashMap::new();
+        // 首见正常值：建基线
+        let (_, normal) = eval_rate_of_change(&cfg, nid, &mut state, &mk_gd(10.0, t0));
+        assert!(normal.is_some());
+        // NaN 读数：走 normal 且基线保持 10.0
+        let (alarm, _) = eval_rate_of_change(&cfg, nid, &mut state, &mk_gd(f64::NAN, t0));
+        assert!(alarm.is_none(), "NaN 读数不得触发");
+        assert_eq!(
+            state
+                .get(&nid)
+                .and_then(|m| m.get("temperature"))
+                .map(|(v, _)| *v),
+            Some(10.0),
+            "NaN 不得污染基线"
+        );
+        // 下一拍正常值：速率 = (30-10)/10s = 2.0/s > 1.0 → 触发（若基线被污染则永远不触发）
+        let (alarm, _) = eval_rate_of_change(
+            &cfg,
+            nid,
+            &mut state,
+            &mk_gd(30.0, t0 + chrono::Duration::seconds(10)),
+        );
+        let matched = matches!(alarm, Some(FlowPayload::Alarm(_)));
+        assert!(matched, "基线完好时 2.0/s 必须触发越过");
     }
 }

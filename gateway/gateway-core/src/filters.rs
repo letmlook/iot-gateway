@@ -673,6 +673,11 @@ pub fn apply(
             let Some(f) = numeric_f64(value) else {
                 continue; // 非数值不进窗口
             };
+            if !f.is_finite() {
+                // 非有限值（NaN/±inf）不进窗口：一个 NaN 样本会把 avg/sum/stddev
+                // 全部污染成 NaN，且 serde_json 序列化非有限 f64 直接失败（第一批 M5 backlog）
+                continue;
+            }
             let tag_name = match store.tag_get(*tid).map(|t| t.name.clone()) {
                 Some(n) => n,
                 None => continue,

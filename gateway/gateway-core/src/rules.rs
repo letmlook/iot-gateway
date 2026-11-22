@@ -314,18 +314,22 @@ impl RuleEngine {
             // 触发判定（spec §三）：logic 作用于 [主条件, ...extra_conditions]。
             // extra 点位缺位判 false（缺测不误触发；显式 false 而非 NaN 代缺位——
             // Ne 与 NaN 组合会判 true）；主点位缺位在上方 continue，整条不推进。
+            // 栈上数组代替每拍 Vec 堆分配（extra 上限 8，主条件 1 → 9 槽，backlog 入账项）。
             let triggered = {
-                let mut parts = vec![rule.condition.op.eval(value, rule.condition.threshold)];
+                let mut parts = [false; 9];
+                parts[0] = rule.condition.op.eval(value, rule.condition.threshold);
+                let mut n = 1usize;
                 for c in &rule.extra_conditions {
-                    parts.push(
-                        values
-                            .get(&c.tag_name)
-                            .map_or(false, |v| c.op.eval(*v, c.threshold)),
-                    );
+                    parts[n] = values
+                        .get(&c.tag_name)
+                        .map_or(false, |v| c.op.eval(*v, c.threshold));
+                    n += 1;
                 }
+                let all = parts[..n].iter().all(|&p| p);
+                let any = parts[..n].iter().any(|&p| p);
                 match rule.logic {
-                    Logic::All => parts.iter().all(|&p| p),
-                    Logic::Any => parts.iter().any(|&p| p),
+                    Logic::All => all,
+                    Logic::Any => any,
                 }
             };
 

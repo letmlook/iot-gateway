@@ -1,7 +1,7 @@
 //! Modbus RTU 地址解析：0x!addr / 1x!addr / 3x!addr / 4x!addr 或 1!400001[.BIT][#ENDIAN]。
 
 /// Modbus 区域
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModbusArea {
     Coil,
     DiscreteInput,

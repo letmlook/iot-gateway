@@ -2,6 +2,18 @@
 
 use gateway_sdk::{Group, Tag};
 
+/// 串口连接缓存（D 级审计 2026-11-22：此前每轮 poll_group 重开串口——
+/// Unix 上 open() 有毫秒级开销，Windows 上 COM 口独占句柄反复分配还会泄漏风险）。
+/// 持久化的 Context 失败即置 None，下一轮 poll 重建（自愈重连）。
+#[cfg(feature = "modbus-client")]
+pub struct SerialConn {
+    pub ctx: tokio_modbus::client::Context,
+    /// 建立时记录的连接参数；setting 变更后不匹配则强制重建
+    pub port: String,
+    pub baud_rate: u32,
+    pub slave_id: u8,
+}
+
 pub struct ModbusRtuState {
     pub port: String,
     pub baud_rate: u32,
