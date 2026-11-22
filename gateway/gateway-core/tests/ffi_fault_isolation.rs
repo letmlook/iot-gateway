@@ -99,83 +99,97 @@ fn config_with(panic_on: Option<&str>) -> PluginConfig {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn plugin_faults_are_isolated_from_the_host() {
-    // 场景 1：正常加载（对照基线——先证明夹具在没有注入时是可用插件）
-    let (mgr, _loader, dir) = load_fixture(&[fixture_dylib("plugin_faulty")]);
-    let plugin = mgr
-        .south_plugin("faulty")
-        .expect("faulty plugin should be registered");
-    assert_eq!(plugin.meta().name, "faulty");
+    // 场景进度走 stderr：abort（SIGABRT）时 harness 捕获的 stdout 缓冲会丢，
+    // stderr 实时不缓冲，CI 日志据此定位精确的 abort 场景。
+    // 场景 1-6 作用域隔离：块结束显式 dlclose 第一实例后再加载场景 7 的
+    // 第二份 dylib 副本——Linux 上两份实例共存时 panic 的 unwind 元数据
+    // （eh_frame/personality）相互干扰曾被 CI 观测为 SIGABRT（macOS dyld
+    // 按 inode 缓存 image 天然单实例化，故本地无法复现）。
+    {
+        eprintln!("[ffi-fault] scenario 1-6 begin (first instance)");
+        // 场景 1：正常加载（对照基线——先证明夹具在没有注入时是可用插件）
+        let (mgr, _loader, dir) = load_fixture(&[fixture_dylib("plugin_faulty")]);
+        let plugin = mgr
+            .south_plugin("faulty")
+            .expect("faulty plugin should be registered");
+        assert_eq!(plugin.meta().name, "faulty");
 
-    let gid = GroupId::new();
-    let tags = vec![Tag::new("t1", "dummy", gid)];
+        let gid = GroupId::new();
+        let tags = vec![Tag::new("t1", "dummy", gid)];
 
-    let healthy = NodeId::new();
-    plugin
-        .open(healthy, config_with(None))
-        .await
-        .expect("open healthy node");
-    let values = plugin
-        .poll_group(healthy, gid, &tags)
-        .await
-        .expect("healthy poll works");
-    assert_eq!(values.len(), 1);
-    assert_eq!(values[0].1, DataValue::Int32(42));
+        let healthy = NodeId::new();
+        plugin
+            .open(healthy, config_with(None))
+            .await
+            .expect("open healthy node");
+        let values = plugin
+            .poll_group(healthy, gid, &tags)
+            .await
+            .expect("healthy poll works");
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].1, DataValue::Int32(42));
 
-    // 场景 2：poll_group 内 panic → 只影响这一次调用，宿主线程活下来
-    let bad_poll = NodeId::new();
-    plugin
-        .open(bad_poll, config_with(Some("poll")))
-        .await
-        .expect("open node with poll fault");
-    let err = plugin
-        .poll_group(bad_poll, gid, &tags)
-        .await
-        .expect_err("panic inside poll_group must surface as Err, not abort the process");
-    assert!(
-        err.to_string().contains("panicked"),
-        "error should report the plugin panic, got: {}",
-        err
-    );
+        // 场景 2：poll_group 内 panic → 只影响这一次调用，宿主线程活下来
+        let bad_poll = NodeId::new();
+        plugin
+            .open(bad_poll, config_with(Some("poll")))
+            .await
+            .expect("open node with poll fault");
+        let err = plugin
+            .poll_group(bad_poll, gid, &tags)
+            .await
+            .expect_err("panic inside poll_group must surface as Err, not abort the process");
+        assert!(
+            err.to_string().contains("panicked"),
+            "error should report the plugin panic, got: {}",
+            err
+        );
 
-    // 场景 3：panic 之后插件依然可用（没有把宿主状态或插件自身搞坏到不可用）
-    let values = plugin
-        .poll_group(healthy, gid, &tags)
-        .await
-        .expect("plugin must remain usable after an isolated panic");
-    assert_eq!(values.len(), 1);
+        // 场景 3：panic 之后插件依然可用（没有把宿主状态或插件自身搞坏到不可用）
+        let values = plugin
+            .poll_group(healthy, gid, &tags)
+            .await
+            .expect("plugin must remain usable after an isolated panic");
+        assert_eq!(values.len(), 1);
 
-    // 场景 4：write_tags 内 panic
-    let bad_write = NodeId::new();
-    plugin
-        .open(bad_write, config_with(Some("write")))
-        .await
-        .expect("open node with write fault");
-    let err = plugin
-        .write_tags(bad_write, &[(tags[0].clone(), DataValue::Int32(7))])
-        .await
-        .expect_err("panic inside write_tags must surface as Err");
-    assert!(err.to_string().contains("panicked"), "got: {}", err);
+        // 场景 4：write_tags 内 panic
+        let bad_write = NodeId::new();
+        plugin
+            .open(bad_write, config_with(Some("write")))
+            .await
+            .expect("open node with write fault");
+        let err = plugin
+            .write_tags(bad_write, &[(tags[0].clone(), DataValue::Int32(7))])
+            .await
+            .expect_err("panic inside write_tags must surface as Err");
+        assert!(err.to_string().contains("panicked"), "got: {}", err);
 
-    // 场景 5：open 内 panic → 节点创建路径拿到失败调用，进程不退出
-    let err = plugin
-        .open(NodeId::new(), config_with(Some("open")))
-        .await
-        .expect_err("panic inside open must surface as Err");
-    assert!(err.to_string().contains("panicked"), "got: {}", err);
+        // 场景 5：open 内 panic → 节点创建路径拿到失败调用，进程不退出
+        let err = plugin
+            .open(NodeId::new(), config_with(Some("open")))
+            .await
+            .expect_err("panic inside open must surface as Err");
+        assert!(err.to_string().contains("panicked"), "got: {}", err);
 
-    // 场景 6：start 内 panic
-    let bad_start = NodeId::new();
-    plugin
-        .open(bad_start, config_with(Some("start")))
-        .await
-        .expect("open node with start fault");
-    let err = plugin
-        .start(bad_start)
-        .await
-        .expect_err("panic inside start must surface as Err");
-    assert!(err.to_string().contains("panicked"), "got: {}", err);
+        // 场景 6：start 内 panic
+        let bad_start = NodeId::new();
+        plugin
+            .open(bad_start, config_with(Some("start")))
+            .await
+            .expect("open node with start fault");
+        let err = plugin
+            .start(bad_start)
+            .await
+            .expect_err("panic inside start must surface as Err");
+        assert!(err.to_string().contains("panicked"), "got: {}", err);
+        eprintln!("[ffi-fault] scenario 1-6 done, dropping first instance");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    // 第一实例已随作用域 dlclose
 
     // 场景 7：加载期 meta panic → 拒绝注册（而不是以占位名 "?" 注册一个坏插件）
+    eprintln!("[ffi-fault] scenario 7 begin (meta panic, second instance)");
     std::env::set_var("FAULTY_PLUGIN_PANIC_META", "1");
     let (mgr2, _loader2, dir2) = load_fixture(&[fixture_dylib("plugin_faulty")]);
     std::env::remove_var("FAULTY_PLUGIN_PANIC_META");
@@ -189,13 +203,15 @@ async fn plugin_faults_are_isolated_from_the_host() {
     );
 
     // 场景 8：ABI 不一致 → 加载阶段被拒绝
+    eprintln!("[ffi-fault] scenario 8 begin (abi mismatch)");
     let (mgr3, _loader3, dir3) = load_fixture(&[fixture_dylib("plugin_abi_mismatch")]);
     assert!(
         mgr3.south_plugins().is_empty() && mgr3.north_plugins().is_empty(),
         "plugin with a mismatched ABI version must be refused at load time"
     );
+    eprintln!("[ffi-fault] all scenarios done");
 
-    for d in [dir, dir2, dir3] {
+    for d in [dir2, dir3] {
         let _ = std::fs::remove_dir_all(d);
     }
 }
