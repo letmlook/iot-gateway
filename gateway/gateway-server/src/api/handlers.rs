@@ -437,10 +437,18 @@ pub async fn list_audit(
 // ---------- Version ----------
 /// 版本信息。
 pub async fn version() -> Json<serde_json::Value> {
+    // revision 取值优先级：运行时 GATEWAY_BUILD_REV（容器部署——镜像构建环境无 .git，
+    // 编译期 GIT_REV 只能是 unknown，由 CI 以 build-arg 注入提交哈希，见 Dockerfile
+    // runtime 阶段）> 编译期 GIT_REV（build.rs 从 git rev-parse 取，本地构建即当前 HEAD）。
+    // 缺陷修复（2026-11-23，rc.5 镜像验证发现）：容器形态 revision 此前恒为 "unknown"。
+    let revision = std::env::var("GATEWAY_BUILD_REV")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| option_env!("GIT_REV").unwrap_or("").to_string());
     Json(serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "build_date": option_env!("BUILD_DATE").unwrap_or(""),
-        "revision": option_env!("GIT_REV").unwrap_or(""),
+        "revision": revision,
     }))
 }
 

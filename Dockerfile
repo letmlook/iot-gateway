@@ -89,10 +89,15 @@ RUN mkdir -p /app/data /app/logs && chown -R gateway:gateway /app
 
 USER gateway:gateway
 
+# 容器 revision 标识：镜像构建环境无 .git（编译期 GIT_REV 只能是 unknown），由 CI 以
+# build-arg 注入提交哈希（release.yml docker job）。version 端点优先读运行时该值。
+# ARG/ENV 放在 runtime 阶段——不进 backend 编译层的缓存键，cargo 构建缓存不受影响。
+ARG GATEWAY_BUILD_REV=unknown
 ENV GATEWAY_PORT=3000 \
     GATEWAY_DATA_DIR=/app/data \
     GATEWAY_STATIC_DIR=/app/web/dist \
     GATEWAY_PLUGINS_DIR=/app/plugins \
+    GATEWAY_BUILD_REV=${GATEWAY_BUILD_REV} \
     RUST_LOG=info
 
 EXPOSE 3000
