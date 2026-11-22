@@ -94,6 +94,17 @@ impl FlowRuntime {
                 _ => {}
             }
         }
+        // 断流检测配置与组名（告警 tag 用；查不到回退 group_id 字符串）
+        let stale = parse_stale_detection(&src.config);
+        let group_name = state
+            .manager
+            .store
+            .group_get(
+                gateway_sdk::NodeId(sc.south_node_id),
+                gateway_sdk::GroupId(sc.group_id),
+            )
+            .map(|g| g.name)
+            .unwrap_or_else(|| sc.group_id.to_string());
         // flow→flow 禁环（设计 §3.4）：输入只来自南向组分区通道
         let mut rxs = state.manager.bus().subscribe_groups(&[(
             gateway_sdk::NodeId(sc.south_node_id),
@@ -121,64 +132,91 @@ impl FlowRuntime {
         let flow_name = row.name.clone();
         let handle = tokio::spawn(async move {
             let mut flow_state = gateway_flow::FlowState::default();
+            let mut stale_alarm_id: Option<Uuid> = None;
+            let mut deadline = match &stale {
+                Some(s) => {
+                    tokio::time::Instant::now()
+                        + tokio::time::Duration::from_millis(s.timeout_ms)
+                }
+                None => tokio::time::Instant::now()
+                    + tokio::time::Duration::from_secs(365 * 24 * 3600),
+            };
             let Ok(plan) = gateway_flow::ExecutionPlan::build(&engine_flow) else {
                 error!(flow_id = ?flow_id, "execution plan failed, flow task exits");
                 return;
             };
             info!(flow_id = ?flow_id, name = %flow_name, "flow task started");
             loop {
-                match rx.recv().await {
-                    Ok(data) => {
-                        let deliveries =
-                            gateway_flow::evaluate(&plan, &engine_flow, &data, &mut flow_state);
-                        let deliveries = match deliveries {
-                            Ok(d) => d,
-                            Err(e) => {
-                                error!(flow_id = ?flow_id, "evaluate error: {e}");
-                                continue;
-                            }
-                        };
-                        for d in deliveries {
-                            let Some((node_name, target)) = sinks.get(&d.node_id) else {
-                                continue;
-                            };
-                            match (target, &d.payload) {
-                                (SinkTarget::Alarm, gateway_flow::FlowPayload::Alarm(ev)) => {
-                                    match alarm_store.raise(&tenant, &flow_id, node_name, ev) {
-                                        Ok(id) => {
-                                            // WS alarm 帧（机会式；REST 为可靠来源）
-                                            alarm_feed.notify(crate::ws::WsAlarmData {
-                                                id: id.to_string(),
-                                                flow_id: flow_id.to_string(),
-                                                node_name: node_name.clone(),
-                                                level: ev.level.as_str().into(),
-                                                tag: ev.tag.clone(),
-                                                value: ev.value,
-                                                threshold: ev.threshold,
-                                                message: ev.message.clone(),
-                                                ts: ev.ts.timestamp_millis(),
-                                            });
-                                        }
-                                        Err(e) => {
-                                            error!(flow_id = ?flow_id, "alarm raise error: {e}");
-                                        }
+                tokio::select! {
+                    msg = rx.recv() => {
+                        match msg {
+                            Ok(data) => {
+                                // 数据恢复：自动解除 active 断流告警（spec §4.2）
+                                if let Some(id) = stale_alarm_id.take() {
+                                    let scope =
+                                        crate::api::scope::TenantScope::One(tenant.clone());
+                                    if let Err(e) = alarm_store.resolve(id, &scope) {
+                                        warn!(flow_id = ?flow_id, "stale alarm resolve error: {e}");
                                     }
                                 }
-                                (
-                                    SinkTarget::North { north_node_id },
-                                    gateway_flow::FlowPayload::Data(gd),
-                                ) => {
-                                    deliver_north(&manager, *north_node_id, Arc::new(gd.clone()))
-                                        .await;
+                                let deliveries = gateway_flow::evaluate(
+                                    &plan, &engine_flow, &data, &mut flow_state,
+                                );
+                                match deliveries {
+                                    Ok(d) => {
+                                        deliver_deliveries(
+                                            &sinks, &manager, &alarm_store, &alarm_feed,
+                                            &tenant, flow_id, d,
+                                        ).await;
+                                        if stale.is_some() {
+                                            deadline = tokio::time::Instant::now()
+                                                + tokio::time::Duration::from_millis(
+                                                    stale.as_ref().unwrap().timeout_ms,
+                                                );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!(flow_id = ?flow_id, "evaluate error: {e}");
+                                    }
                                 }
-                                _ => {}
                             }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                warn!(flow_id = ?flow_id, lagged = n, "flow bus recv lagged, skipped messages");
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(flow_id = ?flow_id, lagged = n, "flow bus recv lagged, skipped messages");
+                    _ = tokio::time::sleep_until(deadline) => {
+                        let Some(s) = stale.clone() else { continue };
+                        let ev = stale_alarm_event(&group_name, s.timeout_ms, &s.level);
+                        let stub = gateway_sdk::GroupData {
+                            node_id: gateway_sdk::NodeId(sc.south_node_id),
+                            group_id: gateway_sdk::GroupId(sc.group_id),
+                            ts: chrono::Utc::now(),
+                            values: vec![],
+                            node_name: None,
+                            group_name: None,
+                            tag_names: None,
+                        };
+                        let deliveries = gateway_flow::evaluate_with_inject(
+                            &plan, &engine_flow, &stub, &mut flow_state, Some(&ev),
+                        );
+                        match deliveries {
+                            Ok(d) => {
+                                let ids = deliver_deliveries(
+                                    &sinks, &manager, &alarm_store, &alarm_feed,
+                                    &tenant, flow_id, d,
+                                ).await;
+                                // 只记录断流告警自身的 id（本批 raise 的最后一个）
+                                stale_alarm_id = ids.last().copied();
+                            }
+                            Err(e) => {
+                                error!(flow_id = ?flow_id, "stale inject evaluate error: {e}");
+                            }
+                        }
+                        deadline = tokio::time::Instant::now()
+                            + tokio::time::Duration::from_millis(s.timeout_ms);
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
             info!(flow_id = ?flow_id, name = %flow_name, "flow task stopped");
@@ -217,6 +255,56 @@ impl FlowRuntime {
     }
 }
 
+/// deliveries 分发（数据帧与断流注入共用）。返回本批落库的告警 id（断流路径据此自动 resolve）。
+async fn deliver_deliveries(
+    sinks: &HashMap<Uuid, (String, SinkTarget)>,
+    manager: &Arc<gateway_core::Manager>,
+    alarm_store: &Arc<crate::alarms::AlarmStore>,
+    alarm_feed: &crate::ws::AlarmFeed,
+    tenant: &str,
+    flow_id: Uuid,
+    deliveries: Vec<gateway_flow::SinkDelivery>,
+) -> Vec<Uuid> {
+    let mut raised: Vec<Uuid> = Vec::new();
+    for d in deliveries {
+        let Some((node_name, target)) = sinks.get(&d.node_id) else {
+            continue;
+        };
+        match (target, &d.payload) {
+            (SinkTarget::Alarm, gateway_flow::FlowPayload::Alarm(ev)) => {
+                match alarm_store.raise(tenant, &flow_id, node_name, ev) {
+                    Ok(id) => {
+                        raised.push(id);
+                        // WS alarm 帧（机会式；REST 为可靠来源）
+                        alarm_feed.notify(crate::ws::WsAlarmData {
+                            id: id.to_string(),
+                            flow_id: flow_id.to_string(),
+                            node_name: node_name.clone(),
+                            level: ev.level.as_str().into(),
+                            tag: ev.tag.clone(),
+                            value: ev.value,
+                            threshold: ev.threshold,
+                            message: ev.message.clone(),
+                            ts: ev.ts.timestamp_millis(),
+                        });
+                    }
+                    Err(e) => {
+                        error!(flow_id = ?flow_id, "alarm raise error: {e}");
+                    }
+                }
+            }
+            (
+                SinkTarget::North { north_node_id },
+                gateway_flow::FlowPayload::Data(gd),
+            ) => {
+                deliver_north(manager, *north_node_id, Arc::new(gd.clone())).await;
+            }
+            _ => {}
+        }
+    }
+    raised
+}
+
 /// sink_north 投递：目标北向节点须存在且 Running；失败仅记录（不影响采集主链路）。
 async fn deliver_north(
     manager: &Arc<gateway_core::Manager>,
@@ -239,5 +327,85 @@ async fn deliver_north(
         .await
     {
         warn!(north_node_id = ?north_node_id, "sink_north on_group_data error: {e}");
+    }
+}
+
+/// 断流检测配置（source config 解析结果；spec §4.2）。
+#[derive(Debug, Clone)]
+pub(crate) struct StaleDetection {
+    pub timeout_ms: u64,
+    pub level: String,
+}
+
+/// 解析 source config 的断流检测配置；0 或缺省 = None。
+pub(crate) fn parse_stale_detection(config: &serde_json::Value) -> Option<StaleDetection> {
+    let c: serde_json::Value = config.clone();
+    let timeout = c.get("stale_timeout_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+    if timeout == 0 {
+        return None;
+    }
+    Some(StaleDetection {
+        timeout_ms: timeout,
+        level: c
+            .get("stale_level")
+            .and_then(|v| v.as_str())
+            .unwrap_or("high")
+            .to_string(),
+    })
+}
+
+/// 断流告警事件构造（纯函数，便于单测）。level 非法回退 high（校验层已挡，防御性兜底）。
+pub(crate) fn stale_alarm_event(
+    group_name: &str,
+    timeout_ms: u64,
+    level: &str,
+) -> gateway_flow::AlarmEvent {
+    gateway_flow::AlarmEvent {
+        level: gateway_flow::AlarmLevel::parse(level)
+            .unwrap_or(gateway_flow::AlarmLevel::High),
+        tag: group_name.to_string(),
+        value: None,
+        threshold: Some(timeout_ms as f64),
+        message: format!("组 {group_name} 超过 {} 秒未上报数据", timeout_ms / 1000),
+        ts: chrono::Utc::now(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_alarm_event_shape() {
+        let ev = stale_alarm_event("grp1", 5000, "medium");
+        assert_eq!(ev.tag, "grp1");
+        assert_eq!(ev.level, gateway_flow::AlarmLevel::Medium);
+        assert_eq!(ev.value, None);
+        assert_eq!(ev.threshold, Some(5000.0));
+        assert!(ev.message.contains("组 grp1"), "{}", ev.message);
+        assert!(ev.message.contains("5 秒"), "{}", ev.message);
+    }
+
+    #[test]
+    fn stale_alarm_event_falls_back_level() {
+        // 非法 level 回退 high（校验层已挡，此处纯防御）
+        let ev = stale_alarm_event("g", 1000, "nope");
+        assert_eq!(ev.level, gateway_flow::AlarmLevel::High);
+    }
+
+    #[test]
+    fn parse_stale_detection_gates_on_zero() {
+        let on = parse_stale_detection(&serde_json::json!({
+            "south_node_id": uuid::Uuid::new_v4(),
+            "group_id": uuid::Uuid::new_v4(),
+            "stale_timeout_ms": 5000,
+            "stale_level": "high"
+        }));
+        assert_eq!(on.as_ref().map(|s| s.timeout_ms), Some(5000));
+        let off = parse_stale_detection(&serde_json::json!({
+            "south_node_id": uuid::Uuid::new_v4(),
+            "group_id": uuid::Uuid::new_v4()
+        }));
+        assert!(off.is_none(), "缺省 0 = 不检测");
     }
 }
