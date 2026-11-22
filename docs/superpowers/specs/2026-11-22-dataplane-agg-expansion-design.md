@@ -105,7 +105,7 @@ pub struct TotalizerTag {
   - `tag_name` 非空；同组内 `totalizer` 数组**去重拒绝**（错误信息含点位名，风格与现有 tags 去重一致）；
   - `rollover` 必须有限正数（`> 0.0 && is_finite`）；
   - `reset_period_ms / emit_ms` 为 u64 天然合法，无下限校验。
-- 点位 `data_type` 声明为非数值类型时不拒绝（点位可能后改），运行期按 `numeric_f64` 口径跳过并 warn。
+- 点位 `data_type` 声明为非数值类型时不拒绝（点位可能后改），运行期按 `numeric_f64` 口径**静默跳过**（与 §四 一致，避免高频采集日志爆炸）。
 - `totalizer` 的 tag_name **不要求**在组内已存在（点位可能后建），与 `window` 对点位不预校验的现状一致。
 
 ---
@@ -127,9 +127,9 @@ pub struct TotalizerTag {
 **回归**：现有 6 种聚合、死区、心跳、passthrough、forget 全部测试保持通过。
 
 **前端**：
-- `web/src/views/DataMonitor.vue` 策略表单：kinds 多选扩 8 项（分位与 delta 分组展示）；totalizer 配置段（点位选择 + reset_period_ms + rollover + emit_ms）；
+- `web/src/views/DataMonitor.vue` 策略表单：kinds 多选扩 8 项（14 项平铺多选下拉，不做分组）；totalizer 配置段（点位选择 + reset_period_ms + rollover + emit_ms）；
 - `web/src/locales/zh.js / en.js` 同步；
-- `types/api.d.ts` GroupPolicy 类型同步。
+- `types/api.d.ts` 无需改动（policy body 在 openapi 中为泛型 Object，未生成结构化 GroupPolicy 类型）。
 
 **API / 文档**：
 - 零新增端点（policy PUT/GET 沿用）；`gateway/gateway-server/src/api/openapi.rs` 的 GroupPolicy schema 同步；`docs/架构说明.md` 数据面一节补一段。

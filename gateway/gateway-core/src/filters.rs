@@ -1716,7 +1716,7 @@ mod tests {
             }]);
             store.policy_insert(p);
             forget_group(nid, gid);
-            // NaN 作为首见值：只污染基线，不产生输出
+            // NaN 首见：在状态机入口前被守卫拦截，从未进入状态，不产生输出
             let out = apply(&store, nid, gid, &[(tid, DataValue::Float64(f64::NAN))], 1000);
             assert!(out.synthetic.is_empty());
             // Inf 同样被跳过
