@@ -6189,12 +6189,18 @@
           "condition",
           "for_ms",
           "clear_ms",
+          "extra_conditions",
+          "clear_condition",
           "action"
         ],
         "properties": {
           "action": {
             "type": "object",
             "description": "RuleAction"
+          },
+          "clear_condition": {
+            "type": "object",
+            "description": "独立恢复条件 {tag_name?, op, threshold}"
           },
           "clear_ms": {
             "type": "integer",
@@ -6209,6 +6215,10 @@
             "type": "boolean",
             "description": "默认 true；PUT 时以 body 为准"
           },
+          "extra_conditions": {
+            "type": "object",
+            "description": "追加触发条件数组，元素 {tag_name, op, threshold}；上限 8"
+          },
           "for_ms": {
             "type": "integer",
             "format": "int64",
@@ -6217,6 +6227,13 @@
           "id": {
             "type": "string",
             "description": "为空时由服务端生成 UUID"
+          },
+          "logic": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "条件组逻辑：all | any（缺省 all）"
           },
           "name": {
             "type": "string"

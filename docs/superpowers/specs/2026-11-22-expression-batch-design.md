@@ -147,6 +147,8 @@ struct CachedScript {
 
 workspace 根 `Cargo.toml` 加 `rhai`（最新 1.x 稳定版，`workspace = true` 方式给 gateway-flow 引用；不开任何 feature；具体版本号在计划阶段核实锁定）。纯 Rust、无 unsafe 依赖，二进制体积影响可接受。
 
+**实施修正（Task 2 审查裁决）**：实际启用了 `sync` feature——`Engine`/`AST` 需跨 `tokio::spawn`（Send bound）；`sync` 仅将内部 `Rc` 换为 `Arc`，沙箱语义与边界不变，上文「不开任何 feature」以本条为准。
+
 ---
 
 ## 五、校验
