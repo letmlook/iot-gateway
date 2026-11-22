@@ -94,7 +94,7 @@ pub struct TotalizerTag {
 - `FilterState::GroupFilterState` 新增 `totalizers: RwLock<HashMap<TagId, TotalizerState>>`；`synthetic_ids` 缓存机制复用（`{tag}_total` 同样走名称→虚拟 TagId 缓存）。
 - `FilterOutcome` 不变（totalizer 输出并入 `synthetic` + `synthetic_names`）。
 - `forget_group / forget_node / clear_all` 语义不变（连同 totalizer 状态一起清除，现状实现已整组删除，天然覆盖）。
-- `numeric_f64` 口径复用：非数值点位不进 totalizer（校验时对非数值声明类型给出告警性提示，不拒绝——点位 data_type 可为 None）。
+- `numeric_f64` 口径复用：非数值点位不进 totalizer（校验时不拒绝——点位 data_type 可为 None；运行期静默跳过，与窗口聚合口径一致，避免高频采集日志爆炸）。
 
 ---
 
