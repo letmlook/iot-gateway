@@ -1,5 +1,5 @@
 //! 南向振动采集插件（virb）：对标 dataacq-plugin-virb。
-//! 联能 YE6235D/YE6235D2 振动采集器，UDP 通信：上位机发控制命令，采集器推送波形数据。
+//! 联能 YE6275D/YE6275D2 振动采集器，UDP 通信：上位机发控制命令，采集器推送波形数据。
 //! 支持 raw 组（时域 max/min/avg）与配置与参考实现一致。
 
 #[cfg(feature = "ffi")]
@@ -53,12 +53,12 @@ impl SouthPlugin for VirbPlugin {
         PluginMeta {
             name: "virb",
             kind: PluginKind::South,
-            description: Some("联能 YE6235D/YE6235D2 振动采集器，UDP 通信"),
+            description: Some("联能 YE6275D/YE6275D2 振动采集器，UDP 通信"),
             version: "0.1.0",
             name_zh: Some("振动采集"),
             name_en: Some("Vibration"),
-            description_zh: Some("该插件可用于访问 YE6235D和YE6235D2 的联能震动传感器采集器。"),
-            description_en: Some("This plugin can be used to access the Lianneng shutdown sensor collector of the YE6235D and YE6235D2."),
+            description_zh: Some("该插件可用于访问 YE6275D和YE6275D2 的联能震动传感器采集器。"),
+            description_en: Some("This plugin can be used to access the Lianneng shutdown sensor collector of the YE6275D and YE6275D2."),
         }
     }
 
