@@ -17,7 +17,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # prefix-key 升版使旧缓存全量失效（2026-11-22：修复缓存幽灵产物导致的
+      # ffi_fault_isolation 夹具缺失误报，此后如需再清缓存只需递增此值）
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2-cache-reset
       - name: cargo check
         run: cargo check --workspace --all-targets
       # 集成测试依赖的产物不会被 cargo test 顺带构建：
@@ -36,6 +40,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2-cache-reset
       - name: cargo clippy
         # 强制：新增代码不得引入 clippy 告警。
         # 下列 lint 为既有设计取舍（复杂插件签名 / handler 参数较多 / 行业缩写常量 / 测试构造默认值），

@@ -380,7 +380,7 @@ impl NorthPlugin for HttpPlugin {
             }
         }
 
-    #[cfg(not(feature = "http-client"))]
+        #[cfg(not(feature = "http-client"))]
         {
             let _ = payload;
             let mut cs = node_state.connection_status.write().await;

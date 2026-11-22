@@ -127,8 +127,8 @@ pub fn validate_policy(policy: &GroupPolicy) -> Result<(), String> {
             return Err("aggregates.kinds must be non-empty".to_string());
         }
         let valid = [
-            "avg", "min", "max", "count", "first", "last", "sum", "stddev", "median",
-            "delta", "p50", "p90", "p95", "p99",
+            "avg", "min", "max", "count", "first", "last", "sum", "stddev", "median", "delta",
+            "p50", "p90", "p95", "p99",
         ];
         for k in &w.aggregates.kinds {
             if !valid.contains(&k.as_str()) {
@@ -359,7 +359,10 @@ fn totalizer_advance(
 
     let first_advance = st.last_emitted_total.is_none();
     let changed = first_advance
-        || st.last_emitted_total.map(|e| e != st.total).unwrap_or(false);
+        || st
+            .last_emitted_total
+            .map(|e| e != st.total)
+            .unwrap_or(false);
     let due = cfg.emit_ms > 0 && ts_ms.saturating_sub(st.last_emit_ms) >= cfg.emit_ms;
     if changed || due {
         st.last_emitted_total = Some(st.total);
@@ -1216,10 +1219,17 @@ mod tests {
     fn aggregate_sum_stddev_delta() {
         // 教科书样本 [2,4,4,4,5,5,7,9]：sum=40，平方偏差和=32，样本方差=32/7，stddev=√(32/7)
         let vals = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
-        let s: Vec<(u64, f64)> = vals.iter().enumerate().map(|(i, v)| (i as u64, *v)).collect();
+        let s: Vec<(u64, f64)> = vals
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i as u64, *v))
+            .collect();
         assert_eq!(aggregate("sum", &s), Some(40.0));
         let sd = aggregate("stddev", &s).unwrap();
-        assert!((sd - (32.0f64 / 7.0).sqrt()).abs() < 1e-12, "stddev got {sd}");
+        assert!(
+            (sd - (32.0f64 / 7.0).sqrt()).abs() < 1e-12,
+            "stddev got {sd}"
+        );
 
         // n=1：stddev 无定义 → None；delta → 0
         let one = vec![(0u64, 7.0)];
@@ -1260,10 +1270,13 @@ mod tests {
         let s: Vec<f64> = (0..10).map(|i| i as f64).collect();
         assert!((aggregate_sorted("p90", &s).unwrap() - 8.1).abs() < 1e-9);
         // [10,20] p95 → rank=0.95 → 10*0.05+20*0.95=19.5
-        assert!((aggregate_sorted("p95", &vec![10.0, 20.0]).unwrap() - 19.5).abs() < 1e-9);
+        assert!((aggregate_sorted("p95", &[10.0, 20.0]).unwrap() - 19.5).abs() < 1e-9);
         // n=1 → 该样本；p50 == median；空 → None
-        assert_eq!(aggregate_sorted("p99", &vec![42.0]), Some(42.0));
-        assert_eq!(aggregate_sorted("p50", &even), aggregate_sorted("median", &even));
+        assert_eq!(aggregate_sorted("p99", &[42.0]), Some(42.0));
+        assert_eq!(
+            aggregate_sorted("p50", &even),
+            aggregate_sorted("median", &even)
+        );
         let empty: Vec<f64> = Vec::new();
         assert_eq!(aggregate_sorted("p95", &empty), None);
     }
@@ -1277,8 +1290,8 @@ mod tests {
             let tid = tid();
             let store = store_with(nid, gid, tid, "temp");
             let all = vec![
-                "avg", "min", "max", "count", "first", "last", "sum", "stddev",
-                "median", "delta", "p50", "p90", "p95", "p99",
+                "avg", "min", "max", "count", "first", "last", "sum", "stddev", "median", "delta",
+                "p50", "p90", "p95", "p99",
             ];
             store.policy_insert(win_policy(nid, gid, 10000, 500, all.clone()));
             forget_group(nid, gid);
@@ -1290,7 +1303,10 @@ mod tests {
                 r.synthetic_names.values().map(String::as_str).collect();
             assert_eq!(names.len(), 14, "虚拟点位名不得互相覆盖");
             for k in all {
-                assert!(names.contains(format!("temp_{k}").as_str()), "缺少 temp_{k}");
+                assert!(
+                    names.contains(format!("temp_{k}").as_str()),
+                    "缺少 temp_{k}"
+                );
             }
         });
     }
@@ -1299,7 +1315,13 @@ mod tests {
     fn validate_accepts_percentile_kinds() {
         let nid = nid();
         let gid = gid();
-        let p = win_policy(nid, gid, 1000, 100, vec!["median", "p50", "p90", "p95", "p99"]);
+        let p = win_policy(
+            nid,
+            gid,
+            1000,
+            100,
+            vec!["median", "p50", "p90", "p95", "p99"],
+        );
         assert!(validate_policy(&p).is_ok());
     }
 
@@ -1338,8 +1360,8 @@ mod tests {
         let s: Vec<(u64, f64)> = vec![(1, 1.0), (2, 2.0), (3, 3.0)];
         let sorted = [1.0f64, 2.0, 3.0];
         for kind in [
-            "avg", "min", "max", "count", "first", "last", "sum", "stddev",
-            "median", "delta", "p50", "p90", "p95", "p99",
+            "avg", "min", "max", "count", "first", "last", "sum", "stddev", "median", "delta",
+            "p50", "p90", "p95", "p99",
         ] {
             assert!(
                 aggregate(kind, &s).is_some() || aggregate_sorted(kind, &sorted).is_some(),
@@ -1588,15 +1610,24 @@ mod tests {
         };
         let mut st = TotalizerState::default();
         // 首见读数：不输出
-        assert_eq!(totalizer_advance(&mut st, &cfg, 100.0, 1000), Vec::<f64>::new());
+        assert_eq!(
+            totalizer_advance(&mut st, &cfg, 100.0, 1000),
+            Vec::<f64>::new()
+        );
         // 首见后首次推进：确立基线必发一次（total=10）
         assert_eq!(totalizer_advance(&mut st, &cfg, 110.0, 2000), vec![10.0]);
         // 读数不变：不发
-        assert_eq!(totalizer_advance(&mut st, &cfg, 110.0, 3000), Vec::<f64>::new());
+        assert_eq!(
+            totalizer_advance(&mut st, &cfg, 110.0, 3000),
+            Vec::<f64>::new()
+        );
         // 110→111：total=11
         assert_eq!(totalizer_advance(&mut st, &cfg, 111.0, 4000), vec![11.0]);
         // 下降（无 rollover → 换表）：total 保持 11，不输出
-        assert_eq!(totalizer_advance(&mut st, &cfg, 90.0, 5000), Vec::<f64>::new());
+        assert_eq!(
+            totalizer_advance(&mut st, &cfg, 90.0, 5000),
+            Vec::<f64>::new()
+        );
         // 换表后继续累计：90→95 → total=16
         assert_eq!(totalizer_advance(&mut st, &cfg, 95.0, 6000), vec![16.0]);
     }
@@ -1610,7 +1641,10 @@ mod tests {
             emit_ms: 0,
         };
         let mut st = TotalizerState::default();
-        assert_eq!(totalizer_advance(&mut st, &cfg, 990.0, 1000), Vec::<f64>::new());
+        assert_eq!(
+            totalizer_advance(&mut st, &cfg, 990.0, 1000),
+            Vec::<f64>::new()
+        );
         assert_eq!(totalizer_advance(&mut st, &cfg, 990.0, 2000), vec![0.0]);
         // 990→10：last=990 > 1000*0.5 → 翻转补差 (1000-990)+10 → total=20
         assert_eq!(totalizer_advance(&mut st, &cfg, 10.0, 3000), vec![20.0]);
@@ -1628,10 +1662,16 @@ mod tests {
             emit_ms: 0,
         };
         let mut st = TotalizerState::default();
-        assert_eq!(totalizer_advance(&mut st, &cfg, 100.0, 1000), Vec::<f64>::new());
+        assert_eq!(
+            totalizer_advance(&mut st, &cfg, 100.0, 1000),
+            Vec::<f64>::new()
+        );
         assert_eq!(totalizer_advance(&mut st, &cfg, 120.0, 2000), vec![20.0]);
         // 120→5：last=120 < 500 → 换表，total 保持 20
-        assert_eq!(totalizer_advance(&mut st, &cfg, 5.0, 3000), Vec::<f64>::new());
+        assert_eq!(
+            totalizer_advance(&mut st, &cfg, 5.0, 3000),
+            Vec::<f64>::new()
+        );
         // 5→15：total=30
         assert_eq!(totalizer_advance(&mut st, &cfg, 15.0, 4000), vec![30.0]);
     }
@@ -1648,7 +1688,10 @@ mod tests {
         assert_eq!(totalizer_advance(&mut st, &cfg, 10.0, 0), Vec::<f64>::new());
         assert_eq!(totalizer_advance(&mut st, &cfg, 30.0, 500), vec![20.0]);
         // t=1200 ≥ period_start(0)+1000：本次增量先累计（20+2=22），再重置 → 发 [22, 0]
-        assert_eq!(totalizer_advance(&mut st, &cfg, 32.0, 1200), vec![22.0, 0.0]);
+        assert_eq!(
+            totalizer_advance(&mut st, &cfg, 32.0, 1200),
+            vec![22.0, 0.0]
+        );
         // 新周期：基线 32 继续累计
         assert_eq!(totalizer_advance(&mut st, &cfg, 35.0, 1500), vec![3.0]);
     }
@@ -1662,15 +1705,24 @@ mod tests {
             emit_ms: 1000,
         };
         let mut st = TotalizerState::default();
-        assert_eq!(totalizer_advance(&mut st, &cfg, 10.0, 1000), Vec::<f64>::new());
+        assert_eq!(
+            totalizer_advance(&mut st, &cfg, 10.0, 1000),
+            Vec::<f64>::new()
+        );
         // 首见后首次推进必发（基线 0）
         assert_eq!(totalizer_advance(&mut st, &cfg, 10.0, 1500), vec![0.0]);
         // t=2000 距上次发射 500ms < emit_ms(1000)：未到期且无变化 → 不发
-        assert_eq!(totalizer_advance(&mut st, &cfg, 10.0, 2000), Vec::<f64>::new());
+        assert_eq!(
+            totalizer_advance(&mut st, &cfg, 10.0, 2000),
+            Vec::<f64>::new()
+        );
         // t=2600 距上次发射 1100ms ≥ 1000：心跳到期 → 强制输出（total 仍 0）
         assert_eq!(totalizer_advance(&mut st, &cfg, 10.0, 2600), vec![0.0]);
         // 心跳未到且无变化：不发
-        assert_eq!(totalizer_advance(&mut st, &cfg, 10.0, 2800), Vec::<f64>::new());
+        assert_eq!(
+            totalizer_advance(&mut st, &cfg, 10.0, 2800),
+            Vec::<f64>::new()
+        );
     }
 
     #[test]
@@ -1722,10 +1774,22 @@ mod tests {
             store.policy_insert(p);
             forget_group(nid, gid);
             // NaN 首见：在状态机入口前被守卫拦截，从未进入状态，不产生输出
-            let out = apply(&store, nid, gid, &[(tid, DataValue::Float64(f64::NAN))], 1000);
+            let out = apply(
+                &store,
+                nid,
+                gid,
+                &[(tid, DataValue::Float64(f64::NAN))],
+                1000,
+            );
             assert!(out.synthetic.is_empty());
             // Inf 同样被跳过
-            let out = apply(&store, nid, gid, &[(tid, DataValue::Float64(f64::INFINITY))], 2000);
+            let out = apply(
+                &store,
+                nid,
+                gid,
+                &[(tid, DataValue::Float64(f64::INFINITY))],
+                2000,
+            );
             assert!(out.synthetic.is_empty());
             // 正常读数继续累计：100 → 110 → total=10（NaN/Inf 从未进入状态）
             let out = apply(&store, nid, gid, &[(tid, DataValue::Float64(100.0))], 3000);

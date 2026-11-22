@@ -326,9 +326,13 @@ pub fn eval_threshold(
                 value: Some(v),
                 threshold: cfg.high.or(cfg.low),
                 // M-5（backlog）：空串/空白串视同缺省——Some("") 会绕过默认文案
-                message: cfg.message.clone().filter(|m| !m.trim().is_empty()).unwrap_or_else(|| {
-                    format!("{}={} crossed {:?}", cfg.tag_name, v, cfg.high.or(cfg.low))
-                }),
+                message: cfg
+                    .message
+                    .clone()
+                    .filter(|m| !m.trim().is_empty())
+                    .unwrap_or_else(|| {
+                        format!("{}={} crossed {:?}", cfg.tag_name, v, cfg.high.or(cfg.low))
+                    }),
                 ts: Utc::now(),
             };
             (
@@ -372,14 +376,18 @@ pub fn eval_state_change(
             .and_then(|v| v.as_f64()),
         threshold: None,
         // M-5（backlog）：空串/空白串视同缺省
-        message: cfg.message.clone().filter(|m| !m.trim().is_empty()).unwrap_or_else(|| {
-            format!(
-                "{}: {} -> {}",
-                cfg.tag_name,
-                last.as_deref().unwrap_or("?"),
-                cfg.to
-            )
-        }),
+        message: cfg
+            .message
+            .clone()
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| {
+                format!(
+                    "{}: {} -> {}",
+                    cfg.tag_name,
+                    last.as_deref().unwrap_or("?"),
+                    cfg.to
+                )
+            }),
         ts: Utc::now(),
     };
     (
@@ -448,12 +456,16 @@ pub fn eval_rate_of_change(
         value: Some(v),
         threshold: Some(cfg.max_rate),
         // M-5（backlog）：空串/空白串视同缺省
-        message: cfg.message.clone().filter(|m| !m.trim().is_empty()).unwrap_or_else(|| {
-            format!(
-                "{}={} rate={:.3}/s crossed max {}/s",
-                cfg.tag_name, v, r, cfg.max_rate
-            )
-        }),
+        message: cfg
+            .message
+            .clone()
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| {
+                format!(
+                    "{}={} rate={:.3}/s crossed max {}/s",
+                    cfg.tag_name, v, r, cfg.max_rate
+                )
+            }),
         ts: Utc::now(),
     };
     (
@@ -546,7 +558,7 @@ pub fn eval_expr_route(
             }
             Err(e) => {
                 state.remove(&node_id); // 清残留旧条目：旧表达式已失效，防旧 AST 继续被求值
-                // publish 门禁已拦语法错误；运行期防御走 false 端
+                                        // publish 门禁已拦语法错误；运行期防御走 false 端
                 tracing::debug!(node = %node_id, "expr_route compile error: {e}");
                 return (None, Some(FlowPayload::Data(gd.clone())));
             }

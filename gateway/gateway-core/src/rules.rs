@@ -109,17 +109,12 @@ pub struct ClearCondition {
 }
 
 /// 条件组逻辑（spec §三）；单条件时 all/any 等价
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Logic {
+    #[default]
     All,
     Any,
-}
-
-impl Default for Logic {
-    fn default() -> Self {
-        Logic::All
-    }
 }
 
 /// rules 表 extra 列的 JSON 形状（三个新字段打包存储；persist 层用）
@@ -322,7 +317,7 @@ impl RuleEngine {
                 for c in &rule.extra_conditions {
                     parts[n] = values
                         .get(&c.tag_name)
-                        .map_or(false, |v| c.op.eval(*v, c.threshold));
+                        .is_some_and(|v| c.op.eval(*v, c.threshold));
                     n += 1;
                 }
                 let all = parts[..n].iter().all(|&p| p);
@@ -354,7 +349,9 @@ impl RuleEngine {
                 let cleared = match &rule.clear_condition {
                     Some(cc) => {
                         let tag = cc.tag_name.as_deref().unwrap_or(&rule.source.tag_name);
-                        values.get(tag).map_or(false, |v| cc.op.eval(*v, cc.threshold))
+                        values
+                            .get(tag)
+                            .is_some_and(|v| cc.op.eval(*v, cc.threshold))
                     }
                     None => true,
                 };
@@ -981,10 +978,15 @@ mod tests {
         assert!(st.fired, "临界带保持 fired");
         assert_eq!(st.fire_count, 1, "临界带不得重复触发");
         // 恢复条件满足（clear_ms=0 立即）→ 重新武装
-        assert!(e.advance(std::slice::from_ref(&r), &vals(70.0), 400).is_empty());
+        assert!(e
+            .advance(std::slice::from_ref(&r), &vals(70.0), 400)
+            .is_empty());
         assert!(!e.runtime("r1").fired, "低于 75 应重新武装");
         // 再次超温可再次触发
-        assert_eq!(e.advance(std::slice::from_ref(&r), &vals(85.0), 500).len(), 1);
+        assert_eq!(
+            e.advance(std::slice::from_ref(&r), &vals(85.0), 500).len(),
+            1
+        );
     }
 
     #[test]
@@ -1025,10 +1027,18 @@ mod tests {
         e.advance(std::slice::from_ref(&r), &vals(78.0), 100);
         assert!(e.runtime("r1").fired, "恢复点位缺位不得重新武装");
         // cooler_on=0 → false → 保持 fired
-        e.advance(std::slice::from_ref(&r), &vals2(78.0, &[("cooler_on", 0.0)]), 200);
+        e.advance(
+            std::slice::from_ref(&r),
+            &vals2(78.0, &[("cooler_on", 0.0)]),
+            200,
+        );
         assert!(e.runtime("r1").fired);
         // cooler_on=1 → true → 重新武装
-        e.advance(std::slice::from_ref(&r), &vals2(78.0, &[("cooler_on", 1.0)]), 300);
+        e.advance(
+            std::slice::from_ref(&r),
+            &vals2(78.0, &[("cooler_on", 1.0)]),
+            300,
+        );
         assert!(!e.runtime("r1").fired);
     }
 
@@ -1048,11 +1058,19 @@ mod tests {
                 .is_empty(),
             "仅主条件满足（pressure 缺位）不得触发"
         );
-        e.advance(std::slice::from_ref(&r), &vals2(85.0, &[("pressure", 5.0)]), 100);
+        e.advance(
+            std::slice::from_ref(&r),
+            &vals2(85.0, &[("pressure", 5.0)]),
+            100,
+        );
         assert_eq!(e.runtime("r1").fire_count, 0, "pressure=5≤10 不满足");
         assert_eq!(
-            e.advance(std::slice::from_ref(&r), &vals2(85.0, &[("pressure", 12.0)]), 200)
-                .len(),
+            e.advance(
+                std::slice::from_ref(&r),
+                &vals2(85.0, &[("pressure", 12.0)]),
+                200
+            )
+            .len(),
             1,
             "全部满足应触发"
         );
@@ -1064,7 +1082,11 @@ mod tests {
             threshold: 10.0,
         }];
         r2.logic = Logic::Any;
-        let fires = e.advance(std::slice::from_ref(&r2), &vals2(85.0, &[("pressure", 12.0)]), 300);
+        let fires = e.advance(
+            std::slice::from_ref(&r2),
+            &vals2(85.0, &[("pressure", 12.0)]),
+            300,
+        );
         assert_eq!(fires.len(), 1, "Any：主条件 false 但 extra true 应触发");
         assert_eq!(fires[0].value, 85.0, "Firing.value 仍是主点位值");
     }
@@ -1106,7 +1128,9 @@ mod tests {
         r.logic = Logic::Any;
         let mut only_pressure = HashMap::new();
         only_pressure.insert("pressure".to_string(), 5.0);
-        assert!(e.advance(std::slice::from_ref(&r), &only_pressure, 0).is_empty());
+        assert!(e
+            .advance(std::slice::from_ref(&r), &only_pressure, 0)
+            .is_empty());
         assert_eq!(e.runtime("r1").last_value, None, "主点位缺位不推进状态");
     }
 
@@ -1126,10 +1150,18 @@ mod tests {
             op: CompareOp::Eq,
             threshold: 1.0,
         });
-        e.advance(std::slice::from_ref(&r), &vals2(85.0, &[("pressure", 12.0)]), 0);
+        e.advance(
+            std::slice::from_ref(&r),
+            &vals2(85.0, &[("pressure", 12.0)]),
+            0,
+        );
         assert!(e.runtime("r1").fired);
         // 温度回落但 pressure 仍满足 → 恢复点位缺位（cleared=false）→ 保持 fired
-        e.advance(std::slice::from_ref(&r), &vals2(70.0, &[("pressure", 12.0)]), 100);
+        e.advance(
+            std::slice::from_ref(&r),
+            &vals2(70.0, &[("pressure", 12.0)]),
+            100,
+        );
         assert!(e.runtime("r1").fired, "多条件仍满足时不得进恢复分支");
         // 全部不满足且 cooler_on=1 → 恢复计时满 clear_ms 后重新武装
         e.advance(
@@ -1143,7 +1175,10 @@ mod tests {
             &vals2(70.0, &[("pressure", 5.0), ("cooler_on", 1.0)]),
             300,
         );
-        assert!(!e.runtime("r1").fired, "多条件不满足+恢复条件满足应重新武装");
+        assert!(
+            !e.runtime("r1").fired,
+            "多条件不满足+恢复条件满足应重新武装"
+        );
     }
 
     #[test]

@@ -630,12 +630,7 @@ pub fn export_samples(
         let rows = stmt
             .query_map(
                 params![s.node_id, s.group_id, s.tag, from_ms, to_ms, tenant_id],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, f64>(1)?,
-                    ))
-                },
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?)),
             )
             .map_err(|e| e.to_string())?;
         for r in rows {
@@ -1063,7 +1058,9 @@ mod tests {
         assert_eq!(rows_b.len(), 1);
         assert_eq!(rows_b[0].value, 99.0);
         // 其他域查不到默认域样本
-        assert!(export_samples(&db, &series, 0, 10_000, "tenant-c").unwrap().is_empty());
+        assert!(export_samples(&db, &series, 0, 10_000, "tenant-c")
+            .unwrap()
+            .is_empty());
 
         // 库不存在 → 空（历史未启用/从未落盘时导出空表而非报错）
         assert!(export_samples(Path::new("/nonexistent/gw-hist.db"), &series, 0, 1, "*").is_ok());

@@ -451,7 +451,10 @@ mod tests {
         assert_eq!(snap.south_poll_timeout, 3);
         assert_eq!(snap.south_poll_err, 1);
         let count_of = |v: &[(NodeId, u64)], id: &NodeId| {
-            v.iter().find(|(n, _)| n == id).map(|(_, c)| *c).unwrap_or(0)
+            v.iter()
+                .find(|(n, _)| n == id)
+                .map(|(_, c)| *c)
+                .unwrap_or(0)
         };
         assert_eq!(count_of(&snap.south_poll_timeout_by_node, &a), 2);
         assert_eq!(count_of(&snap.south_poll_timeout_by_node, &b), 1);
@@ -467,8 +470,7 @@ mod tests {
         let snap = m.snapshot();
         assert_eq!(snap.rules_fired, 3);
         assert_eq!(
-            snap
-                .rules_fired_by_rule
+            snap.rules_fired_by_rule
                 .iter()
                 .find(|(id, _)| *id == r1)
                 .map(|(_, c)| *c),

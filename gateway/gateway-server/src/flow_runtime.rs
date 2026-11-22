@@ -136,11 +136,11 @@ impl FlowRuntime {
             let mut stale_alarm_ids: Vec<Uuid> = Vec::new();
             let mut deadline = match &stale {
                 Some(s) => {
-                    tokio::time::Instant::now()
-                        + tokio::time::Duration::from_millis(s.timeout_ms)
+                    tokio::time::Instant::now() + tokio::time::Duration::from_millis(s.timeout_ms)
                 }
-                None => tokio::time::Instant::now()
-                    + tokio::time::Duration::from_secs(365 * 24 * 3600),
+                None => {
+                    tokio::time::Instant::now() + tokio::time::Duration::from_secs(365 * 24 * 3600)
+                }
             };
             let Ok(plan) = gateway_flow::ExecutionPlan::build(&engine_flow) else {
                 error!(flow_id = ?flow_id, "execution plan failed, flow task exits");
@@ -172,11 +172,9 @@ impl FlowRuntime {
                                             &sinks, &manager, &alarm_store, &alarm_feed,
                                             &tenant, flow_id, d,
                                         ).await;
-                                        if stale.is_some() {
+                                        if let Some(s) = stale.as_ref() {
                                             deadline = tokio::time::Instant::now()
-                                                + tokio::time::Duration::from_millis(
-                                                    stale.as_ref().unwrap().timeout_ms,
-                                                );
+                                                + tokio::time::Duration::from_millis(s.timeout_ms);
                                         }
                                     }
                                     Err(e) => {
@@ -305,10 +303,7 @@ async fn deliver_deliveries(
                     }
                 }
             }
-            (
-                SinkTarget::North { north_node_id },
-                gateway_flow::FlowPayload::Data(gd),
-            ) => {
+            (SinkTarget::North { north_node_id }, gateway_flow::FlowPayload::Data(gd)) => {
                 deliver_north(manager, *north_node_id, Arc::new(gd.clone())).await;
             }
             _ => {}
@@ -357,7 +352,10 @@ pub(crate) const MAX_STALE_TIMEOUT_MS: u64 = 365 * 24 * 3600 * 1000;
 /// 解析 source config 的断流检测配置；0 或缺省 = None。
 pub(crate) fn parse_stale_detection(config: &serde_json::Value) -> Option<StaleDetection> {
     let c: serde_json::Value = config.clone();
-    let timeout = c.get("stale_timeout_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+    let timeout = c
+        .get("stale_timeout_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     if timeout == 0 {
         return None;
     }
@@ -385,8 +383,7 @@ pub(crate) fn stale_alarm_event(
     level: &str,
 ) -> gateway_flow::AlarmEvent {
     gateway_flow::AlarmEvent {
-        level: gateway_flow::AlarmLevel::parse(level)
-            .unwrap_or(gateway_flow::AlarmLevel::High),
+        level: gateway_flow::AlarmLevel::parse(level).unwrap_or(gateway_flow::AlarmLevel::High),
         tag: group_name.to_string(),
         value: None,
         threshold: Some(timeout_ms as f64),
@@ -488,11 +485,20 @@ mod tests {
         ];
 
         let ids = deliver_deliveries(
-            &sinks, &manager, &alarm_store, &alarm_feed, "t1", flow_id, deliveries,
+            &sinks,
+            &manager,
+            &alarm_store,
+            &alarm_feed,
+            "t1",
+            flow_id,
+            deliveries,
         )
         .await;
 
         assert_eq!(ids.len(), 2, "两个 sink_alarm 各应产出一条 raise id");
-        assert_ne!(ids[0], ids[1], "不同出口 node_name → 不同条目，不得去重合并");
+        assert_ne!(
+            ids[0], ids[1],
+            "不同出口 node_name → 不同条目，不得去重合并"
+        );
     }
 }

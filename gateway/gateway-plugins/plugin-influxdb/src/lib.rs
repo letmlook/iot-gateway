@@ -427,7 +427,7 @@ impl NorthPlugin for InfluxDbPlugin {
             }
         }
 
-    #[cfg(not(feature = "http-client"))]
+        #[cfg(not(feature = "http-client"))]
         {
             let _ = line;
             let mut cs = node_state.connection_status.write().await;

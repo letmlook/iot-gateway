@@ -396,11 +396,15 @@ impl SouthPlugin for ModbusRtuPlugin {
                     _ => None,
                 };
                 let reg_result = match batch.area {
-                    ModbusArea::InputRegister => {
-                        Some(conn.ctx.read_input_registers(batch.start, batch.count).await)
-                    }
+                    ModbusArea::InputRegister => Some(
+                        conn.ctx
+                            .read_input_registers(batch.start, batch.count)
+                            .await,
+                    ),
                     ModbusArea::HoldingRegister => Some(
-                        conn.ctx.read_holding_registers(batch.start, batch.count).await,
+                        conn.ctx
+                            .read_holding_registers(batch.start, batch.count)
+                            .await,
                     ),
                     _ => None,
                 };
@@ -467,7 +471,7 @@ impl SouthPlugin for ModbusRtuPlugin {
             // 解析失败/未命中的占位兜底（理论上已在第 1 步填过）
             Ok(tags
                 .iter()
-                .zip(out.into_iter())
+                .zip(out)
                 .map(|(t, v)| (t.id, v.unwrap_or(DataValue::UInt16(0))))
                 .collect())
         }
@@ -651,7 +655,14 @@ mod tests {
     #[test]
     fn merge_reads_single_request_passthrough() {
         let out = merge_reads(vec![hr(10, 2)]);
-        assert_eq!(out, vec![BatchRead { area: ModbusArea::HoldingRegister, start: 10, count: 2 }]);
+        assert_eq!(
+            out,
+            vec![BatchRead {
+                area: ModbusArea::HoldingRegister,
+                start: 10,
+                count: 2
+            }]
+        );
     }
 
     #[test]

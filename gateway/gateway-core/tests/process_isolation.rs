@@ -36,9 +36,10 @@ fn host_bin() -> PathBuf {
     let p = target_dir().join(name);
     assert!(
         p.exists(),
-        "缺少插件宿主可执行文件 {}；请先执行 `cargo build -p gateway-plugin-host`\
+        "缺少插件宿主可执行文件 {}（current_exe = {}）；请先执行 `cargo build -p gateway-plugin-host`\
          （或直接 `cargo test --workspace`）",
-        p.display()
+        p.display(),
+        std::env::current_exe().map(|e| e.display().to_string()).unwrap_or_default()
     );
     p
 }
@@ -53,8 +54,9 @@ fn faulty_dylib() -> PathBuf {
     let p = target_dir().join(file);
     assert!(
         p.exists(),
-        "缺少夹具动态库 {}；请先执行 `cargo build -p plugin-faulty`（或 `cargo test --workspace`）",
-        p.display()
+        "缺少夹具动态库 {}（current_exe = {}）；请先执行 `cargo build -p plugin-faulty`（或 `cargo test --workspace`）",
+        p.display(),
+        std::env::current_exe().map(|e| e.display().to_string()).unwrap_or_default()
     );
     p
 }

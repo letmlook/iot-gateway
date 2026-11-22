@@ -148,9 +148,12 @@ pub fn validate(flow: &Flow) -> Vec<FlowError> {
                 .unwrap_or(false)
     });
     if stale_on {
-        let has_alarm_out = nodes
-            .iter()
-            .any(|n| matches!(n.operator.as_deref(), Some("sink_alarm") | Some("alarm_to_data")));
+        let has_alarm_out = nodes.iter().any(|n| {
+            matches!(
+                n.operator.as_deref(),
+                Some("sink_alarm") | Some("alarm_to_data")
+            )
+        });
         if !has_alarm_out {
             errs.push(FlowError::Validation(
                 "stale detection is configured but the graph has no sink_alarm/alarm_to_data node to deliver the alarm".into(),

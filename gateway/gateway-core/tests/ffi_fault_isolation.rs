@@ -49,9 +49,10 @@ fn fixture_dylib(crate_name: &str) -> PathBuf {
     let path = target_dir().join(&file);
     assert!(
         path.exists(),
-        "缺少夹具动态库 {}；请先执行 `cargo build -p plugin-faulty -p plugin-abi-mismatch`\
+        "缺少夹具动态库 {}（current_exe = {}）；请先执行 `cargo build -p plugin-faulty -p plugin-abi-mismatch`\
          （或直接运行 `cargo test --workspace`，会顺带构建）",
-        path.display()
+        path.display(),
+        std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default()
     );
     path
 }

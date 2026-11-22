@@ -596,9 +596,8 @@ fn load_from_db(conn: &Connection) -> Result<Snapshot, PersistError> {
             .map_err(|e| PersistError::Validation(format!("rule {}: bad action: {}", id, e)))?;
         // extra 列：三新字段打包 JSON；NULL / 空串 = 全缺省
         let extras: crate::rules::RuleExtras = match extra_json {
-            Some(s) if !s.trim().is_empty() => serde_json::from_str(&s).map_err(|e| {
-                PersistError::Validation(format!("rule {}: bad extras: {}", id, e))
-            })?,
+            Some(s) if !s.trim().is_empty() => serde_json::from_str(&s)
+                .map_err(|e| PersistError::Validation(format!("rule {}: bad extras: {}", id, e)))?,
             _ => crate::rules::RuleExtras::default(),
         };
         rules.push(crate::rules::Rule {

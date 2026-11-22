@@ -1214,11 +1214,7 @@ mod tests {
         env.state.manager.apply_snapshot(&snap).await;
 
         let token = login_as(&env, "admin-extras", crate::users::UserRole::Admin).await;
-        let mk_cond = |i: usize| {
-            format!(
-                r#"{{"tag_name":"p{i}","op":"gt","threshold":{i}}}"#
-            )
-        };
+        let mk_cond = |i: usize| format!(r#"{{"tag_name":"p{i}","op":"gt","threshold":{i}}}"#);
         let conds: Vec<String> = (0..9).map(mk_cond).collect();
         let body = format!(
             r#"{{"name":"r9","enabled":true,
@@ -1231,7 +1227,10 @@ mod tests {
         );
         let (status, resp) = post_json_with_token(&env.state, "/rules", &body, &token).await;
         assert_eq!(status, 400, "9 个 extra_conditions 必须被拒: {resp}");
-        assert!(resp.contains("extra_conditions"), "错误须指向 extra_conditions: {resp}");
+        assert!(
+            resp.contains("extra_conditions"),
+            "错误须指向 extra_conditions: {resp}"
+        );
 
         // 8 个（上限内）不走上限校验：因测试环境的组/点位不存在，后续引用校验
         // 仍会 400——但错误信息必须不再是 extra 数量上限（否则上限口径就是错的）
@@ -1246,10 +1245,7 @@ mod tests {
             conds8.join(",")
         );
         let (status8, resp8) = post_json_with_token(&env.state, "/rules", &body8, &token).await;
-        assert_ne!(
-            status8, 500,
-            "上限内的规则不应 5xx: {resp8}"
-        );
+        assert_ne!(status8, 500, "上限内的规则不应 5xx: {resp8}");
         assert!(
             !resp8.contains("at most 8"),
             "8 个 extra_conditions 不应报数量上限: {resp8}"

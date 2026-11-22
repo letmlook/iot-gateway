@@ -620,12 +620,7 @@ mod tests {
     fn dedup_graph() -> (Flow, FlowNode) {
         // source → deduplicate → sink_north
         let src = node("src", NodeKind::Source, None, source_config());
-        let dd = node(
-            "dd",
-            NodeKind::Operator,
-            Some("deduplicate"),
-            json!({}),
-        );
+        let dd = node("dd", NodeKind::Operator, Some("deduplicate"), json!({}));
         let sn = node(
             "north-sink",
             NodeKind::Sink,
@@ -699,12 +694,7 @@ mod tests {
     fn inject_reaches_alarm_to_data_and_sink_alarm_only() {
         // source → threshold → { alarm→sink_alarm, normal→sink_north }，旁挂 alarm_to_data → sink_north2
         let (flow, sa, sn) = alarm_graph();
-        let a2d = node(
-            "a2d",
-            NodeKind::Operator,
-            Some("alarm_to_data"),
-            json!({}),
-        );
+        let a2d = node("a2d", NodeKind::Operator, Some("alarm_to_data"), json!({}));
         let sn2 = node(
             "north-sink-2",
             NodeKind::Sink,
@@ -714,7 +704,9 @@ mod tests {
         let mut flow = flow;
         flow.graph.nodes.push(a2d.clone());
         flow.graph.nodes.push(sn2.clone());
-        flow.graph.edges.push(edge(&flow.graph.nodes[0], "out", &a2d));
+        flow.graph
+            .edges
+            .push(edge(&flow.graph.nodes[0], "out", &a2d));
         flow.graph.edges.push(edge(&a2d, "out", &sn2));
         let plan = ExecutionPlan::build(&flow).expect("plan");
         let mut state = FlowState::default();
@@ -732,13 +724,19 @@ mod tests {
                 .expect("inject eval");
 
         // sink_alarm 收到 Alarm(ev)
-        let to_alarm = outs.iter().find(|d| d.node_id == sa.id).expect("sink_alarm 应收到断流告警");
+        let to_alarm = outs
+            .iter()
+            .find(|d| d.node_id == sa.id)
+            .expect("sink_alarm 应收到断流告警");
         match &to_alarm.payload {
             FlowPayload::Alarm(e) => assert_eq!(e.tag, "grp1"),
             other => panic!("sink_alarm 应收 Alarm，实际 {other:?}"),
         }
         // alarm_to_data 的下游 sink_north2 收到 Data（伪源 alarms/events）
-        let to_north2 = outs.iter().find(|d| d.node_id == sn2.id).expect("alarm_to_data 下游应收到");
+        let to_north2 = outs
+            .iter()
+            .find(|d| d.node_id == sn2.id)
+            .expect("alarm_to_data 下游应收到");
         match &to_north2.payload {
             FlowPayload::Data(gd) => {
                 assert_eq!(gd.node_name.as_deref(), Some("alarms"));
@@ -746,7 +744,10 @@ mod tests {
             other => panic!("a2d 下游应收 Data，实际 {other:?}"),
         }
         // 注入不进入 threshold 分支：原 sink_north（threshold normal 端）无投递
-        assert!(!outs.iter().any(|d| d.node_id == sn.id), "注入模式下普通算子分支静默");
+        assert!(
+            !outs.iter().any(|d| d.node_id == sn.id),
+            "注入模式下普通算子分支静默"
+        );
     }
 
     #[test]
@@ -755,7 +756,8 @@ mod tests {
         let plan = ExecutionPlan::build(&flow).expect("plan");
         let mut state = FlowState::default();
         let a = evaluate(&plan, &flow, &group_data(85.0, None), &mut state).unwrap();
-        let b = evaluate_with_inject(&plan, &flow, &group_data(85.0, None), &mut state, None).unwrap();
+        let b =
+            evaluate_with_inject(&plan, &flow, &group_data(85.0, None), &mut state, None).unwrap();
         assert_eq!(a.len(), b.len());
         assert_eq!(
             a.iter().map(|d| d.node_id).collect::<Vec<_>>(),
@@ -780,7 +782,10 @@ mod tests {
             edges: vec![edge(&src_bad, "out", &sa)],
         };
         let errs = validate(&flow);
-        assert!(errs.iter().any(|e| e.to_string().contains("level")), "{errs:?}");
+        assert!(
+            errs.iter().any(|e| e.to_string().contains("level")),
+            "{errs:?}"
+        );
 
         // level 合法但图中无 sink_alarm/alarm_to_data → 拒绝发布
         let src_ok = node(
@@ -802,7 +807,8 @@ mod tests {
         };
         let errs = validate(&flow);
         assert!(
-            errs.iter().any(|e| e.to_string().contains("sink_alarm/alarm_to_data")),
+            errs.iter()
+                .any(|e| e.to_string().contains("sink_alarm/alarm_to_data")),
             "断流告警无出口应报错: {errs:?}"
         );
 
