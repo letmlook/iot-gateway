@@ -42,7 +42,7 @@ pub struct TagDeadband {
 /// 滑动窗口聚合项
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowAgg {
-    /// 非空子集：avg / min / max / count / first / last
+    /// 非空子集：avg / min / max / count / first / last / sum / stddev / median / delta / p50 / p90 / p95 / p99
     pub kinds: Vec<String>,
 }
 
@@ -107,7 +107,8 @@ pub fn validate_policy(policy: &GroupPolicy) -> Result<(), String> {
             return Err("aggregates.kinds must be non-empty".to_string());
         }
         let valid = [
-            "avg", "min", "max", "count", "first", "last", "sum", "stddev", "delta",
+            "avg", "min", "max", "count", "first", "last", "sum", "stddev", "median",
+            "delta", "p50", "p90", "p95", "p99",
         ];
         for k in &w.aggregates.kinds {
             if !valid.contains(&k.as_str()) {
@@ -301,6 +302,40 @@ fn aggregate(kind: &str, samples: &[(u64, f64)]) -> Option<f64> {
         }
         _ => None,
     }
+}
+
+/// 分位数线性插值（numpy 默认 linear 法）：rank = p·(n−1)，相邻两样本插值。
+/// 前置条件：sorted 升序且非空。
+fn percentile_linear(sorted: &[f64], p: f64) -> f64 {
+    let n = sorted.len();
+    let rank = p * (n - 1) as f64;
+    let lo = rank.floor() as usize;
+    let hi = rank.ceil() as usize;
+    if lo == hi {
+        return sorted[lo];
+    }
+    let frac = rank - lo as f64;
+    sorted[lo] * (1.0 - frac) + sorted[hi] * frac
+}
+
+/// 排序类聚合（median/p50/p90/p95/p99）：共用调用方提供的一次升序排序结果，
+/// 禁止在每个 kind 内各自排序。
+fn aggregate_sorted(kind: &str, sorted: &[f64]) -> Option<f64> {
+    if sorted.is_empty() {
+        return None;
+    }
+    match kind {
+        "median" => Some(percentile_linear(sorted, 0.5)),
+        "p50" => Some(percentile_linear(sorted, 0.50)),
+        "p90" => Some(percentile_linear(sorted, 0.90)),
+        "p95" => Some(percentile_linear(sorted, 0.95)),
+        "p99" => Some(percentile_linear(sorted, 0.99)),
+        _ => None,
+    }
+}
+
+fn needs_sorted(kind: &str) -> bool {
+    matches!(kind, "median" | "p50" | "p90" | "p95" | "p99")
 }
 
 // ---------------------------------------------------------------------------
@@ -549,8 +584,21 @@ pub fn apply(
 
                 if can_emit && has_samples {
                     let samples: Vec<_> = win_state.samples.iter().cloned().collect();
+                    // 排序类聚合共用一次升序排序（median/p50/p90/p95/p99）
+                    let sorted: Vec<f64> = if win.aggregates.kinds.iter().any(|k| needs_sorted(k)) {
+                        let mut s: Vec<f64> = samples.iter().map(|(_, v)| *v).collect();
+                        s.sort_by(f64::total_cmp);
+                        s
+                    } else {
+                        Vec::new()
+                    };
                     for kind in &win.aggregates.kinds {
-                        if let Some(val) = aggregate(kind, &samples) {
+                        let val = if needs_sorted(kind) {
+                            aggregate_sorted(kind, &sorted)
+                        } else {
+                            aggregate(kind, &samples)
+                        };
+                        if let Some(val) = val {
                             // 虚拟点位命名：{tag_name}_{agg}
                             let syn_name = format!("{}_{}", tag_name, kind);
                             // 缓存虚拟 TagId
@@ -1034,6 +1082,108 @@ mod tests {
         let gid = gid();
         let p = win_policy(nid, gid, 1000, 100, vec!["sum", "stddev", "delta"]);
         assert!(validate_policy(&p).is_ok());
+    }
+
+    #[test]
+    fn percentile_linear_and_sorted_aggregates() {
+        // median：奇数取中、偶数取中间两值平均
+        let mut odd = vec![3.0, 1.0, 2.0];
+        odd.sort_by(f64::total_cmp);
+        assert_eq!(aggregate_sorted("median", &odd), Some(2.0));
+        let mut even = vec![4.0, 1.0, 3.0, 2.0];
+        even.sort_by(f64::total_cmp);
+        assert_eq!(aggregate_sorted("median", &even), Some(2.5));
+
+        // 线性插值：[0..9] p90 → rank=0.9*9=8.1 → 8*0.9+9*0.1=8.1
+        let s: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        assert!((aggregate_sorted("p90", &s).unwrap() - 8.1).abs() < 1e-9);
+        // [10,20] p95 → rank=0.95 → 10*0.05+20*0.95=19.5
+        assert!((aggregate_sorted("p95", &vec![10.0, 20.0]).unwrap() - 19.5).abs() < 1e-9);
+        // n=1 → 该样本；p50 == median；空 → None
+        assert_eq!(aggregate_sorted("p99", &vec![42.0]), Some(42.0));
+        assert_eq!(aggregate_sorted("p50", &even), aggregate_sorted("median", &even));
+        let empty: Vec<f64> = Vec::new();
+        assert_eq!(aggregate_sorted("p95", &empty), None);
+    }
+
+    #[test]
+    fn prop_window_emit_count_matches_kinds() {
+        // 性质：非空窗口发射时，synthetic.len() == 启用的 kinds 数（14 种全集不变量）
+        with_lock(|| {
+            let nid = nid();
+            let gid = gid();
+            let tid = tid();
+            let store = store_with(nid, gid, tid, "temp");
+            let all = vec![
+                "avg", "min", "max", "count", "first", "last", "sum", "stddev",
+                "median", "delta", "p50", "p90", "p95", "p99",
+            ];
+            store.policy_insert(win_policy(nid, gid, 10000, 500, all.clone()));
+            forget_group(nid, gid);
+            apply(&store, nid, gid, &[(tid, DataValue::Float64(1.0))], 1000);
+            let r = apply(&store, nid, gid, &[(tid, DataValue::Float64(2.0))], 1500);
+            assert_eq!(r.window_emitted, 1);
+            assert_eq!(r.synthetic.len(), 14, "14 种 kinds 必须各产出一个虚拟点位");
+            let names: std::collections::HashSet<&str> =
+                r.synthetic_names.values().map(String::as_str).collect();
+            assert_eq!(names.len(), 14, "虚拟点位名不得互相覆盖");
+            for k in all {
+                assert!(names.contains(format!("temp_{k}").as_str()), "缺少 temp_{k}");
+            }
+        });
+    }
+
+    #[test]
+    fn validate_accepts_percentile_kinds() {
+        let nid = nid();
+        let gid = gid();
+        let p = win_policy(nid, gid, 1000, 100, vec!["median", "p50", "p90", "p95", "p99"]);
+        assert!(validate_policy(&p).is_ok());
+    }
+
+    #[test]
+    fn window_emits_percentiles_from_stream() {
+        with_lock(|| {
+            let nid = nid();
+            let gid = gid();
+            let tid = tid();
+            let store = store_with(nid, gid, tid, "temp");
+            store.policy_insert(win_policy(nid, gid, 10000, 500, vec!["median", "p95"]));
+            forget_group(nid, gid);
+            apply(&store, nid, gid, &[(tid, DataValue::Float64(10.0))], 1000);
+            apply(&store, nid, gid, &[(tid, DataValue::Float64(30.0))], 1200);
+            let r = apply(&store, nid, gid, &[(tid, DataValue::Float64(20.0))], 2000);
+            assert_eq!(r.window_emitted, 1);
+            assert_eq!(r.synthetic.len(), 2);
+            // 窗口 [10,30,20] 排序 [10,20,30]：median=20；p95 rank=1.9 → 20*0.1+30*0.9=29
+            for (id, v) in &r.synthetic {
+                let DataValue::Float64(f) = v else {
+                    panic!("expect Float64");
+                };
+                match r.synthetic_names.get(id).map(String::as_str) {
+                    Some("temp_median") => assert!((*f - 20.0).abs() < 1e-9, "median got {f}"),
+                    Some("temp_p95") => assert!((*f - 29.0).abs() < 1e-9, "p95 got {f}"),
+                    other => panic!("unexpected synthetic {other:?}"),
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn whitelist_kinds_all_implemented() {
+        // 守护：白名单 14 种 kind 必须在 aggregate / aggregate_sorted 至少一处有实现分支，
+        // 防止白名单与实现分支靠人工同步而脱节。
+        let s: Vec<(u64, f64)> = vec![(1, 1.0), (2, 2.0), (3, 3.0)];
+        let sorted = [1.0f64, 2.0, 3.0];
+        for kind in [
+            "avg", "min", "max", "count", "first", "last", "sum", "stddev",
+            "median", "delta", "p50", "p90", "p95", "p99",
+        ] {
+            assert!(
+                aggregate(kind, &s).is_some() || aggregate_sorted(kind, &sorted).is_some(),
+                "白名单 kind {kind:?} 没有任何实现分支"
+            );
+        }
     }
 
     // ===== forget =====
