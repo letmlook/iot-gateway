@@ -74,6 +74,26 @@ api() { curl -fsS -m 10 "$@"; }
 api_post() { curl -fsS -m 10 -X POST "$@" -H 'Content-Type: application/json'; }
 
 south_ids=()
+# 幂等重启：数据目录残留上一轮的 soak-* 节点/flow 时（如进程崩溃后重启），
+# 先清干净再建——否则同名 flow 创建 400、同名节点干扰订阅校验。
+# （2026-11-22 首轮崩溃后重启即死于残留 soak-alarm flow）
+old=$(curl -fsS -m 10 "$BASE/api/nodes" 2>/dev/null | python3 -c 'import json,sys
+d = json.load(sys.stdin)
+items = d["items"] if isinstance(d, dict) else d
+print(" ".join(n["id"] for n in items if n["name"].startswith("soak-")))' 2>/dev/null || true)
+for oid in $old; do
+  api -X DELETE "$BASE/api/nodes/$oid" > /dev/null 2>&1 || true
+  echo "[soak] removed stale node $oid"
+done
+old_flow=$(curl -fsS -m 10 "$BASE/api/flows" 2>/dev/null | python3 -c 'import json,sys
+d = json.load(sys.stdin)
+flows = d["flows"] if isinstance(d, dict) else d
+print(" ".join(f["id"] for f in flows if f["name"] == "soak-alarm"))' 2>/dev/null || true)
+for fid in $old_flow; do
+  api -X DELETE "$BASE/api/flows/$fid" > /dev/null 2>&1 || true
+  echo "[soak] removed stale flow $fid"
+done
+
 for i in 1 2; do
   id=$(api_post "$BASE/api/nodes" -d "{\"name\":\"soak-sim-$i\",\"kind\":\"south\",\"plugin_name\":\"sim\",\"config\":{\"interval_ms\":$((i*1000))}}" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
   south_ids+=("$id")
@@ -82,18 +102,37 @@ for i in 1 2; do
   echo "[soak] south node soak-sim-$i = $id"
 done
 
-kafka_id=$(api_post "$BASE/api/nodes" -d '{"name":"soak-kafka","kind":"north","plugin_name":"kafka","config":{"brokers":"127.0.0.1:9092"}}' | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+# kafka 是收费插件（license 特性位门禁）：数据目录无 license.dat 时这里 403，
+# 失败信息要直指原因，而不是让 python traceback 代替人说话
+resp=$(api_post "$BASE/api/nodes" -d '{"name":"soak-kafka","kind":"north","plugin_name":"kafka","config":{"brokers":"127.0.0.1:9092"}}') || {
+  echo "[soak] FAIL: create kafka node rejected: ${resp:-<no body>}"
+  echo "[soak] hint: kafka 需 license 特性位——用 --license data/license.dat 启动（数据目录已有则自动跳过）"
+  exit 1
+}
+kafka_id=$(echo "$resp" | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])')
 echo "[soak] north kafka stub = $kafka_id"
 
-# 订阅：两个南向组 → kafka stub（订阅 API）
+# 订阅：两个南向组 → kafka stub。必须走 /api 前缀 + PUT + {subscriptions:[...]} 包裹：
+# 裸路径会被 SPA fallback 吞成 200 + index.html——「看起来成功」实际没订阅
+# （2026-11-22 首轮 8.5h 的 north_lagged 全空、bus_no_subscribers 一路涨，就是这个静默失败）
 for id in "${south_ids[@]}"; do
-  gid=$(api "$BASE/api/nodes/$id/groups" | python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["id"])')
-  api_post "$BASE/nodes/$kafka_id/subscriptions" -d "[{\"south_node_id\":\"$id\",\"group_id\":\"$gid\"}]" > /dev/null || \
-  api_post "$BASE/api/nodes/$kafka_id/subscriptions" -d "[{\"south_node_id\":\"$id\",\"group_id\":\"$gid\"}]" > /dev/null
+  gid=$(api "$BASE/api/nodes/$id/groups" | python3 -c 'import json,sys
+d = json.load(sys.stdin)
+items = d["items"] if isinstance(d, dict) else d
+print(items[0]["id"])')
+  resp=$(curl -fsS -m 10 -X PUT "$BASE/api/nodes/$kafka_id/subscriptions" -H 'Content-Type: application/json' \
+    -d "{\"subscriptions\":[{\"south_node_id\":\"$id\",\"group_id\":\"$gid\"}]}" 2>&1) || {
+    echo "[soak] FAIL: subscribe $id -> $kafka_id: ${resp:-<no body>}"
+    exit 1
+  }
+  echo "[soak] subscribed $id/$gid -> kafka"
 done
 
 # 告警链路 flow：sim → threshold(low=100，sim 值域 15-25 恒低于阈值 → 恒触发) → sink_alarm
-g0=$(api "$BASE/api/nodes/${south_ids[0]}/groups" | python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["id"])')
+g0=$(api "$BASE/api/nodes/${south_ids[0]}/groups" | python3 -c 'import json,sys
+d = json.load(sys.stdin)
+items = d["items"] if isinstance(d, dict) else d
+print(items[0]["id"])')
 api_post "$BASE/api/flows" -d '{
   "name":"soak-alarm",
   "nodes":[
@@ -120,10 +159,14 @@ sample() {
   local metrics health rss db_size published lagged running alarms_total
   metrics=$(curl -fsS -m 5 "$BASE/api/metrics" 2>/dev/null || true)
   health=$(curl -fsS -m 5 "$BASE/api/health" 2>/dev/null || echo '{"status":"down"}')
-  # /api/alarms 无 total 字段：取 len（limit 1000 封顶；封顶本身即「告警链路活跃」证据）
+  # /api/alarms 无 total 字段：取 len（limit 1000 封顶；封顶本身即「告警链路活跃」证据）。
+  # 注意：脚本开了 pipefail——curl 瞬时失败（连接重置等）会让 pipeline 退出码非零，
+  # 若写 `|| echo 0` 会在 python 已输出 len 后再追加一个 0（'1\n0'），下游 float() 必炸
+  # （2026-11-22 首轮 soak 跑 8.5h 即死于这个组合）。改为空值兜底：成功取输出、失败补 0。
   alarms_total=$(curl -fsS -m 5 "$BASE/api/alarms?limit=1000" 2>/dev/null | python3 -c 'import json,sys
 try: print(len(json.load(sys.stdin).get("alarms", [])))
-except Exception: print(0)' 2>/dev/null || echo 0)
+except Exception: print(0)' 2>/dev/null || true)
+  [ -n "$alarms_total" ] || alarms_total=0
   rss=$(ps -o rss= -p "$GW_PID" 2>/dev/null | tr -d ' ' || echo 0)
   # WAL 模式下主文件可能不增长：库大小 = 主文件 + -wal（接近真实占用）
   db_size=0
@@ -141,16 +184,20 @@ def num(name):
             try: return float(line.rsplit(" ", 1)[1])
             except Exception: pass
     return None
+def fnum(v):
+    # 环境变量统一经此转 float：非有限输入（空/多值/脏字符）回退 0，不让单点脏数据杀 soak
+    try: return float(str(v).strip().split()[0])
+    except Exception: return 0.0
 rec = {
     "ts": int(os.environ["TS"]),
-    "rss_kb": float(os.environ.get("RSS", "0") or 0),
-    "db_bytes": float(os.environ.get("DB_SIZE", "0") or 0),
+    "rss_kb": fnum(os.environ.get("RSS", "0")),
+    "db_bytes": fnum(os.environ.get("DB_SIZE", "0")),
     "health": json.loads(os.environ.get("HEALTH", '{"status":"down"}')).get("status"),
     "nodes_total": num("gateway_nodes_total"),
     "nodes_running": num("gateway_nodes_running"),
     "south_published": num("gateway_data_flow_south_published"),
     "bus_no_subscribers": num("gateway_data_flow_bus_no_subscribers"),
-    "alarms_total": float(os.environ.get("ALARMS", "0") or 0),
+    "alarms_total": fnum(os.environ.get("ALARMS", "0")),
 }
 lag = {}
 for line in metrics.splitlines():
@@ -165,10 +212,13 @@ PYEOF
 echo "[soak] soak running: duration=${DURATION}s interval=${INTERVAL}s reconnect=${RECONNECT_INTERVAL}s"
 END=$(( $(date +%s) + DURATION ))
 NEXT_RECONNECT=$(( $(date +%s) + RECONNECT_INTERVAL ))
-sample
+# 长跑健壮性：单次采样失败（瞬时网络/解析问题）只告警不中止——72h 里任何
+# 一次性异常都不该终止整个 soak（set -e 下裸调用 sample 失败即全脚本退出，
+# 2026-11-22 首轮即因此死于一次 curl 瞬时失败 × pipefail × ALARMS 脏值）
+sample || echo "[soak] WARN: sample failed at $(date '+%F %T')"
 while [ "$(date +%s)" -lt "$END" ]; do
   sleep "$INTERVAL"
-  sample
+  sample || echo "[soak] WARN: sample failed at $(date '+%F %T')"
   # 节点级重连演练：stop → start（校验状态回到 running，恢复失败只告警不中止）
   if [ "$(date +%s)" -ge "$NEXT_RECONNECT" ]; then
     for id in "${south_ids[@]}"; do
