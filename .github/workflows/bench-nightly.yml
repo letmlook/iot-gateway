@@ -44,11 +44,18 @@ jobs:
             mkdir -p prev && cp docs/bench/latest.json prev/latest.json
           fi
 
-      - name: Run benchmarks
+      - name: Run benchmarks (3 runs, keep median)
         run: |
+          # docs/bench/README 口径：单机重复运行差异可达 2 倍，建议 3 次取中位数。
+          # 前两次只出 JSON，最后一次额外出人类可读 md 报告。
           mkdir -p docs/bench
+          cargo run --release -p gateway-bench -- --json docs/bench/run1.json
+          cargo run --release -p gateway-bench -- --json docs/bench/run2.json
           cargo run --release -p gateway-bench -- \
-            --out "docs/bench/baseline-$(date +%F).md" --json docs/bench/latest.json
+            --out "docs/bench/baseline-$(date +%F).md" --json docs/bench/run3.json
+          python3 scripts/bench_median.py \
+            docs/bench/run1.json docs/bench/run2.json docs/bench/run3.json \
+            > docs/bench/latest.json
 
       - name: Show result
         run: cat docs/bench/baseline-*.md
