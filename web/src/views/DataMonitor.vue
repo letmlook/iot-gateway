@@ -322,6 +322,130 @@ function initWriteInput(tag) {
   }
 }
 
+// ===== 组数据策略（GroupPolicy）=====
+const policyVisible = ref(false)
+const policySaving = ref(false)
+const POLICY_KINDS = ['avg', 'min', 'max', 'count', 'first', 'last', 'sum', 'stddev', 'median', 'delta', 'p50', 'p90', 'p95', 'p99']
+const policyForm = ref(emptyPolicyForm())
+const tagDeadbandRows = ref([])
+const totalizerRows = ref([])
+
+function emptyPolicyForm() {
+  return {
+    mode: 'passthrough',
+    deadband: null,
+    deadband_percent: null,
+    max_report_ms: 0,
+    windowEnabled: false,
+    window_ms: 60000,
+    emit_ms: 1000,
+    kinds: []
+  }
+}
+
+function applyPolicyToForm(p) {
+  const f = emptyPolicyForm()
+  if (p) {
+    f.mode = p.mode || 'passthrough'
+    f.deadband = p.deadband ?? null
+    f.deadband_percent = p.deadband_percent ?? null
+    f.max_report_ms = p.max_report_ms || 0
+    if (p.window) {
+      f.windowEnabled = true
+      f.window_ms = p.window.window_ms
+      f.emit_ms = p.window.emit_ms
+      f.kinds = [...(p.window.aggregates?.kinds || [])]
+    }
+    tagDeadbandRows.value = (p.tags || []).map(t => ({
+      tag_name: t.tag_name, deadband: t.deadband ?? null, deadband_percent: t.deadband_percent ?? null
+    }))
+    totalizerRows.value = (p.totalizer || []).map(x => ({
+      tag_name: x.tag_name, reset_period_ms: x.reset_period_ms || 0,
+      rollover: x.rollover ?? null, emit_ms: x.emit_ms || 0
+    }))
+  } else {
+    tagDeadbandRows.value = []
+    totalizerRows.value = []
+  }
+  policyForm.value = f
+}
+
+async function openPolicy() {
+  if (!selectedNode.value || !selectedGroup.value) return
+  policyVisible.value = true
+  try {
+    applyPolicyToForm(await api.getPolicy(selectedNode.value, selectedGroup.value))
+  } catch {
+    applyPolicyToForm(null)
+  }
+}
+
+function numOrNull(v) {
+  return v === '' || v === null || v === undefined ? null : Number(v)
+}
+
+async function savePolicy() {
+  const f = policyForm.value
+  // south_node_id/group_id 后端以路径参数覆盖，这里带上保证 body 结构完整
+  const body = {
+    south_node_id: selectedNode.value,
+    group_id: selectedGroup.value,
+    mode: f.mode,
+    max_report_ms: Number(f.max_report_ms) || 0,
+    tags: tagDeadbandRows.value.filter(r => r.tag_name).map(r => ({
+      tag_name: r.tag_name,
+      deadband: numOrNull(r.deadband),
+      deadband_percent: numOrNull(r.deadband_percent)
+    })),
+    totalizer: totalizerRows.value.filter(r => r.tag_name).map(r => ({
+      tag_name: r.tag_name,
+      reset_period_ms: Number(r.reset_period_ms) || 0,
+      rollover: numOrNull(r.rollover),
+      emit_ms: Number(r.emit_ms) || 0
+    }))
+  }
+  const db = numOrNull(f.deadband)
+  if (db !== null) body.deadband = db
+  const dbp = numOrNull(f.deadband_percent)
+  if (dbp !== null) body.deadband_percent = dbp
+  if (f.windowEnabled) {
+    body.window = {
+      window_ms: Number(f.window_ms),
+      emit_ms: Number(f.emit_ms),
+      aggregates: { kinds: f.kinds }
+    }
+  }
+  policySaving.value = true
+  try {
+    await api.putPolicy(selectedNode.value, selectedGroup.value, body)
+    ElMessage.success(t('monitor.policySaved'))
+    policyVisible.value = false
+  } catch (e) {
+    ElMessage.error(t('monitor.policySaveFailed') + getErrorMessage(t, e))
+  } finally {
+    policySaving.value = false
+  }
+}
+
+async function clearPolicy() {
+  try {
+    await api.deletePolicy(selectedNode.value, selectedGroup.value)
+    ElMessage.success(t('monitor.policyCleared'))
+    policyVisible.value = false
+  } catch (e) {
+    ElMessage.error(t('monitor.policySaveFailed') + getErrorMessage(t, e))
+  }
+}
+
+function addTagDeadbandRow() {
+  tagDeadbandRows.value.push({ tag_name: '', deadband: null, deadband_percent: null })
+}
+function removeTagDeadbandRow(i) { tagDeadbandRows.value.splice(i, 1) }
+function addTotalizerRow() {
+  totalizerRows.value.push({ tag_name: '', reset_period_ms: 0, rollover: null, emit_ms: 0 })
+}
+function removeTotalizerRow(i) { totalizerRows.value.splice(i, 1) }
+
 const selectedNodeInfo = computed(() => nodes.value.find(n => n.id === selectedNode.value))
 
 // WS integration
@@ -405,6 +529,11 @@ onUnmounted(() => {
             <el-select v-model="selectedGroup" :placeholder="t('monitor.all')" clearable class="control-select" @change="applyFilters">
               <el-option v-for="g in groups" :key="g.id" :label="g.name" :value="g.id" />
             </el-select>
+          </div>
+          <div class="control-group">
+            <el-button :disabled="!selectedGroup" @click="openPolicy">
+              {{ t('monitor.dataPolicy') }}
+            </el-button>
           </div>
           <div class="control-group">
             <label>{{ t('common.search') }}</label>
@@ -527,6 +656,76 @@ onUnmounted(() => {
         <p v-else>{{ t('monitor.addTagsFirst') }}</p>
       </template>
     </el-empty>
+
+    <el-dialog v-model="policyVisible" :title="t('monitor.dataPolicy')" width="680px">
+      <el-form label-width="150px">
+        <el-form-item :label="t('monitor.policyMode')">
+          <el-radio-group v-model="policyForm.mode">
+            <el-radio value="passthrough">{{ t('monitor.policyModePassthrough') }}</el-radio>
+            <el-radio value="on_change">{{ t('monitor.policyModeOnChange') }}</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item :label="t('monitor.policyDeadband')">
+          <el-input-number v-model="policyForm.deadband" :min="0" :controls="false" class="w-40" />
+        </el-form-item>
+        <el-form-item :label="t('monitor.policyDeadbandPercent')">
+          <el-input-number v-model="policyForm.deadband_percent" :min="0" :max="100" :controls="false" class="w-40" />
+        </el-form-item>
+        <el-form-item :label="t('monitor.policyMaxReport')">
+          <el-input-number v-model="policyForm.max_report_ms" :min="0" :controls="false" class="w-40" />
+        </el-form-item>
+
+        <el-form-item :label="t('monitor.policyWindow')">
+          <el-checkbox v-model="policyForm.windowEnabled">{{ t('monitor.policyEnable') }}</el-checkbox>
+        </el-form-item>
+        <template v-if="policyForm.windowEnabled">
+          <el-form-item :label="t('monitor.policyWindowMs')">
+            <el-input-number v-model="policyForm.window_ms" :min="100" :controls="false" class="w-40" />
+          </el-form-item>
+          <el-form-item :label="t('monitor.policyEmitMs')">
+            <el-input-number v-model="policyForm.emit_ms" :min="10" :controls="false" class="w-40" />
+          </el-form-item>
+          <el-form-item :label="t('monitor.policyKinds')">
+            <el-select v-model="policyForm.kinds" multiple class="w-full">
+              <el-option v-for="k in POLICY_KINDS" :key="k" :label="k" :value="k" />
+            </el-select>
+          </el-form-item>
+        </template>
+
+        <el-form-item :label="t('monitor.policyTagDeadband')">
+          <div class="rows-editor">
+            <div v-for="(r, i) in tagDeadbandRows" :key="i" class="row-line">
+              <el-select v-model="r.tag_name" filterable class="row-tag">
+                <el-option v-for="tg in allTags" :key="tg.id" :label="tg.name" :value="tg.name" />
+              </el-select>
+              <el-input-number v-model="r.deadband" :min="0" :controls="false" placeholder="±" class="row-num" />
+              <el-input-number v-model="r.deadband_percent" :min="0" :max="100" :controls="false" placeholder="%" class="row-num" />
+              <el-button link type="danger" @click="removeTagDeadbandRow(i)">✕</el-button>
+            </div>
+            <el-button link type="primary" @click="addTagDeadbandRow">+ {{ t('monitor.addRow') }}</el-button>
+          </div>
+        </el-form-item>
+
+        <el-form-item :label="t('monitor.policyTotalizer')">
+          <div class="rows-editor">
+            <div v-for="(r, i) in totalizerRows" :key="i" class="row-line">
+              <el-select v-model="r.tag_name" filterable class="row-tag">
+                <el-option v-for="tg in allTags" :key="tg.id" :label="tg.name" :value="tg.name" />
+              </el-select>
+              <el-input-number v-model="r.reset_period_ms" :min="0" :controls="false" :placeholder="t('monitor.policyResetPeriod')" class="row-num" />
+              <el-input-number v-model="r.rollover" :min="0" :controls="false" :placeholder="t('monitor.policyRollover')" class="row-num" />
+              <el-input-number v-model="r.emit_ms" :min="0" :controls="false" :placeholder="t('monitor.policyTotalizerEmit')" class="row-num" />
+              <el-button link type="danger" @click="removeTotalizerRow(i)">✕</el-button>
+            </div>
+            <el-button link type="primary" @click="addTotalizerRow">+ {{ t('monitor.addRow') }}</el-button>
+          </div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="clearPolicy">{{ t('monitor.policyClear') }}</el-button>
+        <el-button type="primary" :loading="policySaving" @click="savePolicy">{{ t('common.save') }}</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -776,4 +975,11 @@ onUnmounted(() => {
     width: 100%;
   }
 }
+
+.rows-editor { width: 100%; }
+.row-line { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
+.row-tag { width: 180px; }
+.row-num { width: 120px; }
+.w-40 { width: 160px; }
+.w-full { width: 100%; }
 </style>

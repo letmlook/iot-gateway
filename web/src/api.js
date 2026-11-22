@@ -248,6 +248,9 @@ export const api = {
   createGroup: (nodeId, body) => req('POST', `/nodes/${nodeId}/groups`, body),
   updateGroup: (nodeId, gid, body) => req('PUT', `/nodes/${nodeId}/groups/${gid}`, body),
   deleteGroup: (nodeId, gid) => req('DELETE', `/nodes/${nodeId}/groups/${gid}`),
+  getPolicy: (nodeId, gid) => req('GET', `/nodes/${nodeId}/groups/${gid}/policy`),
+  putPolicy: (nodeId, gid, body) => req('PUT', `/nodes/${nodeId}/groups/${gid}/policy`, body),
+  deletePolicy: (nodeId, gid) => req('DELETE', `/nodes/${nodeId}/groups/${gid}/policy`),
 
   // 标签 CRUD
   tags: (nodeId, params) => req('GET', `/nodes/${nodeId}/tags${params ? '?' + new URLSearchParams(params).toString() : ''}`)
