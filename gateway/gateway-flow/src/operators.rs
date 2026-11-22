@@ -1,5 +1,5 @@
 //! MVP 算子集（design §1/§4.1）：threshold_alarm、state_change_alarm、route、
-//! alarm_to_data、sink_north、sink_alarm、rate_of_change（流算子第二批补入）。
+//! alarm_to_data、sink_north、sink_alarm、rate_of_change、deduplicate（流算子第二批补入）。
 //! 脚本算子（rhai）明确不在 MVP（沙箱专项）。
 
 use chrono::Utc;
@@ -12,7 +12,7 @@ use crate::error::FlowError;
 use crate::payload::{AlarmEvent, AlarmLevel, FlowPayload};
 
 /// 算子/端点注册表（server 侧 `GET /flows/operators` 发现用，前端不硬编码——踩坑 P6 对策）。
-pub const OPERATOR_NAMES: [&str; 7] = [
+pub const OPERATOR_NAMES: [&str; 8] = [
     "threshold_alarm",
     "state_change_alarm",
     "route",
@@ -20,6 +20,7 @@ pub const OPERATOR_NAMES: [&str; 7] = [
     "sink_north",
     "sink_alarm",
     "rate_of_change",
+    "deduplicate",
 ];
 
 /// Source 节点配置：绑定的南向 (节点, 组)。流程输入只允许来自南向组
@@ -63,6 +64,10 @@ impl PortSpec {
             "rate_of_change" => PortSpec {
                 inputs: &["in"],
                 outputs: &["alarm", "normal"],
+            },
+            "deduplicate" => PortSpec {
+                inputs: &["in"],
+                outputs: &["out"],
             },
             // 告警 → 数据桥：把 Alarm 载荷转成 GroupData，交给 sink_north（MQTT/Kafka/
             // Webhook/SMTP 等北向节点）推送——告警通知渠道（蓝图 §7 Q6）的实现基础
@@ -149,6 +154,7 @@ pub fn validate_config(operator: &str, config: &serde_json::Value) -> Result<(),
         }
         "alarm_to_data" => Ok(()),
         "sink_alarm" => Ok(()),
+        "deduplicate" => Ok(()),
         other => Err(format!("unknown operator `{other}`")),
     }
 }
@@ -200,6 +206,10 @@ pub struct RateOfChangeConfig {
     #[serde(default)]
     pub message: Option<String>,
 }
+
+/// deduplicate 配置：无字段（spec §三）。
+#[derive(Debug, Deserialize)]
+pub struct DeduplicateConfig {}
 
 #[derive(Debug, Deserialize)]
 pub struct SinkNorthConfig {
@@ -366,6 +376,26 @@ pub fn eval_rate_of_change(
     )
 }
 
+/// 整帧去重求值（spec §三）：与上一帧 values 逐位相等（含 TagId、类型、长度）→ 无输出
+/// （下游静默跳过）；任一差异 → 转发完整帧并更新快照。NaN ≠ NaN：含 NaN 帧每帧转发。
+pub fn eval_deduplicate(
+    node_id: Uuid,
+    state: &mut HashMap<Uuid, Vec<(gateway_sdk::TagId, DataValue)>>,
+    gd: &GroupData,
+) -> Option<FlowPayload> {
+    let snapshot = gd.values.clone();
+    let changed = match state.get(&node_id) {
+        None => true,
+        Some(prev) => *prev != snapshot,
+    };
+    if changed {
+        state.insert(node_id, snapshot);
+        Some(FlowPayload::Data(gd.clone()))
+    } else {
+        None
+    }
+}
+
 fn display_value(v: &DataValue) -> String {
     match v {
         DataValue::String(s) => s.clone(),
@@ -515,6 +545,14 @@ pub fn evaluate_node(
                 out.push(("normal", n));
             }
             Ok(out)
+        }
+        "deduplicate" => {
+            serde_json::from_value::<DeduplicateConfig>(config.clone())
+                .map_err(|e| FlowError::Operator(operator.into(), e.to_string()))?;
+            match eval_deduplicate(node_id, &mut state.last_frames, &gd) {
+                Some(out) => Ok(vec![("out", out)]),
+                None => Ok(vec![]),
+            }
         }
         other => Err(FlowError::Operator(
             other.to_string(),

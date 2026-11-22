@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use gateway_sdk::GroupData;
+use gateway_sdk::{DataValue, GroupData};
 use uuid::Uuid;
 
 use crate::error::FlowError;
@@ -13,12 +13,14 @@ use crate::flow::{Flow, NodeKind};
 use crate::payload::FlowPayload;
 use crate::plan::ExecutionPlan;
 
-/// flow 节点运行态（state_change 上一态 / rate 上一读数）。不落盘，重启清零。
+/// flow 节点运行态（state_change 上一态 / rate 上一读数 / dedup 上一帧）。不落盘，重启清零。
 #[derive(Debug, Default)]
 pub struct FlowState {
     pub last_values: HashMap<Uuid, HashMap<String, String>>,
     /// rate_of_change 基线：节点 id → tag_name → (上一值, 上一 ts 毫秒)
     pub last_rate: HashMap<Uuid, HashMap<String, (f64, u64)>>,
+    /// deduplicate 快照：节点 id → 上一帧 values
+    pub last_frames: HashMap<Uuid, Vec<(gateway_sdk::TagId, DataValue)>>,
 }
 
 /// 一次求值的 sink 投递（server 按此分发：sink_north → 北向插件，sink_alarm → 告警存储）。

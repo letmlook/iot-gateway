@@ -614,4 +614,82 @@ mod tests {
         )
         .is_ok());
     }
+
+    // ---------- deduplicate ----------
+
+    fn dedup_graph() -> (Flow, FlowNode) {
+        // source → deduplicate → sink_north
+        let src = node("src", NodeKind::Source, None, source_config());
+        let dd = node(
+            "dd",
+            NodeKind::Operator,
+            Some("deduplicate"),
+            json!({}),
+        );
+        let sn = node(
+            "north-sink",
+            NodeKind::Sink,
+            Some("sink_north"),
+            json!({"node_id": Uuid::new_v4()}),
+        );
+        let flow = Flow {
+            graph: FlowGraph {
+                nodes: vec![src.clone(), dd.clone(), sn.clone()],
+                edges: vec![edge(&src, "out", &dd), edge(&dd, "out", &sn)],
+            },
+            ..alarm_graph().0
+        };
+        (flow, sn)
+    }
+
+    #[test]
+    fn dedup_first_frame_forwards_then_identical_suppressed() {
+        let (flow, _sn) = dedup_graph();
+        let plan = ExecutionPlan::build(&flow).expect("plan");
+        let mut state = FlowState::default();
+        // 首帧转发
+        let gd1 = group_data(10.0, None);
+        let outs = evaluate(&plan, &flow, &gd1, &mut state).unwrap();
+        assert_eq!(outs.len(), 1, "首帧应转发");
+        // 完全相同帧（值同）抑制——ts 变化不影响比较（比的是 values）。
+        // group_data 每次调用生成新 TagId，而逐位比较含 TagId，
+        // 故复用首帧（仅换 ts）构造真正逐位相同的 values。
+        let mut gd2 = gd1.clone();
+        gd2.ts = Utc::now();
+        let outs = evaluate(&plan, &flow, &gd2, &mut state).unwrap();
+        assert_eq!(outs.len(), 0, "重复帧应被抑制");
+        // 值变化转发
+        let outs = evaluate(&plan, &flow, &group_data(11.0, None), &mut state).unwrap();
+        assert_eq!(outs.len(), 1, "值变化应转发");
+    }
+
+    #[test]
+    fn dedup_frame_shape_change_forwards() {
+        let (flow, _sn) = dedup_graph();
+        let plan = ExecutionPlan::build(&flow).expect("plan");
+        let mut state = FlowState::default();
+        evaluate(&plan, &flow, &group_data(10.0, None), &mut state).unwrap();
+        // 多一路 switch 点位：长度变化 → 转发
+        let outs = evaluate(&plan, &flow, &group_data(10.0, Some("1")), &mut state).unwrap();
+        assert_eq!(outs.len(), 1, "点位数变化应转发");
+    }
+
+    #[test]
+    fn dedup_nan_frame_always_forwards() {
+        let (flow, _sn) = dedup_graph();
+        let plan = ExecutionPlan::build(&flow).expect("plan");
+        let mut state = FlowState::default();
+        let gd1 = group_data(f64::NAN, None);
+        let outs = evaluate(&plan, &flow, &gd1, &mut state).unwrap();
+        assert_eq!(outs.len(), 1);
+        // 同 TagId、逐位同帧仅值同为 NaN：NaN ≠ NaN（PartialEq 不特判）→ 仍每帧转发
+        let gd2 = gd1.clone();
+        let outs = evaluate(&plan, &flow, &gd2, &mut state).unwrap();
+        assert_eq!(outs.len(), 1, "NaN ≠ NaN：连续 NaN 帧每帧转发");
+    }
+
+    #[test]
+    fn dedup_validate_accepts_empty_config() {
+        assert!(validate_config("deduplicate", &json!({})).is_ok());
+    }
 }
