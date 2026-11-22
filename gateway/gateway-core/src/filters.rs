@@ -747,6 +747,10 @@ pub fn apply(
                 let Some(f) = numeric_f64(value) else {
                     continue; // 非数值不进 totalizer（与窗口聚合口径一致，静默跳过）
                 };
+                // NaN/Inf 不得进累计器：配 rollover 时 total += NaN 会永久毒化累计值
+                if !f.is_finite() {
+                    continue;
+                }
                 let Some(tag_name) = store.tag_get(*tid).map(|t| t.name) else {
                     continue;
                 };
@@ -1696,6 +1700,41 @@ mod tests {
         });
     }
 
+    #[test]
+    fn totalizer_ignores_non_finite_values() {
+        with_lock(|| {
+            let nid = nid();
+            let gid = gid();
+            let tid = tid();
+            let store = store_with(nid, gid, tid, "meter");
+            let mut p = passthrough_policy(nid, gid);
+            p.totalizer = Some(vec![TotalizerTag {
+                tag_name: "meter".into(),
+                reset_period_ms: 0,
+                rollover: None,
+                emit_ms: 0,
+            }]);
+            store.policy_insert(p);
+            forget_group(nid, gid);
+            // NaN 作为首见值：只污染基线，不产生输出
+            let out = apply(&store, nid, gid, &[(tid, DataValue::Float64(f64::NAN))], 1000);
+            assert!(out.synthetic.is_empty());
+            // Inf 同样被跳过
+            let out = apply(&store, nid, gid, &[(tid, DataValue::Float64(f64::INFINITY))], 2000);
+            assert!(out.synthetic.is_empty());
+            // 正常读数继续累计：100 → 110 → total=10（NaN/Inf 从未进入状态）
+            let out = apply(&store, nid, gid, &[(tid, DataValue::Float64(100.0))], 3000);
+            assert!(out.synthetic.is_empty(), "100 是首个有限读数=首见，不输出");
+            let out = apply(&store, nid, gid, &[(tid, DataValue::Float64(110.0))], 4000);
+            assert_eq!(out.synthetic.len(), 1);
+            if let DataValue::Float64(f) = &out.synthetic[0].1 {
+                assert!((*f - 10.0).abs() < 1e-9, "total got {f}");
+            } else {
+                panic!("expect Float64");
+            }
+        });
+    }
+
     // ===== Property tests（T5 质量纵深）=====
     //
     // 不引入 proptest/quickcheck 依赖：用确定性 xorshift 伪随机批量生成输入，
@@ -1941,6 +1980,65 @@ mod tests {
                 "suppressed_msgs 必须等于「本批零输出」的指示位"
             );
             ts += rng.below(3000) + 1; // 单调推进，覆盖心跳区间
+        }
+    }
+
+    #[test]
+    fn prop_totalizer_matches_shadow_model() {
+        // 性质（任意读数序列，确定性 xorshift；本性质不配 reset_period——重置语义有专门单测）：
+        //   1. totalizer_advance 发射的最后一条 == 影子模型 total（逐步独立推演）
+        //   2. 发射次数 ≤ 1（非重置配置下单步至多一条）
+        //   3. 无发射步 total 不变
+        let mut rng = PropRng::new(0xE500_0001);
+        for _round in 0..200 {
+            let ro = if rng.below(2) == 0 {
+                Some(rng.f64_range(100.0, 1000.0))
+            } else {
+                None
+            };
+            let cfg = TotalizerTag {
+                tag_name: "m".into(),
+                reset_period_ms: 0,
+                rollover: ro,
+                emit_ms: 0,
+            };
+            let mut st = TotalizerState::default();
+            let mut shadow_total = 0.0f64;
+            let mut shadow_last: Option<f64> = None;
+            let mut ts = 0u64;
+            for _step in 0..200 {
+                // 60% 缓步上升（可能跨翻转），40% 全范围随机（含下降=换表）
+                let v = if rng.below(10) < 6 {
+                    shadow_last.unwrap_or(0.0) + rng.f64_range(0.0, 80.0)
+                } else {
+                    rng.f64_range(0.0, 1200.0)
+                };
+                let emits = totalizer_advance(&mut st, &cfg, v, ts);
+                // 影子模型推进
+                if let Some(last) = shadow_last {
+                    if v >= last {
+                        shadow_total += v - last;
+                    } else if let Some(r) = ro {
+                        if last > r * 0.5 {
+                            shadow_total += (r - last) + v;
+                        }
+                    }
+                }
+                shadow_last = Some(v);
+                assert!(emits.len() <= 1, "非重置配置单步至多一条发射");
+                if let Some(&e) = emits.last() {
+                    assert!(
+                        (e - shadow_total).abs() < 1e-6,
+                        "发射 {e} ≠ 影子 total {shadow_total} (rollover={ro:?})"
+                    );
+                }
+                assert!(
+                    (st.total - shadow_total).abs() < 1e-6,
+                    "内部 total {} ≠ 影子 {shadow_total}",
+                    st.total
+                );
+                ts += rng.below(5000) + 1;
+            }
         }
     }
 }
