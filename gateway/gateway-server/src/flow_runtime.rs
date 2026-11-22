@@ -191,7 +191,15 @@ impl FlowRuntime {
                         }
                     }
                     _ = tokio::time::sleep_until(deadline) => {
-                        let Some(s) = stale.clone() else { continue };
+                        let Some(s) = stale.clone() else {
+                            // M-2（backlog）：stale=None 时 deadline 只是 select 的哨兵；
+                            // 触发后必须 re-arm 再 continue，否则 sleep_until 永远立即
+                            // 返回，任务退化为忙循环烧 CPU（365 天后爆发，首轮 soak 就
+                            // 是跑不满 72h 的活证据）
+                            deadline = tokio::time::Instant::now()
+                                + tokio::time::Duration::from_secs(365 * 24 * 3600);
+                            continue;
+                        };
                         let ev = stale_alarm_event(&group_name, s.timeout_ms, &s.level);
                         let stub = gateway_sdk::GroupData {
                             node_id: gateway_sdk::NodeId(sc.south_node_id),
@@ -341,6 +349,11 @@ pub(crate) struct StaleDetection {
     pub level: String,
 }
 
+/// stale_timeout_ms 钳制上限（365 天）：`Instant + Duration` 在超亚毫秒级 u64 时
+/// 会溢出 panic（M-3，backlog）。365 天与 stale=None 的哨兵 deadline 同数量级，
+/// 超过该上限的配置视为配置错误，钳制 + warn（拒绝创建会让已发布 flow 升级失败）。
+pub(crate) const MAX_STALE_TIMEOUT_MS: u64 = 365 * 24 * 3600 * 1000;
+
 /// 解析 source config 的断流检测配置；0 或缺省 = None。
 pub(crate) fn parse_stale_detection(config: &serde_json::Value) -> Option<StaleDetection> {
     let c: serde_json::Value = config.clone();
@@ -348,8 +361,15 @@ pub(crate) fn parse_stale_detection(config: &serde_json::Value) -> Option<StaleD
     if timeout == 0 {
         return None;
     }
+    if timeout > MAX_STALE_TIMEOUT_MS {
+        tracing::warn!(
+            timeout,
+            cap = MAX_STALE_TIMEOUT_MS,
+            "stale_timeout_ms exceeds cap, clamped"
+        );
+    }
     Some(StaleDetection {
-        timeout_ms: timeout,
+        timeout_ms: timeout.min(MAX_STALE_TIMEOUT_MS),
         level: c
             .get("stale_level")
             .and_then(|v| v.as_str())
@@ -411,6 +431,26 @@ mod tests {
             "group_id": uuid::Uuid::new_v4()
         }));
         assert!(off.is_none(), "缺省 0 = 不检测");
+    }
+
+    #[test]
+    fn stale_timeout_clamped_to_cap() {
+        // M-3：超大 stale_timeout_ms 钳制——u64::MAX 会让 Instant+Duration 溢出 panic
+        let cfg = serde_json::json!({
+            "south_node_id": uuid::Uuid::new_v4(),
+            "group_id": uuid::Uuid::new_v4(),
+            "stale_timeout_ms": u64::MAX
+        });
+        let s = parse_stale_detection(&cfg).expect("non-zero timeout must parse");
+        assert_eq!(s.timeout_ms, MAX_STALE_TIMEOUT_MS);
+        // 正常值不受影响
+        let cfg = serde_json::json!({
+            "south_node_id": uuid::Uuid::new_v4(),
+            "group_id": uuid::Uuid::new_v4(),
+            "stale_timeout_ms": 5000
+        });
+        let s = parse_stale_detection(&cfg).expect("normal timeout must parse");
+        assert_eq!(s.timeout_ms, 5000);
     }
 
     #[tokio::test]

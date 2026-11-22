@@ -68,6 +68,11 @@ fn register_builtin_plugins(mgr: &mut gateway_core::Manager) {
     mgr.register_south("iec104", Arc::new(Iec104Plugin::new()));
     mgr.register_south("modbus-tcp", Arc::new(ModbusTcpPlugin::new()));
     mgr.register_south("modbus-rtu", Arc::new(ModbusRtuPlugin::new()));
+    // D 级审计（2026-11-22）：opcua 此前只能 .so 动态加载，默认部署形态下不可用。
+    // 纳入 builtin（同 kafka 口径：默认构建为 stub——poll_group 恒为假零已由
+    // config_schema 的 [STUB] 标注声明；`--features opcua-client` 时注册的就是
+    // 完整客户端）。virb 保持 ffi-only（无 stub 形态，设计使然）。
+    mgr.register_south("opcua", Arc::new(plugin_opcua::OpcuaPlugin::new()));
     // 北向
     mgr.register_north("mqtt", Arc::new(MqttPlugin::new()));
     mgr.register_north("http", Arc::new(HttpPlugin::new()));

@@ -23,14 +23,37 @@ pub fn config_str(config: &PluginConfig, key: &str, default: &str) -> String {
 }
 
 pub fn config_schema() -> ConfigSchema {
+    // D 级审计（2026-11-22）：默认构建（未编 opcua-client）是 stub——poll_group 返回
+    // 恒为假零 UInt32(0)，此前无任何标注（静默假数据，违反 kafka/smtp 确立的诚实标注
+    // 模式）。标注挂在必填参数 endpoint_url 的描述上，前端配置表单必然可见。
+    let endpoint_desc = "OPCUA server endpoint url".to_string();
+    let endpoint_desc_zh = "OPCUA 服务器端点 URL".to_string();
+    let endpoint_desc_en = "OPCUA server endpoint url".to_string();
+    #[cfg(not(feature = "opcua-client"))]
+    let endpoint_desc = format!(
+        "[STUB] 当前构建为 stub，需 opcua-client feature 才真实采集：本构建可创建节点、\
+         校验点位地址，但 poll_group 返回恒为假零 0（非真实读数）。{endpoint_desc}"
+    );
+    #[cfg(not(feature = "opcua-client"))]
+    let endpoint_desc_zh = format!(
+        "[STUB] 当前构建为 stub，需 opcua-client feature 才真实采集：本构建可创建节点、\
+         校验点位地址，但 poll_group 返回恒为假零 0（非真实读数）。{endpoint_desc_zh}"
+    );
+    #[cfg(not(feature = "opcua-client"))]
+    let endpoint_desc_en = format!(
+        "[STUB] This build is a stub; the opcua-client feature is required for real reads. \
+         Nodes can be created and tag addresses validated, but poll_group always returns \
+         placeholder zeros (not real data). {endpoint_desc_en}"
+    );
+
     ConfigSchema::new()
         .param(ParamSchema {
             name: "endpoint_url".to_string(),
             name_zh: Some("端点 URL".to_string()),
             name_en: Some("Endpoint URL".to_string()),
-            description: Some("OPCUA server endpoint url".to_string()),
-            description_zh: Some("OPCUA 服务器端点 URL".to_string()),
-            description_en: Some("OPCUA server endpoint url".to_string()),
+            description: Some(endpoint_desc),
+            description_zh: Some(endpoint_desc_zh),
+            description_en: Some(endpoint_desc_en),
             attribute: ParamAttribute::Required,
             ty: ParamType::String,
             default: Some(serde_json::json!(DEFAULT_ENDPOINT)),

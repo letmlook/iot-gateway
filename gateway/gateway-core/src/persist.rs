@@ -1127,6 +1127,10 @@ impl Db {
             }
         }
         let conn = Connection::open(path)?;
+        // D 级审计（2026-11-22）：save_secret 路径收紧了权限，但启动主路径（Db::open）
+        // 漏了——首次创建的 data.db 从创建到第一次 save 之间是 0644，同机任意用户可读。
+        // 幂等收紧：已存在但偏宽的旧文件也一并收紧。
+        restrict_permissions(path);
         // 硬性顺序第 1 步：busy_timeout 先于检查设置
         conn.busy_timeout(std::time::Duration::from_millis(5000))?;
         // 硬性顺序第 2 步：完整性检查 + 按错误码分类
@@ -1479,6 +1483,11 @@ fn rule_extra_json(r: &crate::rules::Rule) -> Option<String> {
         extra_conditions: r.extra_conditions.clone(),
         logic: r.logic,
         clear_condition: r.clear_condition.clone(),
+    })
+    // 理论不可失败（RuleExtras 纯数据、无 String map key）：仍不静默吞错（backlog 入账项），
+    // 真发生时 warn 且存 NULL——旧行可加载，但 extra 丢失必须可观测
+    .inspect_err(|e| {
+        tracing::warn!(rule = %r.name, error = %e, "rule_extra_json serialize failed, extras dropped");
     })
     .ok()
 }
@@ -2480,6 +2489,68 @@ mod tests {
         assert_eq!(parsed.extra_conditions, with_extras.extra_conditions);
         assert_eq!(parsed.logic, with_extras.logic);
         assert_eq!(parsed.clear_condition, with_extras.clear_condition);
+
+        cleanup_all(&path);
+    }
+
+    /// 残差补测（backlog）：logic=Any 的 extras 规则经 extra 列 JSON 往返逐字段还原
+    #[tokio::test]
+    async fn rule_logic_any_round_trips_through_sqlite() {
+        use crate::rules::{CompareOp, Logic};
+        let _backup_guard = BACKUP_TEST_LOCK.lock().await;
+        let path = temp_db("rule-any-rt");
+
+        let rule = crate::rules::Rule {
+            id: "rany".to_string(),
+            name: "rule-any".to_string(),
+            enabled: true,
+            source: crate::rules::RuleSource {
+                south_node_id: NodeId::new(),
+                group_id: GroupId::new(),
+                tag_name: "temperature".to_string(),
+            },
+            condition: crate::rules::RuleCondition {
+                op: CompareOp::Gt,
+                threshold: 80.0,
+            },
+            for_ms: 0,
+            clear_ms: 500,
+            extra_conditions: vec![
+                crate::rules::TagCondition {
+                    tag_name: "pressure".into(),
+                    op: CompareOp::Gt,
+                    threshold: 10.0,
+                },
+                crate::rules::TagCondition {
+                    tag_name: "vibration".into(),
+                    op: CompareOp::Lt,
+                    threshold: 3.5,
+                },
+            ],
+            logic: Logic::Any,
+            clear_condition: None,
+            action: crate::rules::RuleAction::Log {
+                message: "any-hit".to_string(),
+            },
+            tenant_id: "default".into(),
+        };
+
+        let snap = Snapshot {
+            version: SNAPSHOT_VERSION,
+            nodes: vec![],
+            rules: vec![rule.clone()],
+            ..Default::default()
+        };
+        save(&path, &snap).await.expect("save");
+        let loaded = load(&path).await.expect("load").expect("some");
+        let back = loaded
+            .rules
+            .iter()
+            .find(|r| r.id == "rany")
+            .expect("Any rule loaded");
+        assert_eq!(back, &rule, "logic=Any 规则应逐字段还原相等");
+        assert_eq!(back.logic, Logic::Any);
+        assert_eq!(back.extra_conditions.len(), 2);
 
         cleanup_all(&path);
     }

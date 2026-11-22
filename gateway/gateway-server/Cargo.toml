@@ -22,6 +22,7 @@ path = "src/bin/export-openapi.rs"
 [features]
 kafka-client = ["plugin-kafka/kafka-client"]
 smtp-client = ["plugin-smtp/smtp-client"]
+opcua-client = ["plugin-opcua/opcua-client"]
 
 [dependencies]
 gateway-sdk = { path = "../gateway-sdk" }
@@ -40,6 +41,7 @@ plugin-s7 = { path = "../gateway-plugins/plugin-s7" }
 plugin-bacnet = { path = "../gateway-plugins/plugin-bacnet" }
 plugin-ethernet-ip = { path = "../gateway-plugins/plugin-ethernet-ip" }
 plugin-iec104 = { path = "../gateway-plugins/plugin-iec104" }
+plugin-opcua = { path = "../gateway-plugins/plugin-opcua" }
 axum = { version = "0.7", features = ["json", "macros", "multipart", "tokio", "ws"] }
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 tokio = { version = "1", features = ["full"] }
