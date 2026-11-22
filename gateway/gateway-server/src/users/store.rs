@@ -798,7 +798,7 @@ impl UserStore {
             .filter(|s| !s.is_empty());
         let role_str = role.map(|r| r.as_str().to_string());
         let tenant_id = tenant_id.map(|s| s.to_string());
-        tokio::task::spawn_blocking(move || {
+        let old_token: Option<String> = tokio::task::spawn_blocking(move || {
             db.with(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT id, username, password_hash, role, token, tenant_id, created_at, updated_at FROM users WHERE id = ?1",
@@ -822,8 +822,12 @@ impl UserStore {
                 let new_tenant = tenant_id.as_deref().unwrap_or(current.tenant_id.as_str());
                 let now = now_iso();
 
-                // 变更租户时必须使旧 token 失效（强制重新登录）
-                let token_changed = tenant_id.as_ref().is_some_and(|t| *t != current.tenant_id);
+                // 会话授权维度变更（改角色 / 改租户）必须使旧 token 立即失效（强制重新登录）：
+                // DB 置空 token 列，并在函数尾部移除内存 Session 条目（auth_of 只读内存
+                // 缓存不回读 DB，漏掉内存清理则降权/改租户对存量会话不生效）。
+                // 仅改 username 是显示名变更，不作废会话。
+                let token_changed = role_str.as_deref().is_some_and(|r| r != current.role.as_str())
+                    || tenant_id.as_ref().is_some_and(|t| *t != current.tenant_id);
                 let sql = if token_changed {
                     "UPDATE users SET username = ?1, role = ?2, tenant_id = ?3, token = NULL, token_expiry = NULL, updated_at = ?4 WHERE id = ?5"
                 } else {
@@ -833,12 +837,20 @@ impl UserStore {
                     sql,
                     params![new_username, new_role, new_tenant, &now, &id_clone],
                 )?;
-                Ok(())
+                // 仅授权维度变更时上交旧 token（供外层清内存）；改名不上交、不清会话
+                Ok(if token_changed { current.token } else { None })
             })
             .map_err(err_string)
         })
         .await
         .map_err(|e| e.to_string())??;
+        if let Some(t) = old_token {
+            if !t.is_empty() {
+                self.tokens_write(|tokens| {
+                    tokens.remove(&t);
+                });
+            }
+        }
         self.get(&id)
             .await
             .and_then(|o| o.ok_or_else(|| "user not found".into()))
@@ -1409,6 +1421,65 @@ mod tests {
         // 删除用户：会话随之消失
         store.delete(&user.id).await.expect("delete");
         assert_eq!(store.role_of(&t4), None);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------- 改角色 / 改租户：存量会话立即作废（降权立即生效） ----------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn role_or_tenant_change_invalidates_existing_session() {
+        let dir = tmp_dir("update-invalidate");
+        let path = dir.join("data.db");
+        let store = UserStore::open(open_db(&path), 3_600).expect("open");
+        let user = store
+            .create("carol", "pw-123456", UserRole::Operator, "default")
+            .await
+            .expect("create");
+
+        // 改角色（降权 Operator → Viewer）：旧 token 内存与 DB 一并失效
+        let t1 = store.login("carol", "pw-123456").await.expect("login1").0;
+        assert_eq!(store.role_of(&t1), Some(UserRole::Operator));
+        store
+            .update_simple(&user.id, None, Some(UserRole::Viewer), None)
+            .await
+            .expect("update role");
+        assert_eq!(
+            store.role_of(&t1),
+            None,
+            "改角色后旧会话必须立即失效（auth_of 不回读 DB，内存条目必须移除）"
+        );
+        let (db_token, db_expiry): (Option<String>, Option<i64>) = Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT token, token_expiry FROM users WHERE username = 'carol'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(db_token, None, "DB token 列同步置空");
+        assert_eq!(db_expiry, None);
+
+        // 改租户：同样立即失效（此前 DB 置空了但内存条目残留，租户隔离被绕过）
+        let t2 = store.login("carol", "pw-123456").await.expect("login2").0;
+        store
+            .update_simple(&user.id, None, None, Some("tenant-b"))
+            .await
+            .expect("update tenant");
+        assert_eq!(store.role_of(&t2), None, "改租户后旧会话必须立即失效");
+
+        // 仅改 username：不作废会话（显示名变更非授权维度）
+        let t3 = store.login("carol", "pw-123456").await.expect("login3").0;
+        store
+            .update_simple(&user.id, Some("carol2"), None, None)
+            .await
+            .expect("rename");
+        assert_eq!(
+            store.role_of(&t3),
+            Some(UserRole::Viewer),
+            "仅改名不影响存量会话"
+        );
 
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
